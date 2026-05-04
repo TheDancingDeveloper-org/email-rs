@@ -21,7 +21,7 @@ steps:
 
   # ── Build static Linux binary (musl — no glibc dependency) ───────────────────
   - name: build-binary
-    image: rust:1.85-alpine
+    image: rust:1.86-alpine
     depends_on: [build-frontend]
     commands:
       - apk add --no-cache musl-dev build-base

@@ -10,10 +10,6 @@
 # Silent install:    msiexec /i email-rs-<ver>-installer.msi /qn
 # Silent uninstall:  msiexec /x {D9E7F2A4-8B1C-4E3D-9F5A-6C2D8E4F1B9A} /qn
 when:
-  - event: push
-    branch: main
-  - event: tag
-    ref: refs/tags/v*
   - event: manual
 
 labels:
