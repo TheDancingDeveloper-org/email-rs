@@ -175,9 +175,11 @@ fn strip_snap_ld_path() {
         .env("_EMAIL_RS_REEXEC", "1")
         // Disable DMA-BUF renderer — causes blank WebKitGTK windows on many setups.
         .env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
-        // Disable GPU compositing layer — WebKit 2.48+ on Wayland can load pages
-        // successfully (API calls work) but render nothing without this.
+        // Disable GPU compositing — WebKit 2.48+ on Wayland renders nothing without this.
         .env("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
+        // WebKit 2.52+ sandbox blocks the render process from accessing the display,
+        // causing a blank window.
+        .env("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1")
         .exec();
     // exec() only returns on error.
     eprintln!("warning: re-exec failed: {err}");
