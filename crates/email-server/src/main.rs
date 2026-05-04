@@ -170,12 +170,11 @@ fn strip_snap_ld_path() {
         .env("LD_LIBRARY_PATH", &cleaned)
         .env("LD_PRELOAD", system_pthread)
         .env("_EMAIL_RS_REEXEC", "1")
-        // Disable DMA-BUF renderer — causes blank WebKitGTK windows on many
-        // GPU/driver combos on Ubuntu 22.04+.
+        // Disable DMA-BUF renderer — causes blank WebKitGTK windows on many setups.
         .env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
-        // Force XWayland — native Wayland backend has a compositing bug that
-        // causes WebKitGTK to load pages (API calls succeed) but render nothing.
-        .env("GDK_BACKEND", "x11")
+        // Disable GPU compositing layer — WebKit 2.48+ on Wayland can load pages
+        // successfully (API calls work) but render nothing without this.
+        .env("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
         .exec();
     // exec() only returns on error.
     eprintln!("warning: re-exec failed: {err}");
@@ -183,57 +182,60 @@ fn strip_snap_ld_path() {
 
 #[cfg(target_os = "linux")]
 fn run_desktop_linux(port: u16) -> anyhow::Result<()> {
-    use std::time::{Duration, Instant};
-    use tao::{
-        dpi::LogicalSize,
-        event::{Event, WindowEvent},
-        event_loop::{ControlFlow, EventLoop},
-        window::WindowBuilder,
-    };
-    use wry::{WebContext, WebViewBuilder};
+    use gdk_pixbuf::PixbufLoader;
+    use gtk::glib;
+    use gtk::prelude::*;
+    use webkit2gtk::{WebContext, WebView, WebViewExt, WebsiteDataManager};
 
-    let url = format!("http://localhost:{port}");
+    gtk::init()?;
 
     wait_for_server_ready_linux(port);
 
-    let window_icon = {
-        let img = image::load_from_memory(include_bytes!("../icons/mail_32.png"))
-            .expect("valid mail_32.png")
-            .to_rgba8();
-        let (w, h) = img.dimensions();
-        tao::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+    let url = format!("http://localhost:{port}");
+
+    // Build a WebContext with a per-user data directory.
+    let data_dir = {
+        let base = std::env::var("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+            });
+        base.join("email-rs/webview")
     };
-
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("email-rs")
-        .with_window_icon(window_icon)
-        .with_inner_size(LogicalSize::new(1280u32, 800u32))
-        .with_min_inner_size(LogicalSize::new(800u32, 600u32))
-        .build(&event_loop)?;
-
-    let data_dir = webview_data_dir_linux();
     let _ = std::fs::create_dir_all(&data_dir);
-    let mut web_context = WebContext::new(Some(data_dir));
 
-    let _webview = WebViewBuilder::with_web_context(&mut web_context)
-        .with_url(&url)
-        .with_on_page_load_handler(|_event, url| {
-            tracing::debug!("webview load: {url}");
-        })
-        .build(&window)?;
+    let data_manager = WebsiteDataManager::builder()
+        .base_data_directory(data_dir.to_str().unwrap_or("/tmp"))
+        .build();
+    let ctx = WebContext::with_website_data_manager(&data_manager);
+    let webview = WebView::with_context(&ctx);
+    webview.load_uri(&url);
 
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50));
+    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    window.set_title("email-rs");
+    window.set_default_size(1280, 800);
 
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            *control_flow = ControlFlow::Exit;
-        }
-    })
+    // Set window icon from embedded PNG.
+    let icon_bytes = include_bytes!("../icons/mail_32.png");
+    let loader = PixbufLoader::with_type("png").expect("png loader");
+    loader.write(icon_bytes).ok();
+    loader.close().ok();
+    if let Some(pixbuf) = loader.pixbuf() {
+        window.set_icon(Some(&pixbuf));
+    }
+
+    window.add(&webview);
+    window.show_all();
+
+    window.connect_delete_event(|_, _| {
+        gtk::main_quit();
+        glib::Propagation::Proceed
+    });
+
+    gtk::main();
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -247,18 +249,6 @@ fn wait_for_server_ready_linux(port: u16) {
         std::thread::sleep(Duration::from_millis(100));
     }
     tracing::warn!("server did not become ready within 10s — opening window anyway");
-}
-
-#[cfg(target_os = "linux")]
-fn webview_data_dir_linux() -> std::path::PathBuf {
-    let data_home = std::env::var("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
-                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
-        });
-    data_home.join("email-rs").join("webview")
 }
 
 #[cfg(target_os = "windows")]
