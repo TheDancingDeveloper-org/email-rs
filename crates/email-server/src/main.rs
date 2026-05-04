@@ -28,6 +28,11 @@ use crate::state::AppState;
 use crate::sync::SyncOrchestrator;
 
 fn main() -> anyhow::Result<()> {
+    // Snap injects its own (old) libpthread via LD_LIBRARY_PATH, which conflicts
+    // with the system glibc. Strip snap paths and re-exec before any libs load.
+    #[cfg(target_os = "linux")]
+    strip_snap_ld_path();
+
     let _ = dotenvy::dotenv();
     let cfg = Config::from_env();
 
@@ -121,6 +126,43 @@ async fn run_server(cfg: Config) -> anyhow::Result<()> {
     info!("listening on {}", addr);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Strip `/snap/…` entries from LD_LIBRARY_PATH and re-exec if anything changed.
+/// Snap injects ancient glibc/libpthread from its base snap (core20/core22) which
+/// causes "undefined symbol: __libc_pthread_init, version GLIBC_PRIVATE" at startup.
+#[cfg(target_os = "linux")]
+fn strip_snap_ld_path() {
+    use std::os::unix::process::CommandExt;
+
+    let original = match std::env::var("LD_LIBRARY_PATH") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let filtered: Vec<&str> = original
+        .split(':')
+        .filter(|p| !p.starts_with("/snap/"))
+        .collect();
+    let cleaned = filtered.join(":");
+
+    if cleaned == original {
+        return;
+    }
+
+    // Re-exec with the sanitised environment. std::process::Command::exec()
+    // replaces the current process (no fork), so on success this never returns.
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let err = std::process::Command::new(&exe)
+        .args(&args)
+        .env("LD_LIBRARY_PATH", &cleaned)
+        .exec();
+    // exec() only returns on error — fall through and let the app try anyway.
+    eprintln!("warning: re-exec to strip snap LD_LIBRARY_PATH failed: {err}");
 }
 
 #[cfg(target_os = "linux")]
