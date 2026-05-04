@@ -108,23 +108,19 @@ sudo apt install pkg-config libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev libgli
 # Build the frontend (output goes to crates/email-server/static/)
 cd frontend && npm install && npm run build && cd ..
 
-# Build headless server only (no GTK/WebKit dependency)
-cargo build --release
-./target/release/email-server
-
-# Build with native desktop window (requires libwebkit2gtk-4.1-dev libgtk-3-dev)
+# Build and run
 cargo build --release --features desktop
 ./target/release/email-server
 ```
 
-When built with `--features desktop` and `$DISPLAY` or `$WAYLAND_DISPLAY` is set, the app opens as a native desktop window. Otherwise it runs as a background server — open **http://localhost:8585** in a browser.
+When `$DISPLAY` or `$WAYLAND_DISPLAY` is set the app opens as a native desktop window. Otherwise it runs as a background server — open **http://localhost:8585** in a browser.
 
 The database is created automatically at `~/.local/share/email-rs/email.db` on first run.
 
 **Dev mode (hot reload):**
 
 ```bash
-# Terminal 1 — backend (add --features desktop for native window)
+# Terminal 1 — backend
 cargo run -p email-server --features desktop
 
 # Terminal 2 — frontend with HMR
