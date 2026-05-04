@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::auth::oauth2::{OAuthConfig, StoredToken};
 use crate::error::{AppError, Result};
 use crate::state::AppState;
+use crate::sync::SyncOrchestrator;
 
 // ── Query parameter structs ───────────────────────────────────────────────────
 
@@ -161,6 +162,21 @@ async fn fetch_userinfo(access_token: &str) -> Result<GoogleUserInfo> {
     Ok(info)
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn spawn_sync(
+    pool: sqlx::SqlitePool,
+    event_tx: tokio::sync::broadcast::Sender<String>,
+    account_id: String,
+) {
+    tokio::spawn(async move {
+        let orchestrator = SyncOrchestrator::new(pool, event_tx);
+        if let Err(e) = orchestrator.sync_account(&account_id).await {
+            tracing::warn!("post-auth sync failed for account {}: {}", account_id, e);
+        }
+    });
+}
+
 // ── Route handlers ────────────────────────────────────────────────────────────
 
 /// GET /api/v1/auth/gmail/authorize
@@ -299,7 +315,14 @@ pub async fn gmail_callback(
         .await;
 
         match row {
-            Ok(_) => Redirect::to("/?oauth=success").into_response(),
+            Ok(_) => {
+                spawn_sync(
+                    app_state.pool.clone(),
+                    app_state.event_tx.clone(),
+                    account_id,
+                );
+                Redirect::to("/?oauth=success").into_response()
+            }
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
@@ -326,8 +349,8 @@ pub async fn gmail_callback(
         // Upsert: create a new account or update the existing one's tokens if
         // the same email+provider was already registered (e.g. after redeploy).
         let insert = sqlx::query(
-            r#"INSERT INTO accounts (id, name, email, provider_type, auth_type, oauth_token_json, token_expiry)
-               VALUES (?, ?, ?, 'gmail', 'oauth2', ?, ?)
+            r#"INSERT INTO accounts (id, name, email, provider_type, auth_type, oauth_token_json, token_expiry, sync_days_limit)
+               VALUES (?, ?, ?, 'gmail', 'oauth2', ?, ?, 30)
                ON CONFLICT(email, provider_type) DO UPDATE SET
                    name = excluded.name,
                    oauth_token_json = excluded.oauth_token_json,
@@ -342,7 +365,22 @@ pub async fn gmail_callback(
         .await;
 
         match insert {
-            Ok(_) => Redirect::to("/?oauth=success").into_response(),
+            Ok(_) => {
+                // Find the actual account ID (ON CONFLICT may have kept the original ID).
+                let actual_id: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM accounts WHERE email = ? AND provider_type = 'gmail'",
+                )
+                .bind(&email)
+                .fetch_optional(&app_state.pool)
+                .await
+                .ok()
+                .flatten();
+
+                if let Some(aid) = actual_id {
+                    spawn_sync(app_state.pool.clone(), app_state.event_tx.clone(), aid);
+                }
+                Redirect::to("/?oauth=success").into_response()
+            }
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
@@ -478,6 +516,11 @@ pub async fn microsoft_callback(
             _ => {}
         }
 
+        spawn_sync(
+            app_state.pool.clone(),
+            app_state.event_tx.clone(),
+            account_id,
+        );
         return Redirect::to("/?oauth=success").into_response();
     }
 
@@ -502,8 +545,8 @@ pub async fn microsoft_callback(
     // Upsert: create a new account or update the existing one's tokens if
     // the same email+provider was already registered (e.g. after redeploy).
     let insert = sqlx::query(
-        r#"INSERT INTO accounts (id, name, email, provider_type, auth_type, oauth_token_json, token_expiry)
-           VALUES (?, ?, ?, 'microsoft365', 'oauth2', ?, ?)
+        r#"INSERT INTO accounts (id, name, email, provider_type, auth_type, oauth_token_json, token_expiry, sync_days_limit)
+           VALUES (?, ?, ?, 'microsoft365', 'oauth2', ?, ?, 30)
            ON CONFLICT(email, provider_type) DO UPDATE SET
                name = excluded.name,
                oauth_token_json = excluded.oauth_token_json,
@@ -518,7 +561,21 @@ pub async fn microsoft_callback(
     .await;
 
     match insert {
-        Ok(_) => Redirect::to("/?oauth=success").into_response(),
+        Ok(_) => {
+            let actual_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM accounts WHERE email = ? AND provider_type = 'microsoft365'",
+            )
+            .bind(&email)
+            .fetch_optional(&app_state.pool)
+            .await
+            .ok()
+            .flatten();
+
+            if let Some(aid) = actual_id {
+                spawn_sync(app_state.pool.clone(), app_state.event_tx.clone(), aid);
+            }
+            Redirect::to("/?oauth=success").into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
