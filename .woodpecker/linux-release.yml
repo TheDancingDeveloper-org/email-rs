@@ -24,10 +24,10 @@ steps:
     image: rust:1.86-alpine
     depends_on: [build-frontend]
     commands:
-      - apk add --no-cache musl-dev build-base
+      - apk add --no-cache musl-dev build-base pkgconf openssl-dev openssl-libs-static
       - sed -i '/^\[patch\]/,/^$/d' Cargo.toml || true
       - sed -i '/^\[patch\]/,/^$/d' crates/email-server/Cargo.toml || true
-      - cargo build --release -p email-server
+      - OPENSSL_STATIC=1 cargo build --release -p email-server
       - strip target/release/email-server
       - cp target/release/email-server release/email-server
       - cd release && tar czf ../email-rs-linux-x86_64.tar.gz .
