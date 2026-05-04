@@ -38,7 +38,7 @@ steps:
     image: woodpeckerci/plugin-docker-buildx
     settings:
       registry: repo.indexarr.net
-      repo: indexarr/email-rs
+      repo: repo.indexarr.net/indexarr/email-rs
       tags:
         - latest
         - ${CI_COMMIT_TAG}
