@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y ca-certificates pkg-config libssl-dev &
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
-RUN cargo build --release -p email-server
+RUN CARGO_BUILD_JOBS=4 cargo build --release -p email-server
 
 # ── Stage 3: Runtime ─────────────────────────────────��─────────────────────────
 FROM debian:bookworm-slim
