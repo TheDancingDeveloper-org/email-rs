@@ -171,8 +171,11 @@ fn strip_snap_ld_path() {
         .env("LD_PRELOAD", system_pthread)
         .env("_EMAIL_RS_REEXEC", "1")
         // Disable DMA-BUF renderer — causes blank WebKitGTK windows on many
-        // GPU/driver combos (NVIDIA, some Intel/AMD setups on Ubuntu 22.04+).
+        // GPU/driver combos on Ubuntu 22.04+.
         .env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+        // Force XWayland — native Wayland backend has a compositing bug that
+        // causes WebKitGTK to load pages (API calls succeed) but render nothing.
+        .env("GDK_BACKEND", "x11")
         .exec();
     // exec() only returns on error.
     eprintln!("warning: re-exec failed: {err}");
