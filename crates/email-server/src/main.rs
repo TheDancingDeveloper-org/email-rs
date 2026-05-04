@@ -128,41 +128,51 @@ async fn run_server(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Strip `/snap/…` entries from LD_LIBRARY_PATH and re-exec if anything changed.
-/// Snap injects ancient glibc/libpthread from its base snap (core20/core22) which
-/// causes "undefined symbol: __libc_pthread_init, version GLIBC_PRIVATE" at startup.
+/// On first startup, re-exec with a clean environment to prevent snap's ancient
+/// glibc/libpthread (core20/core22) from being loaded via LD_LIBRARY_PATH or RPATH.
+/// Preloading the system libpthread overrides any snap version, regardless of source.
 #[cfg(target_os = "linux")]
 fn strip_snap_ld_path() {
     use std::os::unix::process::CommandExt;
 
-    let original = match std::env::var("LD_LIBRARY_PATH") {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-
-    let filtered: Vec<&str> = original
-        .split(':')
-        .filter(|p| !p.starts_with("/snap/"))
-        .collect();
-    let cleaned = filtered.join(":");
-
-    if cleaned == original {
+    // Guard against infinite re-exec loops.
+    if std::env::var("_EMAIL_RS_REEXEC").is_ok() {
         return;
     }
 
-    // Re-exec with the sanitised environment. std::process::Command::exec()
-    // replaces the current process (no fork), so on success this never returns.
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
+
+    // Strip snap paths from LD_LIBRARY_PATH.
+    let ld_path = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    let cleaned: String = ld_path
+        .split(':')
+        .filter(|p| !p.is_empty() && !p.starts_with("/snap/"))
+        .collect::<Vec<_>>()
+        .join(":");
+
+    // Preload the system libpthread stub so it wins over any snap version loaded
+    // via RPATH in a GTK/WebKit library.
+    let system_pthread = [
+        "/lib/x86_64-linux-gnu/libpthread.so.0",
+        "/usr/lib/x86_64-linux-gnu/libpthread.so.0",
+    ]
+    .iter()
+    .find(|p| std::path::Path::new(p).exists())
+    .copied()
+    .unwrap_or("");
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let err = std::process::Command::new(&exe)
         .args(&args)
         .env("LD_LIBRARY_PATH", &cleaned)
+        .env("LD_PRELOAD", system_pthread)
+        .env("_EMAIL_RS_REEXEC", "1")
         .exec();
-    // exec() only returns on error — fall through and let the app try anyway.
-    eprintln!("warning: re-exec to strip snap LD_LIBRARY_PATH failed: {err}");
+    // exec() only returns on error.
+    eprintln!("warning: re-exec failed: {err}");
 }
 
 #[cfg(target_os = "linux")]
