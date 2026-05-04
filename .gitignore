@@ -7,6 +7,9 @@
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
 .codesight/
 Email\ Client.zip
 design_handoff_email_client/
