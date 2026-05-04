@@ -63,7 +63,32 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+
+        let has_display = std::env::var("DISPLAY").is_ok()
+            || std::env::var("WAYLAND_DISPLAY").is_ok();
+        let headless = std::env::var("EMAIL_RS_HEADLESS").is_ok();
+
+        if has_display && !headless {
+            let port = cfg.port;
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+                if let Err(e) = rt.block_on(run_server(cfg)) {
+                    tracing::error!("server error: {e:#}");
+                }
+            });
+            run_desktop_linux(port)?;
+        } else {
+            tokio::runtime::Runtime::new()?.block_on(run_server(cfg))?;
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         tracing_subscriber::registry()
             .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -96,6 +121,83 @@ async fn run_server(cfg: Config) -> anyhow::Result<()> {
     info!("listening on {}", addr);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_desktop_linux(port: u16) -> anyhow::Result<()> {
+    use std::time::{Duration, Instant};
+    use tao::{
+        dpi::LogicalSize,
+        event::{Event, WindowEvent},
+        event_loop::{ControlFlow, EventLoop},
+        window::WindowBuilder,
+    };
+    use wry::{WebContext, WebViewBuilder};
+
+    let url = format!("http://localhost:{port}");
+
+    wait_for_server_ready_linux(port);
+
+    let window_icon = {
+        let img = image::load_from_memory(include_bytes!("../icons/mail_32.png"))
+            .expect("valid mail_32.png")
+            .to_rgba8();
+        let (w, h) = img.dimensions();
+        tao::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+    };
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("email-rs")
+        .with_window_icon(window_icon)
+        .with_inner_size(LogicalSize::new(1280u32, 800u32))
+        .with_min_inner_size(LogicalSize::new(800u32, 600u32))
+        .build(&event_loop)?;
+
+    let data_dir = webview_data_dir_linux();
+    let _ = std::fs::create_dir_all(&data_dir);
+    let mut web_context = WebContext::new(Some(data_dir));
+
+    let _webview = WebViewBuilder::with_web_context(&mut web_context)
+        .with_url(&url)
+        .build(&window)?;
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50));
+
+        if let Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } = event
+        {
+            *control_flow = ControlFlow::Exit;
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_server_ready_linux(port: u16) {
+    use std::time::Duration;
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    tracing::warn!("server did not become ready within 10s — opening window anyway");
+}
+
+#[cfg(target_os = "linux")]
+fn webview_data_dir_linux() -> std::path::PathBuf {
+    let data_home = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        });
+    data_home.join("email-rs").join("webview")
 }
 
 #[cfg(target_os = "windows")]

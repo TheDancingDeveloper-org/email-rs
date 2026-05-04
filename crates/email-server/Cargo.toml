@@ -38,6 +38,8 @@ dotenvy = "0.15"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = "0.19"
+
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 tao = "0.30"
 wry = "0.47"
 image = { version = "0.25", default-features = false, features = ["png"] }
