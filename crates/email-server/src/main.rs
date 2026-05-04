@@ -75,22 +75,25 @@ fn main() -> anyhow::Result<()> {
             .with(tracing_subscriber::fmt::layer())
             .init();
 
-        let has_display = std::env::var("DISPLAY").is_ok()
-            || std::env::var("WAYLAND_DISPLAY").is_ok();
-        let headless = std::env::var("EMAIL_RS_HEADLESS").is_ok();
+        #[cfg(feature = "desktop")]
+        {
+            let has_display = std::env::var("DISPLAY").is_ok()
+                || std::env::var("WAYLAND_DISPLAY").is_ok();
+            let headless = std::env::var("EMAIL_RS_HEADLESS").is_ok();
 
-        if has_display && !headless {
-            let port = cfg.port;
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-                if let Err(e) = rt.block_on(run_server(cfg)) {
-                    tracing::error!("server error: {e:#}");
-                }
-            });
-            run_desktop_linux(port)?;
-        } else {
-            tokio::runtime::Runtime::new()?.block_on(run_server(cfg))?;
+            if has_display && !headless {
+                let port = cfg.port;
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+                    if let Err(e) = rt.block_on(run_server(cfg)) {
+                        tracing::error!("server error: {e:#}");
+                    }
+                });
+                return run_desktop_linux(port);
+            }
         }
+
+        tokio::runtime::Runtime::new()?.block_on(run_server(cfg))?;
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -180,7 +183,7 @@ fn strip_snap_ld_path() {
     eprintln!("warning: re-exec failed: {err}");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "desktop"))]
 fn run_desktop_linux(port: u16) -> anyhow::Result<()> {
     use gdk_pixbuf::PixbufLoader;
     use gtk::glib;
@@ -238,7 +241,7 @@ fn run_desktop_linux(port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "desktop"))]
 fn wait_for_server_ready_linux(port: u16) {
     use std::time::Duration;
     let addr = format!("127.0.0.1:{port}");

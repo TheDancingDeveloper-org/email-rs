@@ -42,10 +42,13 @@ tao = "0.30"
 wry = "0.47"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[features]
+desktop = ["dep:gtk", "dep:webkit2gtk", "dep:gdk-pixbuf"]
+
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
-webkit2gtk = { version = "2.0", features = ["v2_40"] }
-gdk-pixbuf = "0.18"
+gtk = { version = "0.18", optional = true }
+webkit2gtk = { version = "2.0", features = ["v2_40"], optional = true }
+gdk-pixbuf = { version = "0.18", optional = true }
 
 [build-dependencies]
 winres = "0.1"

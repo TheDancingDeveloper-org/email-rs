@@ -17,8 +17,7 @@ steps:
   - name: build-frontend
     image: node:22-alpine
     commands:
-      - cd frontend && npm ci
-      - cd frontend && npx vite build --outDir ../release/static --emptyOutDir
+      - cd frontend && npm ci && npx vite build --outDir ../release/static --emptyOutDir
 
   # ── Build static Linux binary (musl — no glibc dependency) ───────────────────
   - name: build-binary
