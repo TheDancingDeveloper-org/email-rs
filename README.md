@@ -32,6 +32,11 @@ Built as a clean-UI replacement for Thunderbird/Outlook.
 - Command palette (Ctrl+K) — compose, navigate, search, toggle calendar
 - Unread count in browser tab title
 
+**Linux**
+- Native desktop app via WebKitGTK — opens as a window automatically when a display is available
+- Falls back to browser-only server mode when running headless (no `$DISPLAY`/`$WAYLAND_DISPLAY`)
+- Set `EMAIL_RS_HEADLESS=1` to force server-only mode on a machine with a display
+
 **Windows**
 - Native Windows app via WebView2 (single-instance, system tray, MSI installer)
 
@@ -64,10 +69,13 @@ All configuration is via environment variables (`.env` or `docker-compose.yml`).
 | `GOOGLE_CLIENT_SECRET` | Google OAuth2 client secret | — |
 | `MICROSOFT_CLIENT_ID` | Microsoft OAuth2 client ID | — |
 | `MICROSOFT_CLIENT_SECRET` | Microsoft OAuth2 client secret | — |
-| `DATABASE_URL` | SQLite connection string | `sqlite://email.db` |
+| `DATABASE_URL` | SQLite connection string | `~/.local/share/email-rs/email.db` (Linux) / `%LOCALAPPDATA%\email-rs\email.db` (Windows) |
 | `HOST` | Bind address | `127.0.0.1` |
 | `PORT` | Bind port | `8585` |
-| `FRONTEND_DIST` | Path to built frontend assets | `<exe dir>/static` |
+| `FRONTEND_DIST` | Path to built frontend assets | auto-detected (see below) |
+| `EMAIL_RS_HEADLESS` | Set to `1` to disable the desktop window on Linux | unset |
+
+**Frontend asset resolution order (Linux/macOS):** executable directory → `/usr/local/share/email-rs/static` → `/usr/share/email-rs/static` → `crates/email-server/static` relative to the working directory.
 
 ### Setting up OAuth credentials
 
@@ -86,17 +94,40 @@ Generic IMAP/SMTP accounts and app-password accounts do not require OAuth setup.
 
 ---
 
-## Running without Docker
+## Running natively on Linux
+
+**Install system dependencies (Ubuntu / Debian):**
 
 ```bash
-# Backend
-cargo run -p email-server
-
-# Frontend (separate terminal)
-cd frontend && npm ci && npm run dev
+sudo apt install pkg-config libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev libglib2.0-dev
 ```
 
-The backend serves the built frontend from `FRONTEND_DIST`. In dev mode the Caddy proxy in `docker-compose.yml` routes `/api/*` to the backend and everything else to the Vite dev server.
+**Build and run:**
+
+```bash
+# Build the frontend (output goes to crates/email-server/static/)
+cd frontend && npm install && npm run build && cd ..
+
+# Build and run the backend
+cargo build --release
+./target/release/email-server
+```
+
+When `$DISPLAY` or `$WAYLAND_DISPLAY` is set the app opens as a native desktop window. Otherwise it runs as a background server — open **http://localhost:8585** in a browser.
+
+The database is created automatically at `~/.local/share/email-rs/email.db` on first run.
+
+**Dev mode (hot reload):**
+
+```bash
+# Terminal 1 — backend
+cargo run -p email-server
+
+# Terminal 2 — frontend with HMR
+cd frontend && npm run dev
+```
+
+The Vite dev server runs on port 5173 and proxies `/api/*` to the backend.
 
 ---
 
@@ -114,6 +145,12 @@ docker run -d \
   -p 8585:3000 \
   email-rs
 ```
+
+---
+
+## Linux CI release build
+
+The Woodpecker pipeline (`.woodpecker.yml`) cross-compiles a static release binary and packages it with the built frontend assets. The binary auto-detects assets and data paths at runtime — no installation step required.
 
 ---
 
