@@ -8,7 +8,7 @@ COPY frontend/ ./
 RUN npx vite build --outDir /dist --emptyOutDir
 
 # ── Stage 2: Build Rust backend ────────────────────────────────────────────────
-FROM rust:1.82-slim AS rust-build
+FROM rust:1.85-slim AS rust-build
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
