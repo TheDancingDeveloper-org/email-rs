@@ -170,6 +170,9 @@ fn strip_snap_ld_path() {
         .env("LD_LIBRARY_PATH", &cleaned)
         .env("LD_PRELOAD", system_pthread)
         .env("_EMAIL_RS_REEXEC", "1")
+        // Disable DMA-BUF renderer — causes blank WebKitGTK windows on many
+        // GPU/driver combos (NVIDIA, some Intel/AMD setups on Ubuntu 22.04+).
+        .env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
         .exec();
     // exec() only returns on error.
     eprintln!("warning: re-exec failed: {err}");
@@ -212,6 +215,9 @@ fn run_desktop_linux(port: u16) -> anyhow::Result<()> {
 
     let _webview = WebViewBuilder::with_web_context(&mut web_context)
         .with_url(&url)
+        .with_on_page_load_handler(|_event, url| {
+            tracing::debug!("webview load: {url}");
+        })
         .build(&window)?;
 
     event_loop.run(move |event, _, control_flow| {
