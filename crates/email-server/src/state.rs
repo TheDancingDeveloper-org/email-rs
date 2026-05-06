@@ -10,8 +10,8 @@ pub struct AppState {
     pub pool: SqlitePool,
     /// True when the messages_fts FTS5 table was created successfully.
     pub has_fts: bool,
-    /// Pending OAuth2 state tokens (key = state string, value = ()).
-    pub oauth_states: Arc<Mutex<HashMap<String, ()>>>,
+    /// Pending OAuth2 state tokens. Key = state string, value = PKCE code_verifier (None for non-PKCE flows).
+    pub oauth_states: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// Broadcast channel for push-notifying connected SSE clients of sync events.
     pub event_tx: broadcast::Sender<String>,
 }

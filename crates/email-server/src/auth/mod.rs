@@ -25,10 +25,22 @@ pub fn microsoft_client_id() -> Option<String> {
         .or_else(|| std::env::var("MICROSOFT_CLIENT_ID").ok())
 }
 
-pub fn microsoft_client_secret() -> Option<String> {
-    option_env!("MICROSOFT_CLIENT_SECRET")
+pub fn yahoo_client_id() -> Option<String> {
+    option_env!("YAHOO_CLIENT_ID")
         .map(str::to_string)
-        .or_else(|| std::env::var("MICROSOFT_CLIENT_SECRET").ok())
+        .or_else(|| std::env::var("YAHOO_CLIENT_ID").ok())
+}
+
+pub fn aol_client_id() -> Option<String> {
+    option_env!("AOL_CLIENT_ID")
+        .map(str::to_string)
+        .or_else(|| std::env::var("AOL_CLIENT_ID").ok())
+}
+
+pub fn fastmail_client_id() -> Option<String> {
+    option_env!("FASTMAIL_CLIENT_ID")
+        .map(str::to_string)
+        .or_else(|| std::env::var("FASTMAIL_CLIENT_ID").ok())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
