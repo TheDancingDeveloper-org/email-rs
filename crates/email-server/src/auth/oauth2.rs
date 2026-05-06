@@ -102,51 +102,6 @@ impl OAuthConfig {
         }
     }
 
-    /// Yahoo Mail — PKCE public client, no secret required.
-    pub fn yahoo(client_id: String, redirect_uri: String) -> Self {
-        Self {
-            client_id,
-            client_secret: None,
-            auth_url: "https://api.login.yahoo.com/oauth2/request_auth".to_string(),
-            token_url: "https://api.login.yahoo.com/oauth2/get_token".to_string(),
-            redirect_uri,
-            scopes: vec!["mail-w".to_string(), "openid".to_string()],
-            use_pkce: true,
-            extra_auth_params: vec![],
-        }
-    }
-
-    /// AOL Mail — PKCE public client, no secret required.
-    pub fn aol(client_id: String, redirect_uri: String) -> Self {
-        Self {
-            client_id,
-            client_secret: None,
-            auth_url: "https://api.login.aol.com/oauth2/request_auth".to_string(),
-            token_url: "https://api.login.aol.com/oauth2/get_token".to_string(),
-            redirect_uri,
-            scopes: vec!["mail-w".to_string(), "openid".to_string()],
-            use_pkce: true,
-            extra_auth_params: vec![],
-        }
-    }
-
-    /// Fastmail — PKCE public client, no secret required.
-    pub fn fastmail(client_id: String, redirect_uri: String) -> Self {
-        Self {
-            client_id,
-            client_secret: None,
-            auth_url: "https://api.fastmail.com/oauth/authorize".to_string(),
-            token_url: "https://api.fastmail.com/oauth/refresh".to_string(),
-            redirect_uri,
-            scopes: vec![
-                "https://www.fastmail.com/dev/protocol-imap".to_string(),
-                "https://www.fastmail.com/dev/protocol-smtp".to_string(),
-            ],
-            use_pkce: true,
-            extra_auth_params: vec![],
-        }
-    }
-
     /// Build the authorization redirect URL.
     ///
     /// Returns `(url, code_verifier)`. For PKCE flows the verifier must be
