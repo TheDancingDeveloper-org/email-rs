@@ -112,7 +112,7 @@ mod tests {
         )
         .bind(id)
         .bind("T")
-        .bind("t@t.com")
+        .bind(format!("{id}@t.com"))
         .bind("generic_imap")
         .bind("password")
         .execute(pool)

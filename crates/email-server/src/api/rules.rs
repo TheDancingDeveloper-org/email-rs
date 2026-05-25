@@ -77,8 +77,8 @@ impl From<crate::rules::Rule> for RuleDto {
 // ── Request bodies ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ListRulesQuery {
+    #[serde(alias = "accountId")]
     pub account_id: String,
 }
 
@@ -238,4 +238,23 @@ pub async fn toggle_rule(
     svc.toggle_rule(&id).await?;
     let rule = svc.get_rule(&id).await?;
     Ok(Json(RuleDto::from(rule)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ListRulesQuery;
+
+    #[test]
+    fn list_rules_query_accepts_frontend_snake_case() {
+        let q: ListRulesQuery =
+            serde_json::from_value(serde_json::json!({ "account_id": "acc1" })).unwrap();
+        assert_eq!(q.account_id, "acc1");
+    }
+
+    #[test]
+    fn list_rules_query_accepts_camel_case_alias() {
+        let q: ListRulesQuery =
+            serde_json::from_value(serde_json::json!({ "accountId": "acc1" })).unwrap();
+        assert_eq!(q.account_id, "acc1");
+    }
 }

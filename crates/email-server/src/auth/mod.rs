@@ -25,7 +25,6 @@ pub fn microsoft_client_id() -> Option<String> {
         .or_else(|| std::env::var("MICROSOFT_CLIENT_ID").ok())
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthConfig {

@@ -468,7 +468,7 @@ mod tests {
         )
         .bind(account_id)
         .bind("Test")
-        .bind("t@test.com")
+        .bind(format!("{account_id}@test.com"))
         .bind("generic_imap")
         .bind("password")
         .execute(pool)
