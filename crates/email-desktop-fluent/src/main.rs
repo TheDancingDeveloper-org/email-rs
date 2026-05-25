@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context as _, Result};
+use chrono::{Datelike as _, Duration as ChronoDuration, Local};
 use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{Account, Folder, Label, Message};
@@ -14,7 +15,7 @@ use fluent_layout::{
     CommandPalette, DockPanel, DockPosition, ModalHost, PaletteEntry, Pane, PaneConstraints,
     PaneGroup, Workspace,
 };
-use fluent_primitives::{TokenInput, TokenInputSuggestion};
+use fluent_primitives::{DateTimePicker, DateTimeValue, TokenInput, TokenInputSuggestion};
 use gpui::{
     actions, div, prelude::*, px, Context, Entity, FontWeight, IntoElement, KeyBinding, Render,
     Window,
@@ -685,6 +686,7 @@ impl Render for MessageListPlaceholder {
 struct ReadingPanePlaceholder {
     state: NativeAppState,
     recipient_input: Entity<TokenInput>,
+    snooze_picker: Entity<DateTimePicker>,
 }
 
 impl ReadingPanePlaceholder {
@@ -697,16 +699,28 @@ impl ReadingPanePlaceholder {
                 .suggestions(suggestions.clone())
                 .allow_freeform(true)
         });
+        let default_snooze = default_snooze_value();
+        let snooze_picker = cx.new(move |_| {
+            DateTimePicker::new()
+                .placeholder("Select local time")
+                .default_value(default_snooze)
+        });
         Self {
             state,
             recipient_input,
+            snooze_picker,
         }
     }
 }
 
 impl Render for ReadingPanePlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        reading_placeholder(&self.state, self.recipient_input.clone(), cx)
+        reading_placeholder(
+            &self.state,
+            self.recipient_input.clone(),
+            self.snooze_picker.clone(),
+            cx,
+        )
     }
 }
 
@@ -945,6 +959,7 @@ fn empty_panel(label: &'static str, cx: &mut Context<MessageListPlaceholder>) ->
 fn reading_placeholder(
     state: &NativeAppState,
     recipient_input: Entity<TokenInput>,
+    snooze_picker: Entity<DateTimePicker>,
     cx: &mut Context<ReadingPanePlaceholder>,
 ) -> gpui::Div {
     let theme = cx.theme();
@@ -999,10 +1014,45 @@ fn reading_placeholder(
                 .p(px(12.0))
                 .rounded(px(6.0))
                 .bg(colors.neutral)
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(typography.caption.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_subtle)
+                        .child("Snooze until"),
+                )
+                .child(div().w(px(260.0)).child(snooze_picker)),
+        )
+        .child(
+            div()
+                .p(px(12.0))
+                .rounded(px(6.0))
+                .bg(colors.neutral)
                 .text_size(px(typography.body.size))
                 .text_color(colors.on_neutral)
                 .child("Compose, modals, command palette, calendar, and full reading pane behavior land in later phases."),
         )
+}
+
+fn default_snooze_value() -> DateTimeValue {
+    let tomorrow = Local::now() + ChronoDuration::days(1);
+    DateTimeValue::new(
+        tomorrow.year(),
+        tomorrow.month() as u8,
+        tomorrow.day() as u8,
+        9,
+        0,
+    )
+    .unwrap_or(DateTimeValue {
+        year: 2000,
+        month: 1,
+        day: 1,
+        hour: 9,
+        minute: 0,
+    })
 }
 
 fn recipient_suggestions(state: &NativeAppState) -> Vec<TokenInputSuggestion> {
