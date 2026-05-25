@@ -1,3 +1,8 @@
 [workspace]
-members = ["crates/email-client", "crates/email-server", "crates/email-types"]
+members = [
+    "crates/email-client",
+    "crates/email-desktop-fluent",
+    "crates/email-server",
+    "crates/email-types",
+]
 resolver = "2"

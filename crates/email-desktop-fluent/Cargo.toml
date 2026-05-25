@@ -1,0 +1,18 @@
+[package]
+name = "email-desktop-fluent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+dotenvy = "0.15"
+email-client = { path = "../email-client" }
+email-server = { path = "../email-server" }
+email-types = { path = "../email-types" }
+fluent-app = { path = "../../../FluentGUI/crates/fluent-app" }
+fluent-core = { path = "../../../FluentGUI/crates/fluent-core" }
+fluent-layout = { path = "../../../FluentGUI/crates/fluent-layout" }
+gpui = { path = "../../../FluentGUI/crates/gpui" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
