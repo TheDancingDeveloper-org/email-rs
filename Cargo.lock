@@ -1783,6 +1783,7 @@ dependencies = [
  "fluent-app",
  "fluent-core",
  "fluent-layout",
+ "fluent-primitives",
  "gpui",
  "tokio",
  "tracing",

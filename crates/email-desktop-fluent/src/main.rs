@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
@@ -14,6 +14,7 @@ use fluent_layout::{
     CommandPalette, DockPanel, DockPosition, ModalHost, PaletteEntry, Pane, PaneConstraints,
     PaneGroup, Workspace,
 };
+use fluent_primitives::{TokenInput, TokenInputSuggestion};
 use gpui::{
     actions, div, prelude::*, px, Context, Entity, FontWeight, IntoElement, KeyBinding, Render,
     Window,
@@ -671,18 +672,29 @@ impl Render for MessageListPlaceholder {
 #[derive(Clone)]
 struct ReadingPanePlaceholder {
     state: NativeAppState,
+    recipient_input: Entity<TokenInput>,
 }
 
 impl ReadingPanePlaceholder {
     fn new(cx: &mut Context<Self>, state: NativeAppState) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
-        Self { state }
+        let suggestions = recipient_suggestions(&state);
+        let recipient_input = cx.new(move |_| {
+            TokenInput::new()
+                .placeholder("Add recipient")
+                .suggestions(suggestions.clone())
+                .allow_freeform(true)
+        });
+        Self {
+            state,
+            recipient_input,
+        }
     }
 }
 
 impl Render for ReadingPanePlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        reading_placeholder(&self.state, cx)
+        reading_placeholder(&self.state, self.recipient_input.clone(), cx)
     }
 }
 
@@ -900,6 +912,7 @@ fn empty_panel(label: &'static str, cx: &mut Context<MessageListPlaceholder>) ->
 
 fn reading_placeholder(
     state: &NativeAppState,
+    recipient_input: Entity<TokenInput>,
     cx: &mut Context<ReadingPanePlaceholder>,
 ) -> gpui::Div {
     let theme = cx.theme();
@@ -937,8 +950,55 @@ fn reading_placeholder(
                 .p(px(12.0))
                 .rounded(px(6.0))
                 .bg(colors.neutral)
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(typography.caption.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_subtle)
+                        .child("To"),
+                )
+                .child(recipient_input)
+        )
+        .child(
+            div()
+                .p(px(12.0))
+                .rounded(px(6.0))
+                .bg(colors.neutral)
                 .text_size(px(typography.body.size))
                 .text_color(colors.on_neutral)
                 .child("Compose, modals, command palette, calendar, and full reading pane behavior land in later phases."),
         )
+}
+
+fn recipient_suggestions(state: &NativeAppState) -> Vec<TokenInputSuggestion> {
+    let mut seen = BTreeSet::new();
+    let mut suggestions = Vec::new();
+
+    for message in &state.messages {
+        let Some(email) = message.from_email.as_deref().map(str::trim) else {
+            continue;
+        };
+        if email.is_empty() || !seen.insert(email.to_lowercase()) {
+            continue;
+        }
+
+        let label = message
+            .from_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(email)
+            .to_string();
+
+        let mut suggestion = TokenInputSuggestion::new(email.to_string(), label.clone());
+        if label != email {
+            suggestion = suggestion.detail(email.to_string());
+        }
+        suggestions.push(suggestion);
+    }
+
+    suggestions
 }
