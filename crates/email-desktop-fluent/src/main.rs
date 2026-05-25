@@ -11,7 +11,8 @@ use email_types::{Account, Folder, Label, Message};
 use fluent_app::FluentApp;
 use fluent_core::{Theme, ThemeProvider as _};
 use fluent_layout::{
-    CommandPalette, DockPanel, DockPosition, ModalHost, PaletteEntry, Pane, Workspace,
+    CommandPalette, DockPanel, DockPosition, ModalHost, PaletteEntry, Pane, PaneConstraints,
+    PaneGroup, Workspace,
 };
 use gpui::{
     actions, div, prelude::*, px, Context, Entity, FontWeight, IntoElement, KeyBinding, Render,
@@ -75,13 +76,29 @@ fn main() -> Result<()> {
                     .content(sidebar.clone().into())
             });
 
-            let main_placeholder = cx.new({
+            let message_list = cx.new({
                 let state = initial_state.clone();
-                move |cx| MainPlaceholder::new(cx, state.clone())
+                move |cx| MessageListPlaceholder::new(cx, state.clone())
+            });
+            let reading_pane = cx.new({
+                let state = initial_state.clone();
+                move |cx| ReadingPanePlaceholder::new(cx, state.clone())
+            });
+            let mail_split = cx.new(|_| {
+                PaneGroup::horizontal()
+                    .first(message_list.clone().into())
+                    .second(reading_pane.clone().into())
+                    .ratio(0.42)
+                    .constraints(
+                        PaneConstraints::new()
+                            .first_min(320.0)
+                            .second_min(420.0)
+                            .first_max(Some(640.0)),
+                    )
             });
             let pane = cx.new(|cx| Pane::new(cx));
             pane.update(cx, |pane, cx| {
-                pane.set_content(main_placeholder.clone().into(), cx);
+                pane.set_content(mail_split.clone().into(), cx);
             });
 
             let status_bar = cx.new({
@@ -512,18 +529,18 @@ impl Render for SidebarPlaceholder {
 }
 
 #[derive(Clone)]
-struct MainPlaceholder {
+struct MessageListPlaceholder {
     state: NativeAppState,
 }
 
-impl MainPlaceholder {
+impl MessageListPlaceholder {
     fn new(cx: &mut Context<Self>, state: NativeAppState) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         Self { state }
     }
 }
 
-impl Render for MainPlaceholder {
+impl Render for MessageListPlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors.clone();
@@ -627,19 +644,31 @@ impl Render for MainPlaceholder {
                     ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .grid()
-                    .grid_cols(2)
-                    .child(
-                        div()
-                            .id("message-list-scroll")
-                            .overflow_y_scroll()
-                            .child(rows),
-                    )
-                    .child(reading_placeholder(&self.state, cx)),
+                div().flex_1().min_h_0().child(
+                    div()
+                        .id("message-list-scroll")
+                        .overflow_y_scroll()
+                        .child(rows),
+                ),
             )
+    }
+}
+
+#[derive(Clone)]
+struct ReadingPanePlaceholder {
+    state: NativeAppState,
+}
+
+impl ReadingPanePlaceholder {
+    fn new(cx: &mut Context<Self>, state: NativeAppState) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        Self { state }
+    }
+}
+
+impl Render for ReadingPanePlaceholder {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        reading_placeholder(&self.state, cx)
     }
 }
 
@@ -764,7 +793,7 @@ fn nav_item(
         .child(label)
 }
 
-fn empty_panel(label: &'static str, cx: &mut Context<MainPlaceholder>) -> gpui::Div {
+fn empty_panel(label: &'static str, cx: &mut Context<MessageListPlaceholder>) -> gpui::Div {
     let theme = cx.theme();
     div()
         .m(px(16.0))
@@ -776,7 +805,10 @@ fn empty_panel(label: &'static str, cx: &mut Context<MainPlaceholder>) -> gpui::
         .child(label)
 }
 
-fn reading_placeholder(state: &NativeAppState, cx: &mut Context<MainPlaceholder>) -> gpui::Div {
+fn reading_placeholder(
+    state: &NativeAppState,
+    cx: &mut Context<ReadingPanePlaceholder>,
+) -> gpui::Div {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let typography = theme.typography;
