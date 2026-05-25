@@ -8,12 +8,12 @@ use anyhow::{anyhow, Context as _, Result};
 use chrono::{Datelike as _, Duration as ChronoDuration, Local};
 use email_client::EmailClient;
 use email_server::{run_server, Config};
-use email_types::{Account, Folder, Label, Message};
+use email_types::{Account, Folder, FullMessage, Label, Message};
 use fluent_app::FluentApp;
 use fluent_core::{AsyncResource, Theme, ThemeProvider as _};
 use fluent_layout::{
-    CommandPalette, DockPanel, DockPosition, ModalHost, PaletteEntry, Pane, PaneConstraints,
-    PaneGroup, SelectableList, SelectableListItem, Workspace,
+    CommandPalette, DockPanel, DockPosition, DocumentViewer, ModalHost, PaletteEntry, Pane,
+    PaneConstraints, PaneGroup, RichDocument, SelectableList, SelectableListItem, Workspace,
 };
 use fluent_primitives::{DateTimePicker, DateTimeValue, TokenInput, TokenInputSuggestion};
 use gpui::{
@@ -253,7 +253,7 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
         })
         .map(|folder| folder.id.clone());
 
-    let messages = if let Some(folder_id) = &selected_folder {
+    let mut messages = if let Some(folder_id) = &selected_folder {
         client
             .list_folder_messages(folder_id)
             .await
@@ -262,9 +262,28 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
         Vec::new()
     };
 
+    let selected_message = messages.first().map(|message| message.id.clone());
+    let selected_full_message = if let Some(message_id) = selected_message.as_deref() {
+        match client.get_message(message_id).await {
+            Ok(full_message) => {
+                if let Some(summary) = messages
+                    .iter_mut()
+                    .find(|message| message.id == full_message.id)
+                {
+                    summary.is_read = full_message.is_read;
+                }
+                Some(full_message)
+            }
+            Err(err) => {
+                tracing::warn!("failed to load initial selected message {message_id}: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let accounts_resource = AsyncResource::ready(accounts.clone());
     let messages_resource = AsyncResource::ready(messages.clone());
-    let selected_message = messages.first().map(|message| message.id.clone());
 
     Ok(NativeAppState {
         accounts,
@@ -275,6 +294,7 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
         messages_resource,
         selected_folder,
         selected_message,
+        selected_full_message,
         ..NativeAppState::default()
     })
 }
@@ -351,6 +371,7 @@ struct NativeAppState {
     selected_folder: Option<String>,
     selected_label: Option<String>,
     selected_message: Option<String>,
+    selected_full_message: Option<FullMessage>,
     selected_event: Option<String>,
     messages: Vec<Message>,
     messages_resource: AsyncResource<Vec<Message>, String>,
@@ -374,6 +395,7 @@ impl Default for NativeAppState {
             selected_folder: None,
             selected_label: None,
             selected_message: None,
+            selected_full_message: None,
             selected_event: None,
             messages: Vec::new(),
             messages_resource: AsyncResource::new(),
@@ -1006,6 +1028,23 @@ fn reading_placeholder(
                         .text_size(px(typography.caption.size))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(colors.on_subtle)
+                        .child("Message body"),
+                )
+                .child(DocumentViewer::new(selected_document(state)).max_height(260.0)),
+        )
+        .child(
+            div()
+                .p(px(12.0))
+                .rounded(px(6.0))
+                .bg(colors.neutral)
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(typography.caption.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_subtle)
                         .child("Snooze until"),
                 )
                 .child(div().w(px(260.0)).child(snooze_picker)),
@@ -1019,6 +1058,41 @@ fn reading_placeholder(
                 .text_color(colors.on_neutral)
                 .child("Compose, modals, command palette, calendar, and full reading pane behavior land in later phases."),
         )
+}
+
+fn selected_document(state: &NativeAppState) -> RichDocument {
+    if let Some(message) = state.selected_full_message.as_ref() {
+        if let Some(body) = message.body.as_ref() {
+            if let Some(html) = body
+                .html_body
+                .as_ref()
+                .filter(|html| !html.trim().is_empty())
+            {
+                return RichDocument::from_html_fragment_lossy(html);
+            }
+            if let Some(text) = body
+                .text_body
+                .as_ref()
+                .filter(|text| !text.trim().is_empty())
+            {
+                return RichDocument::from_plain_text(text);
+            }
+        }
+        return RichDocument::from_plain_text(
+            message
+                .preview
+                .as_deref()
+                .unwrap_or("No message body was loaded."),
+        );
+    }
+
+    let preview = state
+        .selected_message
+        .as_deref()
+        .and_then(|id| state.messages.iter().find(|message| message.id == id))
+        .and_then(|message| message.preview.as_deref())
+        .unwrap_or("Select a message to load its body.");
+    RichDocument::from_plain_text(preview)
 }
 
 fn default_snooze_value() -> DateTimeValue {
