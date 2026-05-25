@@ -10,7 +10,7 @@ use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{Account, Folder, FullMessage, Label, Message};
 use fluent_app::{FluentApp, WindowTitle};
-use fluent_core::{AsyncResource, Theme, ThemeProvider as _};
+use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
 use fluent_layout::{
     CommandPalette, DockPanel, DockPosition, DocumentViewer, ModalHost, PaletteEntry, Pane,
     PaneConstraints, PaneGroup, RichDocument, SelectableList, SelectableListItem, Workspace,
@@ -297,6 +297,10 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
     };
     let accounts_resource = AsyncResource::ready(accounts.clone());
     let messages_resource = AsyncResource::ready(messages.clone());
+    let selected_message_resource = selected_full_message
+        .clone()
+        .map(AsyncResource::ready)
+        .unwrap_or_else(AsyncResource::new);
 
     Ok(NativeAppState {
         accounts,
@@ -308,6 +312,7 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
         selected_folder,
         selected_message,
         selected_full_message,
+        selected_message_resource,
         ..NativeAppState::default()
     })
 }
@@ -329,7 +334,6 @@ struct DensityTokens {
     level: u8,
     sidebar_row_height: f32,
     message_row_height: f32,
-    gap: f32,
 }
 
 impl DensityTokens {
@@ -340,7 +344,6 @@ impl DensityTokens {
             level,
             sidebar_row_height: 28.0 + relaxed * 2.0,
             message_row_height: 52.0 + relaxed * 4.0,
-            gap: 4.0 + relaxed,
         }
     }
 }
@@ -385,6 +388,7 @@ struct NativeAppState {
     selected_label: Option<String>,
     selected_message: Option<String>,
     selected_full_message: Option<FullMessage>,
+    selected_message_resource: AsyncResource<FullMessage, String>,
     selected_event: Option<String>,
     messages: Vec<Message>,
     messages_resource: AsyncResource<Vec<Message>, String>,
@@ -409,6 +413,7 @@ impl Default for NativeAppState {
             selected_label: None,
             selected_message: None,
             selected_full_message: None,
+            selected_message_resource: AsyncResource::new(),
             selected_event: None,
             messages: Vec::new(),
             messages_resource: AsyncResource::new(),
@@ -547,36 +552,23 @@ impl Render for SidebarPlaceholder {
         let typography = theme.typography;
         let density = state.density.clone();
 
-        let mut account_list = div().flex().flex_col().gap(px(density.gap));
+        let mut account_list = div().flex().flex_col().gap(px(2.0));
         for account in &state.accounts {
             let folders = state
                 .folders_by_account
                 .get(&account.id)
                 .cloned()
                 .unwrap_or_default();
-            account_list = account_list.child(
-                div()
-                    .min_h(px(density.sidebar_row_height))
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .px(px(10.0))
-                    .rounded(px(4.0))
-                    .bg(colors.neutral)
-                    .child(
-                        div()
-                            .text_size(px(typography.body.size))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors.on_neutral)
-                            .child(account.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(typography.caption.size))
-                            .text_color(colors.on_subtle)
-                            .child(format!("{} folders - {}", folders.len(), account.email)),
-                    ),
-            );
+            let account_unread = folders
+                .iter()
+                .map(|folder| folder.unread_count.max(0))
+                .sum();
+            account_list = account_list.child(account_tree_header(
+                account,
+                folders.len(),
+                account_unread,
+                cx,
+            ));
 
             for folder in folders.iter().filter(|folder| !folder.is_excluded) {
                 let folder_id = folder.id.clone();
@@ -589,81 +581,133 @@ impl Render for SidebarPlaceholder {
                         folder_label(folder),
                         selected,
                         Some(folder.unread_count),
+                        folder_indent(folder),
                         cx,
                     )
+                    .h(px(density.sidebar_row_height.max(28.0)))
                     .id(SharedString::from(format!("sidebar-folder-{folder_key}")))
                     .cursor_pointer()
                     .on_click(move |_, _, app_cx| {
-                        state_entity.update(app_cx, |state, cx| {
-                            if let Err(err) = select_folder_sync(state, &folder_id) {
-                                apply_navigation_error(state, err);
-                            }
-                            sync_window_title(state, cx);
-                            cx.notify();
-                        });
+                        start_message_collection_load(
+                            &state_entity,
+                            NativeMessageSource::Folder(folder_id.clone()),
+                            app_cx,
+                        );
                     }),
                 );
             }
         }
 
         if state.accounts.is_empty() {
-            account_list = account_list.child(
-                div()
-                    .p(px(10.0))
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(colors.stroke_neutral_subtle)
-                    .text_size(px(typography.body.size))
-                    .text_color(colors.on_subtle)
-                    .child("No accounts configured"),
-            );
+            account_list = account_list.child(empty_sidebar_text("No accounts configured", cx));
         }
+
+        let unread = total_unread_count(&state);
 
         div()
             .size_full()
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .p(px(12.0))
             .bg(colors.panel_bg)
-            .child(section_label("Views", cx))
-            .child(smart_folder_rows(&self.state, &state, cx))
-            .child(section_label("Accounts", cx))
-            .child(account_list)
-            .child(section_label("Labels", cx))
-            .child(label_rows(&self.state, &state, cx))
-            .child(section_label("Navigation", cx))
             .child(
-                nav_item("Mail", state.selected_view == SelectedView::Mail, cx)
-                    .id("nav-mail")
-                    .cursor_pointer()
-                    .on_click({
-                        let state_entity = self.state.clone();
-                        move |_, _, app_cx| {
-                            state_entity.update(app_cx, |state, cx| {
-                                state.selected_view = SelectedView::Mail;
-                                cx.notify();
-                            });
-                        }
-                    }),
+                div()
+                    .px(px(14.0))
+                    .py(px(12.0))
+                    .border_b_1()
+                    .border_color(colors.stroke_neutral_subtle)
+                    .child(
+                        div()
+                            .text_size(px(typography.subtitle.size))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.on_neutral)
+                            .child("Mail"),
+                    )
+                    .child(
+                        div()
+                            .pt(px(2.0))
+                            .text_size(px(typography.caption.size))
+                            .text_color(colors.on_subtle)
+                            .child(unread_status_text(unread)),
+                    )
+                    .child(
+                        div()
+                            .mt(px(10.0))
+                            .h(px(32.0))
+                            .px(px(10.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .bg(colors.accent)
+                            .hover({
+                                let accent_hover = colors.accent_hover;
+                                move |style| style.bg(accent_hover)
+                            })
+                            .text_size(px(typography.body.size))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.on_accent)
+                            .child("Compose"),
+                    ),
             )
             .child(
-                nav_item(
-                    "Calendar",
-                    state.selected_view == SelectedView::Calendar,
-                    cx,
-                )
-                .id("nav-calendar")
-                .cursor_pointer()
-                .on_click({
-                    let state_entity = self.state.clone();
-                    move |_, _, app_cx| {
-                        state_entity.update(app_cx, |state, cx| {
-                            state.selected_view = SelectedView::Calendar;
-                            cx.notify();
-                        });
-                    }
-                }),
+                div()
+                    .id("sidebar-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(8.0))
+                    .py(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(section_label("Smart folders", cx))
+                    .child(smart_folder_rows(&self.state, &state, cx))
+                    .child(section_label("Accounts", cx))
+                    .child(account_list)
+                    .child(section_label("Labels", cx))
+                    .child(label_rows(&self.state, &state, cx)),
+            )
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(10.0))
+                    .border_t_1()
+                    .border_color(colors.stroke_neutral_subtle)
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        nav_item("Mail", state.selected_view == SelectedView::Mail, cx)
+                            .id("nav-mail")
+                            .cursor_pointer()
+                            .on_click({
+                                let state_entity = self.state.clone();
+                                move |_, _, app_cx| {
+                                    state_entity.update(app_cx, |state, cx| {
+                                        state.selected_view = SelectedView::Mail;
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        nav_item(
+                            "Calendar",
+                            state.selected_view == SelectedView::Calendar,
+                            cx,
+                        )
+                        .id("nav-calendar")
+                        .cursor_pointer()
+                        .on_click({
+                            let state_entity = self.state.clone();
+                            move |_, _, app_cx| {
+                                state_entity.update(app_cx, |state, cx| {
+                                    state.selected_view = SelectedView::Calendar;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    ),
             )
     }
 }
@@ -693,6 +737,20 @@ impl Render for MessageListPlaceholder {
             .selected_message
             .clone()
             .or_else(|| state.messages.first().map(|message| message.id.clone()));
+        let mailbox_title = current_mailbox_title(&state);
+        let message_count = state.messages.len();
+        let unread_count = state
+            .messages
+            .iter()
+            .filter(|message| !message.is_read)
+            .count();
+        let mailbox_summary = if state.messages_resource.is_loading() {
+            format!("{message_count} cached messages - loading")
+        } else if let Some(error) = state.messages_resource.error() {
+            format!("{message_count} cached messages - {error}")
+        } else {
+            format!("{message_count} messages - {unread_count} unread")
+        };
 
         div()
             .size_full()
@@ -702,53 +760,61 @@ impl Render for MessageListPlaceholder {
             .child(
                 div()
                     .px(px(18.0))
-                    .py(px(14.0))
+                    .pt(px(14.0))
+                    .pb(px(12.0))
                     .border_b_1()
                     .border_color(colors.stroke_neutral_subtle)
                     .child(
                         div()
-                            .text_size(px(typography.title.size))
+                            .text_size(px(typography.subtitle.size))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.on_neutral)
-                            .child("Native mail skeleton"),
+                            .child(mailbox_title),
                     )
                     .child(
                         div()
                             .pt(px(4.0))
-                            .text_size(px(typography.body.size))
-                            .text_color(colors.on_subtle)
-                            .child(format!(
-                                "{}; {}; {}",
-                                resource_summary(&state.accounts_resource, "accounts"),
-                                resource_summary(&state.messages_resource, "messages"),
-                                state.api_base_url
-                            )),
+                            .text_size(px(typography.caption.size))
+                            .text_color(if state.messages_resource.is_error() {
+                                colors.status_error
+                            } else {
+                                colors.on_subtle
+                            })
+                            .child(mailbox_summary),
                     ),
+            )
+            .child(
+                div()
+                    .h(px(28.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .border_b_1()
+                    .border_color(colors.stroke_neutral_subtle)
+                    .bg(colors.panel_bg)
+                    .text_size(px(typography.caption.size))
+                    .text_color(colors.on_subtle)
+                    .child(div().w(px(112.0)).child("From"))
+                    .child(div().flex_1().min_w_0().child("Subject"))
+                    .child(div().w(px(90.0)).flex().justify_end().child("Date")),
             )
             .child(
                 div().flex_1().min_h_0().child(
                     SelectableList::new("native-message-list")
                         .items(message_items)
                         .empty_text("No messages loaded for the selected folder")
-                        .row_height(density.message_row_height.max(56.0))
+                        .row_height(density.message_row_height.max(58.0))
                         .on_select({
                             let state_entity = self.state.clone();
                             move |message_id, _, app_cx| {
-                                select_message_from_list(
-                                    &state_entity,
-                                    message_id.as_ref(),
-                                    app_cx,
-                                );
+                                start_full_message_load(&state_entity, message_id.as_ref(), app_cx);
                             }
                         })
                         .on_activate({
                             let state_entity = self.state.clone();
                             move |message_id, _, _, app_cx| {
-                                select_message_from_list(
-                                    &state_entity,
-                                    message_id.as_ref(),
-                                    app_cx,
-                                );
+                                start_full_message_load(&state_entity, message_id.as_ref(), app_cx);
                             }
                         })
                         .when_some(selected_message, |list, selected| list.selected(selected)),
@@ -825,6 +891,15 @@ impl Render for StatusBar {
             .clone()
             .unwrap_or_else(|| "Axum in-process server ready".to_string());
         let unread = total_unread_count(&state);
+        let body_status = if state.selected_message_resource.is_loading() {
+            "body loading".to_string()
+        } else if state.selected_message_resource.is_error() {
+            "body error".to_string()
+        } else if state.selected_message_resource.is_ready() {
+            "body ready".to_string()
+        } else {
+            "body idle".to_string()
+        };
 
         div()
             .h(px(28.0))
@@ -841,9 +916,10 @@ impl Render for StatusBar {
                 colors.on_subtle
             })
             .child(format!(
-                "{} | {} | {} | density {} | {:?}",
+                "{} | {} | {} | {} | density {} | {:?}",
                 status,
                 resource_summary(&state.messages_resource, "messages"),
+                body_status,
                 unread_status_text(unread),
                 state.density.level,
                 state.theme
@@ -903,101 +979,308 @@ fn sync_window_title(state: &NativeAppState, cx: &mut App) {
     WindowTitle::set_status(cx, native_window_status(state));
 }
 
-fn select_message_from_list(
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NativeMessageSource {
+    Folder(String),
+    Label(String),
+    SmartFolder(String),
+}
+
+impl NativeMessageSource {
+    fn apply_selection(&self, state: &mut NativeAppState) {
+        state.selected_view = SelectedView::Mail;
+        match self {
+            Self::Folder(folder_id) => {
+                state.selected_folder = Some(folder_id.clone());
+                state.selected_label = None;
+            }
+            Self::Label(label_id) => {
+                state.selected_folder = None;
+                state.selected_label = Some(label_id.clone());
+            }
+            Self::SmartFolder(kind) => {
+                state.selected_folder = Some(format!("smart:{kind}"));
+                state.selected_label = None;
+            }
+        }
+    }
+
+    fn load_context(&self) -> String {
+        match self {
+            Self::Folder(folder_id) => format!("list messages for {folder_id}"),
+            Self::Label(label_id) => format!("list messages for label {label_id}"),
+            Self::SmartFolder(kind) => format!("list smart folder {kind}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LoadedMessageCollection {
+    messages: Vec<Message>,
+    selected_full_message: Option<FullMessage>,
+}
+
+fn start_message_collection_load(
+    state_entity: &Entity<NativeAppState>,
+    source: NativeMessageSource,
+    app_cx: &mut App,
+) {
+    let load_source = source.clone();
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        let request = begin_message_collection_load(state, &source);
+        sync_window_title(state, cx);
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_message_collection(base_url, load_source) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_message_collection(state, request, loaded);
+                        }
+                        Err(err) => {
+                            reject_message_collection_load(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native message collection load: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn begin_message_collection_load(
+    state: &mut NativeAppState,
+    source: &NativeMessageSource,
+) -> ResourceRequest {
+    source.apply_selection(state);
+    state.messages.clear();
+    state.selected_message = None;
+    state.selected_full_message = None;
+    state.selected_message_resource.reset();
+    state.last_error = None;
+    state.messages_resource.begin_load()
+}
+
+fn load_message_collection(
+    base_url: String,
+    source: NativeMessageSource,
+) -> Result<LoadedMessageCollection> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let mut messages = match &source {
+            NativeMessageSource::Folder(folder_id) => client.list_folder_messages(folder_id).await,
+            NativeMessageSource::Label(label_id) => client.list_label_messages(label_id).await,
+            NativeMessageSource::SmartFolder(kind) => client.list_smart_messages(kind).await,
+        }
+        .with_context(|| source.load_context())?;
+
+        let selected_full_message = if let Some(message_id) = messages.first().map(|m| m.id.clone())
+        {
+            match client.get_message(&message_id).await {
+                Ok(full_message) => {
+                    update_summary_from_full_message(&mut messages, &full_message);
+                    Some(full_message)
+                }
+                Err(err) => {
+                    tracing::warn!("failed to load selected message {message_id}: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(LoadedMessageCollection {
+            messages,
+            selected_full_message,
+        })
+    })
+}
+
+fn apply_loaded_message_collection(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    loaded: LoadedMessageCollection,
+) -> bool {
+    if !state
+        .messages_resource
+        .resolve(request, loaded.messages.clone())
+    {
+        return false;
+    }
+
+    state.messages = loaded.messages;
+    state.selected_message = state.messages.first().map(|message| message.id.clone());
+    state.selected_full_message = None;
+    state.selected_message_resource.reset();
+
+    if let Some(full_message) = loaded.selected_full_message {
+        state.selected_message = Some(full_message.id.clone());
+        state.selected_message_resource = AsyncResource::ready(full_message.clone());
+        apply_full_message(state, full_message);
+    }
+
+    state.last_error = None;
+    true
+}
+
+fn reject_message_collection_load(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    err: anyhow::Error,
+) -> bool {
+    let message = err.to_string();
+    if !state.messages_resource.reject(request, message.clone()) {
+        return false;
+    }
+
+    state.messages.clear();
+    state.selected_message = None;
+    state.selected_full_message = None;
+    state.selected_message_resource.reset();
+    state.last_error = Some(message);
+    true
+}
+
+fn start_full_message_load(
     state_entity: &Entity<NativeAppState>,
     message_id: &str,
     app_cx: &mut App,
 ) {
     let message_id = message_id.to_string();
-    state_entity.update(app_cx, |state, cx| {
-        if let Err(err) = select_message_sync(state, &message_id) {
-            apply_navigation_error(state, err);
-        }
+    let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
+        let Some(request) = begin_full_message_load(state, &message_id) else {
+            return None;
+        };
         sync_window_title(state, cx);
         cx.notify();
-    });
-}
-
-fn select_folder_sync(state: &mut NativeAppState, folder_id: &str) -> Result<()> {
-    let client = EmailClient::new(&state.api_base_url)?;
-    let rt = tokio::runtime::Runtime::new()?;
-    let messages = rt
-        .block_on(client.list_folder_messages(folder_id))
-        .with_context(|| format!("list messages for {folder_id}"))?;
-
-    state.selected_view = SelectedView::Mail;
-    state.selected_folder = Some(folder_id.to_string());
-    state.selected_label = None;
-    apply_message_collection(state, &client, &rt, messages)
-}
-
-fn select_label_sync(state: &mut NativeAppState, label_id: &str) -> Result<()> {
-    let client = EmailClient::new(&state.api_base_url)?;
-    let rt = tokio::runtime::Runtime::new()?;
-    let messages = rt
-        .block_on(client.list_label_messages(label_id))
-        .with_context(|| format!("list messages for label {label_id}"))?;
-
-    state.selected_view = SelectedView::Mail;
-    state.selected_folder = None;
-    state.selected_label = Some(label_id.to_string());
-    apply_message_collection(state, &client, &rt, messages)
-}
-
-fn select_smart_folder_sync(state: &mut NativeAppState, kind: &str) -> Result<()> {
-    let client = EmailClient::new(&state.api_base_url)?;
-    let rt = tokio::runtime::Runtime::new()?;
-    let messages = rt
-        .block_on(client.list_smart_messages(kind))
-        .with_context(|| format!("list smart folder {kind}"))?;
-
-    state.selected_view = SelectedView::Mail;
-    state.selected_folder = Some(format!("smart:{kind}"));
-    state.selected_label = None;
-    apply_message_collection(state, &client, &rt, messages)
-}
-
-fn select_message_sync(state: &mut NativeAppState, message_id: &str) -> Result<()> {
-    let client = EmailClient::new(&state.api_base_url)?;
-    let rt = tokio::runtime::Runtime::new()?;
-    let full_message = rt
-        .block_on(client.get_message(message_id))
-        .with_context(|| format!("get message {message_id}"))?;
-
-    state.selected_message = Some(message_id.to_string());
-    apply_full_message(state, full_message);
-    state.last_error = None;
-    Ok(())
-}
-
-fn apply_message_collection(
-    state: &mut NativeAppState,
-    client: &EmailClient,
-    rt: &tokio::runtime::Runtime,
-    mut messages: Vec<Message>,
-) -> Result<()> {
-    let selected_message = messages.first().map(|message| message.id.clone());
-    let selected_full_message = if let Some(message_id) = selected_message.as_deref() {
-        match rt.block_on(client.get_message(message_id)) {
-            Ok(full_message) => Some(full_message),
-            Err(err) => {
-                tracing::warn!("failed to load selected message {message_id}: {err}");
-                None
-            }
-        }
-    } else {
-        None
+        Some((state.api_base_url.clone(), request))
+    }) else {
+        return;
     };
 
-    state.messages = std::mem::take(&mut messages);
-    state.messages_resource = AsyncResource::ready(state.messages.clone());
-    state.selected_message = selected_message;
-    state.selected_full_message = None;
-    if let Some(full_message) = selected_full_message {
-        apply_full_message(state, full_message);
+    let load_message_id = message_id.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_full_message(base_url, load_message_id) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(full_message) => {
+                            apply_loaded_full_message(state, request, &message_id, full_message);
+                        }
+                        Err(err) => {
+                            reject_full_message_load(state, request, &message_id, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native message load: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn begin_full_message_load(
+    state: &mut NativeAppState,
+    message_id: &str,
+) -> Option<ResourceRequest> {
+    if state.selected_full_message.as_ref().is_some_and(|message| {
+        message.id == message_id && state.selected_message_resource.is_ready()
+    }) {
+        return None;
     }
+
+    state.selected_message = Some(message_id.to_string());
+    state.selected_full_message = None;
     state.last_error = None;
-    Ok(())
+    Some(state.selected_message_resource.begin_load())
+}
+
+fn load_full_message(base_url: String, message_id: String) -> Result<FullMessage> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .get_message(&message_id)
+            .await
+            .with_context(|| format!("get message {message_id}"))
+    })
+}
+
+fn apply_loaded_full_message(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    message_id: &str,
+    full_message: FullMessage,
+) -> bool {
+    if state.selected_message.as_deref() != Some(message_id) {
+        return false;
+    }
+    if !state
+        .selected_message_resource
+        .resolve(request, full_message.clone())
+    {
+        return false;
+    }
+
+    apply_full_message(state, full_message);
+    state.last_error = None;
+    true
+}
+
+fn reject_full_message_load(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    message_id: &str,
+    err: anyhow::Error,
+) -> bool {
+    if state.selected_message.as_deref() != Some(message_id) {
+        return false;
+    }
+
+    let message = err.to_string();
+    if !state
+        .selected_message_resource
+        .reject(request, message.clone())
+    {
+        return false;
+    }
+
+    state.selected_full_message = None;
+    state.last_error = Some(message);
+    true
+}
+
+fn update_summary_from_full_message(messages: &mut [Message], full_message: &FullMessage) {
+    if let Some(summary) = messages
+        .iter_mut()
+        .find(|message| message.id == full_message.id)
+    {
+        summary.is_read = full_message.is_read;
+        summary.is_flagged = full_message.is_flagged;
+    }
 }
 
 fn apply_full_message(state: &mut NativeAppState, full_message: FullMessage) {
@@ -1006,19 +1289,12 @@ fn apply_full_message(state: &mut NativeAppState, full_message: FullMessage) {
         .iter()
         .find(|message| message.id == full_message.id)
         .is_some_and(|message| !message.is_read);
-    if let Some(summary) = state
-        .messages
-        .iter_mut()
-        .find(|message| message.id == full_message.id)
-    {
-        summary.is_read = full_message.is_read;
-        summary.is_flagged = full_message.is_flagged;
-    }
+    update_summary_from_full_message(&mut state.messages, &full_message);
     if was_unread && full_message.is_read {
         decrement_folder_unread(&mut state.folders_by_account, &full_message.folder_id);
     }
+    state.selected_message = Some(full_message.id.clone());
     state.selected_full_message = Some(full_message);
-    state.messages_resource = AsyncResource::ready(state.messages.clone());
 }
 
 fn decrement_folder_unread(
@@ -1036,15 +1312,6 @@ fn decrement_folder_unread(
     }
 }
 
-fn apply_navigation_error(state: &mut NativeAppState, err: anyhow::Error) {
-    let message = err.to_string();
-    state.messages.clear();
-    state.messages_resource = AsyncResource::failed(message.clone());
-    state.selected_message = None;
-    state.selected_full_message = None;
-    state.last_error = Some(message);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1060,6 +1327,50 @@ mod tests {
             total_count: unread_count.max(0),
             synced_at: None,
             is_excluded: false,
+        }
+    }
+
+    fn message(id: &str, folder_id: &str, is_read: bool) -> Message {
+        Message {
+            id: id.to_string(),
+            account_id: "account".to_string(),
+            folder_id: folder_id.to_string(),
+            uid: 1,
+            message_id: None,
+            thread_id: None,
+            subject: Some("Subject".to_string()),
+            from_name: None,
+            from_email: None,
+            to_json: None,
+            date: None,
+            is_read,
+            is_flagged: false,
+            is_draft: false,
+            has_attachments: false,
+            preview: None,
+            snoozed_until: None,
+        }
+    }
+
+    fn full_message(id: &str, folder_id: &str, is_read: bool, is_flagged: bool) -> FullMessage {
+        FullMessage {
+            id: id.to_string(),
+            account_id: "account".to_string(),
+            folder_id: folder_id.to_string(),
+            uid: 1,
+            message_id: None,
+            thread_id: None,
+            subject: Some("Subject".to_string()),
+            from_name: None,
+            from_email: None,
+            to: None,
+            date: None,
+            is_read,
+            is_flagged,
+            is_draft: false,
+            has_attachments: false,
+            preview: None,
+            body: None,
         }
     }
 
@@ -1090,52 +1401,105 @@ mod tests {
         state
             .folders_by_account
             .insert("account".to_string(), vec![folder("inbox", 1)]);
-        state.messages.push(Message {
-            id: "message".to_string(),
-            account_id: "account".to_string(),
-            folder_id: "inbox".to_string(),
-            uid: 1,
-            message_id: None,
-            thread_id: None,
-            subject: Some("Subject".to_string()),
-            from_name: None,
-            from_email: None,
-            to_json: None,
-            date: None,
-            is_read: false,
-            is_flagged: false,
-            is_draft: false,
-            has_attachments: false,
-            preview: None,
-            snoozed_until: None,
-        });
+        state.messages.push(message("message", "inbox", false));
 
-        apply_full_message(
-            &mut state,
-            FullMessage {
-                id: "message".to_string(),
-                account_id: "account".to_string(),
-                folder_id: "inbox".to_string(),
-                uid: 1,
-                message_id: None,
-                thread_id: None,
-                subject: Some("Subject".to_string()),
-                from_name: None,
-                from_email: None,
-                to: None,
-                date: None,
-                is_read: true,
-                is_flagged: true,
-                is_draft: false,
-                has_attachments: false,
-                preview: None,
-                body: None,
-            },
-        );
+        apply_full_message(&mut state, full_message("message", "inbox", true, true));
 
         assert!(state.messages[0].is_read);
         assert!(state.messages[0].is_flagged);
         assert_eq!(total_unread_count(&state), 0);
+    }
+
+    #[test]
+    fn beginning_collection_load_sets_route_and_loading_state() {
+        let mut state = NativeAppState::default();
+        state.messages.push(message("old", "inbox", false));
+        state.selected_message = Some("old".to_string());
+        state.selected_full_message = Some(full_message("old", "inbox", false, false));
+
+        let request = begin_message_collection_load(
+            &mut state,
+            &NativeMessageSource::Label("label-a".to_string()),
+        );
+
+        assert_eq!(state.selected_view, SelectedView::Mail);
+        assert_eq!(state.selected_folder, None);
+        assert_eq!(state.selected_label.as_deref(), Some("label-a"));
+        assert!(state.messages.is_empty());
+        assert_eq!(state.selected_message, None);
+        assert!(state.selected_full_message.is_none());
+        assert!(state.selected_message_resource.is_idle());
+        assert_eq!(state.messages_resource.current_request(), Some(request));
+        assert!(state.messages_resource.is_loading());
+    }
+
+    #[test]
+    fn stale_collection_load_is_ignored() {
+        let mut state = NativeAppState::default();
+        let stale = begin_message_collection_load(
+            &mut state,
+            &NativeMessageSource::Folder("inbox".to_string()),
+        );
+        let current = begin_message_collection_load(
+            &mut state,
+            &NativeMessageSource::Folder("archive".to_string()),
+        );
+
+        let loaded = LoadedMessageCollection {
+            messages: vec![message("stale", "inbox", false)],
+            selected_full_message: None,
+        };
+
+        assert!(!apply_loaded_message_collection(&mut state, stale, loaded));
+        assert_eq!(state.selected_folder.as_deref(), Some("archive"));
+        assert!(state.messages.is_empty());
+        assert_eq!(state.messages_resource.current_request(), Some(current));
+        assert!(state.messages_resource.is_loading());
+    }
+
+    #[test]
+    fn current_collection_load_applies_first_full_message() {
+        let mut state = NativeAppState::default();
+        state
+            .folders_by_account
+            .insert("account".to_string(), vec![folder("inbox", 1)]);
+        let request = begin_message_collection_load(
+            &mut state,
+            &NativeMessageSource::Folder("inbox".to_string()),
+        );
+        let loaded = LoadedMessageCollection {
+            messages: vec![message("message", "inbox", false)],
+            selected_full_message: Some(full_message("message", "inbox", true, true)),
+        };
+
+        assert!(apply_loaded_message_collection(&mut state, request, loaded));
+        assert_eq!(state.selected_message.as_deref(), Some("message"));
+        assert!(state.selected_full_message.is_some());
+        assert!(state.selected_message_resource.is_ready());
+        assert!(state.messages[0].is_read);
+        assert!(state.messages[0].is_flagged);
+        assert_eq!(total_unread_count(&state), 0);
+    }
+
+    #[test]
+    fn stale_full_message_load_is_ignored() {
+        let mut state = NativeAppState::default();
+        let stale = begin_full_message_load(&mut state, "first").expect("first request");
+        let current = begin_full_message_load(&mut state, "second").expect("second request");
+
+        assert!(!apply_loaded_full_message(
+            &mut state,
+            stale,
+            "first",
+            full_message("first", "inbox", true, false),
+        ));
+        assert_eq!(state.selected_message.as_deref(), Some("second"));
+        assert_eq!(
+            state.selected_message_resource.current_request(),
+            Some(current)
+        );
+        assert!(state.selected_message_resource.is_loading());
+        assert!(state.selected_full_message.is_none());
     }
 }
 
@@ -1193,7 +1557,7 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
             .action(|_, cx| cx.dispatch_action(&SelectMailView)),
         PaletteEntry::new("view-calendar", "Go to Calendar")
             .group("Navigate")
-            .subtitle("Open the calendar placeholder")
+            .subtitle("Open the calendar workspace")
             .keyword("events")
             .keyword("schedule")
             .action(|_, cx| cx.dispatch_action(&SelectCalendarView)),
@@ -1238,11 +1602,79 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
 fn section_label(label: &'static str, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
     let theme = cx.theme();
     div()
-        .pt(px(4.0))
+        .px(px(8.0))
+        .pt(px(6.0))
+        .pb(px(2.0))
         .text_size(px(theme.typography.caption.size))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.colors.on_subtle)
         .child(label)
+}
+
+fn account_tree_header(
+    account: &Account,
+    folder_count: usize,
+    unread_count: i64,
+    cx: &mut Context<SidebarPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let summary = if unread_count > 0 {
+        format!("{folder_count} folders, {unread_count} unread")
+    } else {
+        format!("{folder_count} folders")
+    };
+
+    div()
+        .h(px(42.0))
+        .pl(px(8.0))
+        .pr(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .child(
+            div()
+                .w(px(10.0))
+                .text_size(px(typography.caption.size))
+                .text_color(colors.on_subtle)
+                .child("v"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(typography.body.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_neutral)
+                        .child(account.name.clone()),
+                )
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(typography.caption.size))
+                        .text_color(colors.on_subtle)
+                        .child(summary),
+                ),
+        )
+}
+
+fn empty_sidebar_text(message: &'static str, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .px(px(8.0))
+        .py(px(6.0))
+        .text_size(px(theme.typography.body.size))
+        .text_color(theme.colors.on_subtle)
+        .child(message)
 }
 
 fn smart_folder_rows(
@@ -1250,7 +1682,8 @@ fn smart_folder_rows(
     state: &NativeAppState,
     cx: &mut Context<SidebarPlaceholder>,
 ) -> gpui::Div {
-    let mut rows = div().flex().flex_col().gap(px(state.density.gap));
+    let mut rows = div().flex().flex_col().gap(px(1.0));
+    let unread = total_unread_count(state);
     for (kind, label) in [
         ("all", "All Inboxes"),
         ("unread", "Unread"),
@@ -1262,18 +1695,21 @@ fn smart_folder_rows(
         let kind = kind.to_string();
         let smart_key = kind.clone();
         let state_entity = state_entity.clone();
+        let count = if kind == "all" || kind == "unread" {
+            Some(unread)
+        } else {
+            None
+        };
         rows = rows.child(
-            sidebar_nav_row(label.to_string(), selected, None, cx)
+            sidebar_nav_row(label.to_string(), selected, count, 0, cx)
                 .id(SharedString::from(format!("smart-folder-{smart_key}")))
                 .cursor_pointer()
                 .on_click(move |_, _, app_cx| {
-                    state_entity.update(app_cx, |state, cx| {
-                        if let Err(err) = select_smart_folder_sync(state, &kind) {
-                            apply_navigation_error(state, err);
-                        }
-                        sync_window_title(state, cx);
-                        cx.notify();
-                    });
+                    start_message_collection_load(
+                        &state_entity,
+                        NativeMessageSource::SmartFolder(kind.clone()),
+                        app_cx,
+                    );
                 }),
         );
     }
@@ -1286,34 +1722,25 @@ fn label_rows(
     cx: &mut Context<SidebarPlaceholder>,
 ) -> gpui::Div {
     if state.labels.is_empty() {
-        let theme = cx.theme();
-        return div()
-            .p(px(10.0))
-            .rounded(px(4.0))
-            .bg(theme.colors.neutral)
-            .text_size(px(theme.typography.body.size))
-            .text_color(theme.colors.on_subtle)
-            .child("No labels loaded");
+        return empty_sidebar_text("No labels loaded", cx);
     }
 
-    let mut rows = div().flex().flex_col().gap(px(state.density.gap));
+    let mut rows = div().flex().flex_col().gap(px(1.0));
     for label in &state.labels {
         let label_id = label.id.clone();
         let label_key = label_id.clone();
         let selected = state.selected_label.as_deref() == Some(label.id.as_str());
         let state_entity = state_entity.clone();
         rows = rows.child(
-            sidebar_nav_row(label.name.clone(), selected, None, cx)
+            sidebar_nav_row(label.name.clone(), selected, None, 0, cx)
                 .id(SharedString::from(format!("label-{label_key}")))
                 .cursor_pointer()
                 .on_click(move |_, _, app_cx| {
-                    state_entity.update(app_cx, |state, cx| {
-                        if let Err(err) = select_label_sync(state, &label_id) {
-                            apply_navigation_error(state, err);
-                        }
-                        sync_window_title(state, cx);
-                        cx.notify();
-                    });
+                    start_message_collection_load(
+                        &state_entity,
+                        NativeMessageSource::Label(label_id.clone()),
+                        app_cx,
+                    );
                 }),
         );
     }
@@ -1324,47 +1751,67 @@ fn sidebar_nav_row(
     label: String,
     selected: bool,
     count: Option<i64>,
+    indent: usize,
     cx: &mut Context<SidebarPlaceholder>,
 ) -> gpui::Div {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let typography = theme.typography;
+    let left_padding = 8.0 + indent.min(4) as f32 * 14.0;
     let mut row = div()
-        .min_h(px(30.0))
-        .px(px(10.0))
+        .min_h(px(28.0))
+        .pl(px(left_padding))
+        .pr(px(8.0))
         .flex()
         .items_center()
         .justify_between()
-        .rounded(px(4.0))
+        .rounded(px(3.0))
         .bg(if selected {
-            colors.accent
+            colors.neutral_selected
         } else {
-            colors.neutral
+            colors.panel_bg
         })
         .text_size(px(typography.body.size))
-        .text_color(if selected {
-            colors.on_accent
-        } else {
-            colors.on_neutral
+        .text_color(colors.on_neutral)
+        .hover({
+            let hover = colors.neutral_hover;
+            let selected_bg = colors.neutral_selected;
+            move |style| style.bg(if selected { selected_bg } else { hover })
         })
-        .child(label);
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .child(
+                    div()
+                        .w(px(3.0))
+                        .h(px(18.0))
+                        .rounded(px(999.0))
+                        .bg(if selected {
+                            colors.accent
+                        } else {
+                            colors.panel_bg
+                        }),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(label),
+                ),
+        );
 
     if let Some(count) = count.filter(|count| *count > 0) {
         row = row.child(
             div()
-                .px(px(6.0))
-                .rounded(px(999.0))
-                .bg(if selected {
-                    colors.on_accent
-                } else {
-                    colors.neutral_hover
-                })
-                .text_size(px(10.0))
-                .text_color(if selected {
-                    colors.accent
-                } else {
-                    colors.on_subtle
-                })
+                .flex_none()
+                .min_w(px(18.0))
+                .text_size(px(typography.caption.size))
+                .text_color(colors.on_subtle)
                 .child(count.to_string()),
         );
     }
@@ -1373,11 +1820,21 @@ fn sidebar_nav_row(
 }
 
 fn folder_label(folder: &Folder) -> String {
-    if folder.full_path == folder.name {
+    if folder.full_path == folder.name || folder.full_path.trim().is_empty() {
         folder.name.clone()
     } else {
-        folder.full_path.clone()
+        folder
+            .full_path
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(folder.name.as_str())
+            .to_string()
     }
+}
+
+fn folder_indent(folder: &Folder) -> usize {
+    1 + folder.full_path.matches('/').count().min(3)
 }
 
 fn nav_item(
@@ -1388,21 +1845,34 @@ fn nav_item(
     let theme = cx.theme();
     let colors = theme.colors.clone();
     div()
-        .h(px(32.0))
-        .px(px(10.0))
+        .h(px(30.0))
+        .px(px(8.0))
         .flex()
         .items_center()
-        .rounded(px(4.0))
+        .gap(px(6.0))
+        .rounded(px(3.0))
         .bg(if selected {
-            colors.accent
+            colors.neutral_selected
         } else {
-            colors.neutral
+            colors.panel_bg
         })
-        .text_color(if selected {
-            colors.on_accent
-        } else {
-            colors.on_neutral
+        .hover({
+            let hover = colors.neutral_hover;
+            let selected_bg = colors.neutral_selected;
+            move |style| style.bg(if selected { selected_bg } else { hover })
         })
+        .text_color(colors.on_neutral)
+        .child(
+            div()
+                .w(px(3.0))
+                .h(px(18.0))
+                .rounded(px(999.0))
+                .bg(if selected {
+                    colors.accent
+                } else {
+                    colors.panel_bg
+                }),
+        )
         .child(label)
 }
 
@@ -1442,19 +1912,190 @@ fn message_list_items(messages: &[Message]) -> Vec<SelectableListItem> {
         .collect()
 }
 
+fn current_mailbox_title(state: &NativeAppState) -> String {
+    if state.selected_view == SelectedView::Calendar {
+        return "Calendar".to_string();
+    }
+
+    if let Some(label_id) = state.selected_label.as_deref() {
+        return state
+            .labels
+            .iter()
+            .find(|label| label.id == label_id)
+            .map(|label| label.name.clone())
+            .unwrap_or_else(|| "Label".to_string());
+    }
+
+    if let Some(folder_id) = state.selected_folder.as_deref() {
+        if let Some(kind) = folder_id.strip_prefix("smart:") {
+            return smart_folder_title(kind).to_string();
+        }
+
+        if let Some(folder) = state
+            .folders_by_account
+            .values()
+            .flat_map(|folders| folders.iter())
+            .find(|folder| folder.id == folder_id)
+        {
+            return folder_label(folder);
+        }
+    }
+
+    "Mail".to_string()
+}
+
+fn smart_folder_title(kind: &str) -> &'static str {
+    match kind {
+        "all" => "All Inboxes",
+        "unread" => "Unread",
+        "flagged" => "Flagged",
+        "snoozed" => "Snoozed",
+        _ => "Smart Folder",
+    }
+}
+
+fn selected_summary(state: &NativeAppState) -> Option<&Message> {
+    let selected_id = state.selected_message.as_deref()?;
+    state
+        .messages
+        .iter()
+        .find(|message| message.id == selected_id)
+}
+
+fn selected_subject(state: &NativeAppState) -> String {
+    state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| message.subject.clone())
+        .or_else(|| selected_summary(state).and_then(|message| message.subject.clone()))
+        .filter(|subject| !subject.trim().is_empty())
+        .unwrap_or_else(|| "(no subject)".to_string())
+}
+
+fn selected_sender(state: &NativeAppState) -> String {
+    state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| {
+            message
+                .from_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| message.from_email.clone())
+        })
+        .or_else(|| {
+            selected_summary(state).and_then(|message| {
+                message
+                    .from_name
+                    .clone()
+                    .filter(|name| !name.trim().is_empty())
+                    .or_else(|| message.from_email.clone())
+            })
+        })
+        .unwrap_or_else(|| "Unknown sender".to_string())
+}
+
+fn selected_date(state: &NativeAppState) -> Option<String> {
+    state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| message.date.clone())
+        .or_else(|| selected_summary(state).and_then(|message| message.date.clone()))
+        .filter(|date| !date.trim().is_empty())
+}
+
+fn reading_toolbar_button(
+    label: &'static str,
+    cx: &mut Context<ReadingPanePlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .h(px(28.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(theme.colors.stroke_neutral_subtle)
+        .text_size(px(theme.typography.caption.size))
+        .text_color(theme.colors.on_neutral)
+        .child(label)
+}
+
+fn reading_badge(label: &'static str, cx: &mut Context<ReadingPanePlaceholder>) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .h(px(24.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .rounded(px(999.0))
+        .bg(theme.colors.neutral)
+        .text_size(px(theme.typography.caption.size))
+        .text_color(theme.colors.on_subtle)
+        .child(label)
+}
+
 fn reading_placeholder(
     state: &NativeAppState,
-    recipient_input: Entity<TokenInput>,
+    _recipient_input: Entity<TokenInput>,
     snooze_picker: Entity<DateTimePicker>,
     cx: &mut Context<ReadingPanePlaceholder>,
 ) -> gpui::Div {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let typography = theme.typography;
-    let selected = state
-        .selected_message
-        .as_deref()
-        .unwrap_or("No selected message yet");
+    let selected_id = state.selected_message.clone();
+    let body_status = if state.selected_message_resource.is_loading() {
+        Some("Loading message body...".to_string())
+    } else {
+        state
+            .selected_message_resource
+            .error()
+            .map(|error| format!("Message body failed to load: {error}"))
+    };
+
+    if selected_id.is_none() {
+        return div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(colors.stroke_neutral_subtle)
+            .bg(colors.surface)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(320.0))
+                            .text_size(px(typography.body.size))
+                            .text_color(colors.on_subtle)
+                            .child("Select a message to read it."),
+                    ),
+            );
+    }
+
+    let subject = selected_subject(state);
+    let sender = selected_sender(state);
+    let date = selected_date(state).unwrap_or_else(|| "No date".to_string());
+    let summary = selected_summary(state);
+    let is_flagged = state
+        .selected_full_message
+        .as_ref()
+        .map(|message| message.is_flagged)
+        .or_else(|| summary.map(|message| message.is_flagged))
+        .unwrap_or(false);
+    let has_attachments = state
+        .selected_full_message
+        .as_ref()
+        .map(|message| message.has_attachments)
+        .or_else(|| summary.map(|message| message.has_attachments))
+        .unwrap_or(false);
 
     div()
         .size_full()
@@ -1462,81 +2103,77 @@ fn reading_placeholder(
         .flex_col()
         .border_l_1()
         .border_color(colors.stroke_neutral_subtle)
-        .p(px(18.0))
-        .gap(px(10.0))
+        .bg(colors.surface)
         .child(
             div()
-                .text_size(px(typography.subtitle.size))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors.on_neutral)
-                .child("Reading pane placeholder"),
-        )
-        .child(
-            div()
-                .text_size(px(typography.body.size))
-                .text_color(colors.on_subtle)
-                .child(selected.to_string()),
-        )
-        .child(
-            div()
-                .mt(px(10.0))
-                .p(px(12.0))
-                .rounded(px(6.0))
-                .bg(colors.neutral)
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
+                .px(px(20.0))
+                .py(px(14.0))
+                .border_b_1()
+                .border_color(colors.stroke_neutral_subtle)
                 .child(
                     div()
-                        .text_size(px(typography.caption.size))
+                        .text_size(px(typography.subtitle.size))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.on_subtle)
-                        .child("To"),
+                        .text_color(colors.on_neutral)
+                        .child(subject),
                 )
-                .child(recipient_input)
-        )
-        .child(
-            div()
-                .p(px(12.0))
-                .rounded(px(6.0))
-                .bg(colors.neutral)
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
                 .child(
                     div()
-                        .text_size(px(typography.caption.size))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.on_subtle)
-                        .child("Message body"),
+                        .pt(px(5.0))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(typography.body.size))
+                                .text_color(colors.on_subtle)
+                                .child(sender),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(typography.caption.size))
+                                .text_color(colors.on_subtle)
+                                .child(date),
+                        ),
                 )
-                .child(DocumentViewer::new(selected_document(state)).max_height(260.0)),
-        )
-        .child(
-            div()
-                .p(px(12.0))
-                .rounded(px(6.0))
-                .bg(colors.neutral)
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
                 .child(
                     div()
-                        .text_size(px(typography.caption.size))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.on_subtle)
-                        .child("Snooze until"),
-                )
-                .child(div().w(px(260.0)).child(snooze_picker)),
+                        .pt(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(reading_toolbar_button("Reply", cx))
+                        .child(reading_toolbar_button("Forward", cx))
+                        .child(reading_toolbar_button("Archive", cx))
+                        .child(reading_toolbar_button("Delete", cx))
+                        .child(reading_toolbar_button("Snooze", cx))
+                        .child(div().w(px(190.0)).child(snooze_picker))
+                        .when(is_flagged, |row| row.child(reading_badge("Flagged", cx)))
+                        .when(has_attachments, |row| {
+                            row.child(reading_badge("Attachment", cx))
+                        }),
+                ),
         )
+        .when_some(body_status, |pane, status| {
+            pane.child(
+                div()
+                    .mx(px(20.0))
+                    .mt(px(12.0))
+                    .p(px(8.0))
+                    .rounded(px(4.0))
+                    .bg(colors.neutral)
+                    .text_size(px(typography.caption.size))
+                    .text_color(colors.on_subtle)
+                    .child(status),
+            )
+        })
         .child(
             div()
-                .p(px(12.0))
-                .rounded(px(6.0))
-                .bg(colors.neutral)
-                .text_size(px(typography.body.size))
-                .text_color(colors.on_neutral)
-                .child("Compose, modals, command palette, calendar, and full reading pane behavior land in later phases."),
+                .flex_1()
+                .min_h_0()
+                .px(px(20.0))
+                .py(px(16.0))
+                .child(DocumentViewer::new(selected_document(state)).max_height(520.0)),
         )
 }
 
