@@ -13,16 +13,16 @@ use email_types::{Account, Folder, FullMessage, Label, Message, SyncEvent};
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
 use fluent_layout::{
-    CommandPalette, DockPanel, DockPosition, DocumentViewer, ModalHost, PaletteEntry, Pane,
-    PaneConstraints, PaneGroup, RichDocument, SelectableList, SelectableListItem, Workspace,
+    CommandPalette, ContextMenu, DockPanel, DockPosition, DocumentViewer, ModalHost, PaletteEntry,
+    Pane, PaneConstraints, PaneGroup, RichDocument, Workspace,
 };
 use fluent_primitives::{
     Button, ButtonAppearance, ButtonSize, DateTimePicker, DateTimeValue, IconButton, ProgressBar,
     Searchbox, TokenInput, TokenInputSuggestion,
 };
 use gpui::{
-    actions, div, prelude::*, px, App, Context, Entity, FontWeight, IntoElement, KeyBinding,
-    Render, SharedString, Window,
+    actions, div, prelude::*, px, svg, uniform_list, App, Context, Entity, FontWeight, IntoElement,
+    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Render, SharedString, Window,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -910,6 +910,7 @@ impl Render for EmailDesktopApp {
 struct SidebarPlaceholder {
     state: Entity<NativeAppState>,
     searchbox: Entity<Searchbox>,
+    context_menu: Option<Entity<ContextMenu>>,
 }
 
 impl SidebarPlaceholder {
@@ -935,7 +936,11 @@ impl SidebarPlaceholder {
                     })
             }
         });
-        Self { state, searchbox }
+        Self {
+            state,
+            searchbox,
+            context_menu: None,
+        }
     }
 }
 
@@ -969,15 +974,45 @@ impl Render for SidebarPlaceholder {
             for folder in folders.iter().filter(|folder| !folder.is_excluded) {
                 let folder_id = folder.id.clone();
                 let folder_key = folder_id.clone();
+                let folder_menu_id = folder_id.clone();
                 let state_entity = self.state.clone();
+                let menu_state = self.state.clone();
                 let selected = state.selected_folder.as_deref() == Some(folder.id.as_str())
                     && state.selected_label.is_none();
+                let folder_context_menu = cx.listener(
+                    move |sidebar: &mut SidebarPlaceholder, ev: &MouseDownEvent, _, app_cx| {
+                        let open_state = menu_state.clone();
+                        let open_folder = folder_menu_id.clone();
+                        let mark_state = menu_state.clone();
+                        let mark_folder = folder_menu_id.clone();
+                        let menu = app_cx.new(|_| {
+                            ContextMenu::build(ev.position)
+                                .action("Open", move |_, _, app_cx| {
+                                    start_message_collection_load(
+                                        &open_state,
+                                        NativeMessageSource::Folder(open_folder.clone()),
+                                        app_cx,
+                                    );
+                                })
+                                .action("Mark all read", move |_, _, app_cx| {
+                                    start_mark_folder_read(
+                                        &mark_state,
+                                        mark_folder.clone(),
+                                        app_cx,
+                                    );
+                                })
+                        });
+                        sidebar.context_menu = Some(menu);
+                        app_cx.notify();
+                    },
+                );
                 account_list = account_list.child(
                     sidebar_nav_row(
                         folder_label(folder),
                         selected,
                         Some(folder.unread_count),
                         folder_indent(folder),
+                        folder_icon(folder),
                         cx,
                     )
                     .h(px(density.sidebar_row_height.max(28.0)))
@@ -989,7 +1024,8 @@ impl Render for SidebarPlaceholder {
                             NativeMessageSource::Folder(folder_id.clone()),
                             app_cx,
                         );
-                    }),
+                    })
+                    .on_mouse_down(MouseButton::Right, folder_context_menu),
                 );
             }
         }
@@ -1000,7 +1036,7 @@ impl Render for SidebarPlaceholder {
 
         let unread = total_unread_count(&state);
 
-        div()
+        let mut sidebar = div()
             .size_full()
             .flex()
             .flex_col()
@@ -1065,7 +1101,15 @@ impl Render for SidebarPlaceholder {
                     .child(section_label("Labels", cx))
                     .child(label_rows(&self.state, &state, cx)),
             )
-            .child(sidebar_footer(&self.state, &state, cx))
+            .child(sidebar_footer(&self.state, &state, cx));
+
+        if let Some(menu_entity) = &self.context_menu {
+            if menu_entity.read(cx).open {
+                sidebar = sidebar.child(menu_entity.clone());
+            }
+        }
+
+        sidebar
     }
 }
 
@@ -1088,12 +1132,6 @@ impl Render for MessageListPlaceholder {
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let typography = theme.typography;
-        let density = state.density.clone();
-        let message_items = message_list_items(&state.messages);
-        let selected_message = state
-            .selected_message
-            .clone()
-            .or_else(|| state.messages.first().map(|message| message.id.clone()));
         let mailbox_title = current_mailbox_title(&state);
         let message_count = state.messages.len();
         let unread_count = state
@@ -1108,6 +1146,7 @@ impl Render for MessageListPlaceholder {
         } else {
             format!("{message_count} messages - {unread_count} unread")
         };
+        let can_mark_all_read = selected_regular_folder_id(&state).is_some() && unread_count > 0;
 
         div()
             .size_full()
@@ -1131,51 +1170,52 @@ impl Render for MessageListPlaceholder {
                     .child(
                         div()
                             .pt(px(4.0))
-                            .text_size(px(typography.caption.size))
-                            .text_color(if state.messages_resource.is_error() {
-                                colors.status_error
-                            } else {
-                                colors.on_subtle
-                            })
-                            .child(mailbox_summary),
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(typography.caption.size))
+                                    .text_color(if state.messages_resource.is_error() {
+                                        colors.status_error
+                                    } else {
+                                        colors.on_subtle
+                                    })
+                                    .child(mailbox_summary),
+                            )
+                            .when(can_mark_all_read, |row| {
+                                row.child(
+                                    Button::new("message-list-mark-all-read")
+                                        .label("Mark all read")
+                                        .appearance(ButtonAppearance::Subtle)
+                                        .size(ButtonSize::Compact)
+                                        .on_click({
+                                            let state_entity = self.state.clone();
+                                            let folder_id = selected_regular_folder_id(&state)
+                                                .unwrap()
+                                                .to_string();
+                                            move |_, _, app_cx| {
+                                                start_mark_folder_read(
+                                                    &state_entity,
+                                                    folder_id.clone(),
+                                                    app_cx,
+                                                );
+                                            }
+                                        }),
+                                )
+                            }),
                     ),
             )
             .child(
                 div()
-                    .h(px(28.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .border_b_1()
-                    .border_color(colors.stroke_neutral_subtle)
-                    .bg(colors.panel_bg)
-                    .text_size(px(typography.caption.size))
-                    .text_color(colors.on_subtle)
-                    .child(div().w(px(112.0)).child("From"))
-                    .child(div().flex_1().min_w_0().child("Subject"))
-                    .child(div().w(px(90.0)).flex().justify_end().child("Date")),
-            )
-            .child(
-                div().flex_1().min_h_0().child(
-                    SelectableList::new("native-message-list")
-                        .items(message_items)
-                        .empty_text("No messages loaded for the selected folder")
-                        .row_height(density.message_row_height.max(58.0))
-                        .on_select({
-                            let state_entity = self.state.clone();
-                            move |message_id, _, app_cx| {
-                                start_full_message_load(&state_entity, message_id.as_ref(), app_cx);
-                            }
-                        })
-                        .on_activate({
-                            let state_entity = self.state.clone();
-                            move |message_id, _, _, app_cx| {
-                                start_full_message_load(&state_entity, message_id.as_ref(), app_cx);
-                            }
-                        })
-                        .when_some(selected_message, |list, selected| list.selected(selected)),
-                ),
+                    .flex_1()
+                    .min_h_0()
+                    .child(mail_message_list(&self.state, &state, cx)),
             )
     }
 }
@@ -1723,6 +1763,47 @@ fn start_sync_complete_refresh(state_entity: &Entity<NativeAppState>, app_cx: &m
         .detach();
 }
 
+fn start_mark_folder_read(
+    state_entity: &Entity<NativeAppState>,
+    folder_id: String,
+    app_cx: &mut App,
+) {
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        let request = begin_sync_complete_refresh(state);
+        state.last_error = None;
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let load_request = request.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { mark_folder_read_and_refresh(base_url, folder_id, load_request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_sync_refresh(state, request, loaded);
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native mark-folder-read refresh: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
 fn begin_sync_complete_refresh(state: &mut NativeAppState) -> NativeSyncRefreshRequest {
     let source = NativeMessageSource::from_state(state);
     let selected_message = state.selected_message.clone();
@@ -1747,6 +1828,37 @@ fn load_sync_complete_refresh(
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
+        let tree = load_account_tree(&client).await?;
+        let messages = if let Some(source) = request.source {
+            Some(
+                load_message_collection_with_client(&client, source, request.selected_message)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        Ok(LoadedSyncRefresh {
+            accounts: tree.accounts,
+            folders_by_account: tree.folders_by_account,
+            labels: tree.labels,
+            messages,
+        })
+    })
+}
+
+fn mark_folder_read_and_refresh(
+    base_url: String,
+    folder_id: String,
+    request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .mark_folder_read(&folder_id)
+            .await
+            .with_context(|| format!("mark folder read {folder_id}"))?;
         let tree = load_account_tree(&client).await?;
         let messages = if let Some(source) = request.source {
             Some(
@@ -2170,6 +2282,64 @@ mod tests {
         assert_eq!(state.search, SearchState::default());
         assert_eq!(state.selected_folder.as_deref(), Some("smart:unread"));
         assert_eq!(state.selected_label, None);
+    }
+
+    #[test]
+    fn selected_regular_folder_id_skips_search_label_and_smart_views() {
+        let mut state = NativeAppState {
+            selected_folder: Some("inbox".to_string()),
+            ..NativeAppState::default()
+        };
+        assert_eq!(selected_regular_folder_id(&state), Some("inbox"));
+
+        state.selected_folder = Some("smart:unread".to_string());
+        assert_eq!(selected_regular_folder_id(&state), None);
+
+        state.selected_folder = Some("inbox".to_string());
+        state.selected_label = Some("label".to_string());
+        assert_eq!(selected_regular_folder_id(&state), None);
+
+        state.selected_label = None;
+        state.search.submitted_query = Some("report".to_string());
+        assert_eq!(selected_regular_folder_id(&state), None);
+    }
+
+    #[test]
+    fn message_key_target_tracks_roving_selection() {
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        assert_eq!(
+            message_key_target(&ids, Some("b"), "down").as_deref(),
+            Some("c")
+        );
+        assert_eq!(
+            message_key_target(&ids, Some("b"), "up").as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            message_key_target(&ids, Some("b"), "j").as_deref(),
+            Some("c")
+        );
+        assert_eq!(
+            message_key_target(&ids, Some("b"), "k").as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            message_key_target(&ids, Some("b"), "return").as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            message_key_target(&ids, Some("z"), "down").as_deref(),
+            Some("b")
+        );
+        assert_eq!(message_key_target(&ids, Some("b"), "x"), None);
+    }
+
+    #[test]
+    fn sender_initials_use_display_name_or_fallback() {
+        assert_eq!(sender_initials("Ada Lovelace"), "AL");
+        assert_eq!(sender_initials("alerts@example.test"), "A");
+        assert_eq!(sender_initials(""), "U");
     }
 
     #[test]
@@ -2894,16 +3064,23 @@ fn smart_folder_rows(
             None
         };
         rows = rows.child(
-            sidebar_nav_row(label.to_string(), selected, count, 0, cx)
-                .id(SharedString::from(format!("smart-folder-{smart_key}")))
-                .cursor_pointer()
-                .on_click(move |_, _, app_cx| {
-                    start_message_collection_load(
-                        &state_entity,
-                        NativeMessageSource::SmartFolder(kind.clone()),
-                        app_cx,
-                    );
-                }),
+            sidebar_nav_row(
+                label.to_string(),
+                selected,
+                count,
+                0,
+                smart_folder_icon(kind.as_str()),
+                cx,
+            )
+            .id(SharedString::from(format!("smart-folder-{smart_key}")))
+            .cursor_pointer()
+            .on_click(move |_, _, app_cx| {
+                start_message_collection_load(
+                    &state_entity,
+                    NativeMessageSource::SmartFolder(kind.clone()),
+                    app_cx,
+                );
+            }),
         );
     }
     rows
@@ -2925,7 +3102,7 @@ fn label_rows(
         let selected = state.selected_label.as_deref() == Some(label.id.as_str());
         let state_entity = state_entity.clone();
         rows = rows.child(
-            sidebar_nav_row(label.name.clone(), selected, None, 0, cx)
+            sidebar_nav_row(label.name.clone(), selected, None, 0, "icons/pin.svg", cx)
                 .id(SharedString::from(format!("label-{label_key}")))
                 .cursor_pointer()
                 .on_click(move |_, _, app_cx| {
@@ -2945,6 +3122,7 @@ fn sidebar_nav_row(
     selected: bool,
     count: Option<i64>,
     indent: usize,
+    icon: &'static str,
     cx: &mut Context<SidebarPlaceholder>,
 ) -> gpui::Div {
     let theme = cx.theme();
@@ -2977,6 +3155,7 @@ fn sidebar_nav_row(
                 .items_center()
                 .gap(px(6.0))
                 .min_w_0()
+                .flex_1()
                 .child(
                     div()
                         .w(px(3.0))
@@ -2988,9 +3167,15 @@ fn sidebar_nav_row(
                             colors.panel_bg
                         }),
                 )
+                .child(svg().path(icon).size(px(14.0)).text_color(if selected {
+                    colors.accent
+                } else {
+                    colors.on_subtle
+                }))
                 .child(
                     div()
                         .min_w_0()
+                        .flex_1()
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
@@ -3023,6 +3208,25 @@ fn folder_label(folder: &Folder) -> String {
             .filter(|name| !name.trim().is_empty())
             .unwrap_or(folder.name.as_str())
             .to_string()
+    }
+}
+
+fn folder_icon(folder: &Folder) -> &'static str {
+    match folder.special_use.as_deref() {
+        Some("trash") => "icons/delete.svg",
+        Some("sent") | Some("drafts") => "icons/document.svg",
+        Some("archive") => "icons/download.svg",
+        Some("spam") => "icons/dismiss.svg",
+        _ => "icons/folder.svg",
+    }
+}
+
+fn smart_folder_icon(kind: &str) -> &'static str {
+    match kind {
+        "flagged" => "icons/pin.svg",
+        "snoozed" => "icons/bell.svg",
+        "unread" => "icons/document.svg",
+        _ => "icons/list_tree.svg",
     }
 }
 
@@ -3069,40 +3273,355 @@ fn nav_item(
         .child(label)
 }
 
-fn message_list_items(messages: &[Message]) -> Vec<SelectableListItem> {
-    messages
-        .iter()
-        .map(|message| {
-            let title = message
-                .subject
-                .clone()
-                .unwrap_or_else(|| "(no subject)".to_string());
-            let sender = message
-                .from_name
-                .clone()
-                .filter(|name| !name.trim().is_empty())
-                .or_else(|| message.from_email.clone())
-                .unwrap_or_else(|| "Unknown sender".to_string());
-            let mut item = SelectableListItem::new(message.id.clone(), title)
-                .subtitle(sender)
-                .detail(message.preview.clone().unwrap_or_default())
-                .emphasized(!message.is_read);
+fn mail_message_list(
+    state_entity: &Entity<NativeAppState>,
+    state: &NativeAppState,
+    cx: &mut Context<MessageListPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let row_height = state.density.message_row_height.max(66.0);
+    let selected_id = state
+        .selected_message
+        .clone()
+        .or_else(|| state.messages.first().map(|message| message.id.clone()));
 
-            if let Some(date) = message.date.clone().filter(|date| !date.trim().is_empty()) {
-                item = item.meta(date);
+    let mut root = div()
+        .tab_index(0)
+        .key_context("NativeMessageList")
+        .flex()
+        .flex_col()
+        .w_full()
+        .h_full()
+        .min_h_0()
+        .bg(colors.surface)
+        .on_key_down({
+            let ids = state
+                .messages
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>();
+            let selected_id = selected_id.clone();
+            let state_entity = state_entity.clone();
+            move |ev: &KeyDownEvent, _, app_cx| {
+                if let Some(target) =
+                    message_key_target(&ids, selected_id.as_deref(), ev.keystroke.key.as_str())
+                {
+                    start_full_message_load(&state_entity, &target, app_cx);
+                }
             }
+        });
 
-            if message.is_flagged {
-                item = item.badge("Flagged");
-            } else if message.has_attachments {
-                item = item.badge("Attachment");
-            } else if message.snoozed_until.is_some() {
-                item = item.badge("Snoozed");
-            }
+    if let Some((message, error)) = message_list_status(state) {
+        let color = if error {
+            colors.status_error
+        } else {
+            colors.on_subtle_disabled
+        };
+        return root.child(
+            div()
+                .flex_1()
+                .min_h(px(row_height * 2.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(18.0))
+                .text_size(px(typography.body.size))
+                .text_color(color)
+                .child(message),
+        );
+    }
 
-            item
+    let messages = state.messages.clone();
+    let selected_id_for_rows = selected_id.clone();
+    let row_state = state_entity.clone();
+    root = root.child(
+        uniform_list(
+            "native-mail-message-rows",
+            messages.len(),
+            move |range, _, app_cx| {
+                range
+                    .map(|idx| {
+                        mail_message_row(
+                            idx,
+                            &messages[idx],
+                            selected_id_for_rows.as_deref() == Some(messages[idx].id.as_str()),
+                            row_height,
+                            row_state.clone(),
+                            app_cx,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .w_full()
+        .h_full(),
+    );
+
+    root
+}
+
+fn message_list_status(state: &NativeAppState) -> Option<(String, bool)> {
+    if state.messages_resource.is_loading() && state.messages.is_empty() {
+        return Some(("Loading messages...".to_string(), false));
+    }
+
+    if let Some(error) = state.messages_resource.error() {
+        return Some((format!("Messages failed to load: {error}"), true));
+    }
+
+    if !state.messages.is_empty() {
+        return None;
+    }
+
+    if let Some(query) = state.search.submitted_query.as_deref() {
+        return Some((format!("No results for \"{query}\""), false));
+    }
+
+    if state.selected_folder.is_none() && state.selected_label.is_none() {
+        return Some(("No folder selected".to_string(), false));
+    }
+
+    Some(("No messages in this view".to_string(), false))
+}
+
+fn message_key_target(ids: &[String], selected_id: Option<&str>, key: &str) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+
+    let current = selected_id
+        .and_then(|id| ids.iter().position(|message_id| message_id == id))
+        .unwrap_or(0);
+    let next = match key {
+        "up" | "k" => current.saturating_sub(1),
+        "down" | "j" => (current + 1).min(ids.len() - 1),
+        "home" => 0,
+        "end" => ids.len() - 1,
+        "pageup" => current.saturating_sub(5),
+        "pagedown" => (current + 5).min(ids.len() - 1),
+        "return" | "space" => current,
+        _ => return None,
+    };
+
+    Some(ids[next].clone())
+}
+
+fn mail_message_row(
+    idx: usize,
+    message: &Message,
+    selected: bool,
+    row_height: f32,
+    state_entity: Entity<NativeAppState>,
+    cx: &mut App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let subject = message
+        .subject
+        .clone()
+        .filter(|subject| !subject.trim().is_empty())
+        .unwrap_or_else(|| "(no subject)".to_string());
+    let sender = message_sender(message);
+    let preview = message.preview.clone().unwrap_or_default();
+    let date = message
+        .date
+        .clone()
+        .filter(|date| !date.trim().is_empty())
+        .unwrap_or_else(|| "No date".to_string());
+    let unread = !message.is_read;
+    let message_id = message.id.clone();
+
+    div()
+        .id(("native-mail-message-row", idx as u64))
+        .h(px(row_height))
+        .w_full()
+        .flex()
+        .items_center()
+        .bg(if selected {
+            colors.neutral_selected
+        } else {
+            colors.surface
         })
-        .collect()
+        .border_b_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .cursor_pointer()
+        .hover({
+            let hover = colors.subtle_hover;
+            let selected_bg = colors.neutral_selected;
+            move |style| style.bg(if selected { selected_bg } else { hover })
+        })
+        .on_click(move |_, _, app_cx| {
+            start_full_message_load(&state_entity, &message_id, app_cx);
+        })
+        .child(div().h_full().w(px(3.0)).bg(if selected || unread {
+            colors.accent
+        } else {
+            colors.surface
+        }))
+        .child(
+            div()
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(30.0))
+                        .rounded(px(999.0))
+                        .bg(if unread {
+                            colors.accent
+                        } else {
+                            colors.neutral
+                        })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(if unread {
+                            colors.on_accent
+                        } else {
+                            colors.on_subtle
+                        })
+                        .child(sender_initials(&sender)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(typography.body.size))
+                                        .font_weight(if unread {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .text_color(colors.on_neutral)
+                                        .child(sender),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .max_w(px(92.0))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(typography.caption.size))
+                                        .text_color(colors.on_subtle)
+                                        .child(date),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(typography.body.size))
+                                        .font_weight(if unread {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .text_color(colors.on_neutral)
+                                        .child(subject),
+                                )
+                                .when(message.is_flagged, |row| {
+                                    row.child(message_row_badge("Flagged", cx))
+                                })
+                                .when(message.has_attachments, |row| {
+                                    row.child(message_row_badge("Attachment", cx))
+                                })
+                                .when(message.snoozed_until.is_some(), |row| {
+                                    row.child(message_row_badge("Snoozed", cx))
+                                }),
+                        )
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(typography.caption.size))
+                                .text_color(colors.on_subtle)
+                                .child(preview),
+                        ),
+                ),
+        )
+}
+
+fn message_row_badge(label: &'static str, cx: &mut App) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .flex_none()
+        .px(px(5.0))
+        .py(px(1.0))
+        .rounded(px(3.0))
+        .bg(theme.colors.neutral)
+        .text_size(px(10.0))
+        .text_color(theme.colors.on_subtle)
+        .child(label)
+}
+
+fn message_sender(message: &Message) -> String {
+    message
+        .from_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| message.from_email.clone())
+        .unwrap_or_else(|| "Unknown sender".to_string())
+}
+
+fn sender_initials(sender: &str) -> String {
+    let mut initials = sender
+        .split_whitespace()
+        .filter_map(|part| part.chars().next())
+        .take(2)
+        .collect::<String>();
+    if initials.is_empty() {
+        initials = sender.chars().take(1).collect();
+    }
+    if initials.is_empty() {
+        "U".to_string()
+    } else {
+        initials.to_uppercase()
+    }
+}
+
+fn selected_regular_folder_id(state: &NativeAppState) -> Option<&str> {
+    if state.search.submitted_query.is_some() || state.selected_label.is_some() {
+        return None;
+    }
+
+    state
+        .selected_folder
+        .as_deref()
+        .filter(|folder_id| !folder_id.starts_with("smart:"))
 }
 
 fn current_mailbox_title(state: &NativeAppState) -> String {

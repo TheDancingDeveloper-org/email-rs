@@ -34,10 +34,17 @@ pub async fn mark_folder_read(
     State(state): State<Arc<AppState>>,
     Path(folder_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
+    let mut tx = state.pool.begin().await?;
     let result = sqlx::query("UPDATE messages SET is_read = 1 WHERE folder_id = ?")
         .bind(&folder_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("UPDATE folders SET unread_count = 0 WHERE id = ?")
+        .bind(&folder_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
     Ok(Json(
         serde_json::json!({ "updated": result.rows_affected() }),
     ))
@@ -252,6 +259,10 @@ mod tests {
             .await
             .unwrap();
         }
+        sqlx::query("UPDATE folders SET unread_count = 3 WHERE id = 'fld1'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
 
         let (status, body) = req(
             crate::api::router(Arc::clone(&state)),
@@ -270,6 +281,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(unread, 0);
+
+        let folder_unread: i64 =
+            sqlx::query_scalar("SELECT unread_count FROM folders WHERE id = 'fld1'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(folder_unread, 0);
     }
 
     #[tokio::test]
@@ -277,9 +295,13 @@ mod tests {
         let state = setup().await;
         seed_account(&state.pool, "acc1").await;
         seed_folder(&state.pool, "fld1", "acc1", "INBOX", "INBOX", None).await;
+        sqlx::query("UPDATE folders SET unread_count = 2 WHERE id = 'fld1'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
 
         let (status, body) = req(
-            crate::api::router(state),
+            crate::api::router(Arc::clone(&state)),
             "POST",
             "/folders/fld1/mark-read",
             None,
@@ -287,6 +309,13 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["updated"], 0);
+
+        let folder_unread: i64 =
+            sqlx::query_scalar("SELECT unread_count FROM folders WHERE id = 'fld1'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(folder_unread, 0);
     }
 
     #[tokio::test]
