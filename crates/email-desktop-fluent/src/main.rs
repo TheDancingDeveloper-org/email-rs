@@ -13,7 +13,7 @@ use fluent_app::FluentApp;
 use fluent_core::{AsyncResource, Theme, ThemeProvider as _};
 use fluent_layout::{
     CommandPalette, DockPanel, DockPosition, ModalHost, PaletteEntry, Pane, PaneConstraints,
-    PaneGroup, Workspace,
+    PaneGroup, SelectableList, SelectableListItem, Workspace,
 };
 use fluent_primitives::{DateTimePicker, DateTimeValue, TokenInput, TokenInputSuggestion};
 use gpui::{
@@ -264,6 +264,7 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
 
     let accounts_resource = AsyncResource::ready(accounts.clone());
     let messages_resource = AsyncResource::ready(messages.clone());
+    let selected_message = messages.first().map(|message| message.id.clone());
 
     Ok(NativeAppState {
         accounts,
@@ -273,6 +274,7 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
         messages,
         messages_resource,
         selected_folder,
+        selected_message,
         ..NativeAppState::default()
     })
 }
@@ -574,71 +576,16 @@ impl Render for MessageListPlaceholder {
         let colors = theme.colors.clone();
         let typography = theme.typography;
         let density = self.state.density.clone();
-
-        let mut rows = div().flex().flex_col().gap(px(1.0));
-        for message in self.state.messages.iter().take(8) {
-            rows = rows.child(
-                div()
-                    .min_h(px(density.message_row_height))
-                    .px(px(14.0))
-                    .py(px(8.0))
-                    .border_b_1()
-                    .border_color(colors.stroke_neutral_subtle)
-                    .bg(if message.is_read {
-                        colors.surface
-                    } else {
-                        colors.subtle_hover
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(typography.body.size))
-                                    .font_weight(if message.is_read {
-                                        FontWeight::NORMAL
-                                    } else {
-                                        FontWeight::SEMIBOLD
-                                    })
-                                    .text_color(colors.on_neutral)
-                                    .child(
-                                        message
-                                            .subject
-                                            .clone()
-                                            .unwrap_or_else(|| "(no subject)".into()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(typography.caption.size))
-                                    .text_color(colors.on_subtle)
-                                    .child(message.date.clone().unwrap_or_default()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .pt(px(4.0))
-                            .text_size(px(typography.caption.size))
-                            .text_color(colors.on_subtle)
-                            .child(format!(
-                                "{} - {}",
-                                message.from_email.clone().unwrap_or_default(),
-                                message.preview.clone().unwrap_or_default()
-                            )),
-                    ),
-            );
-        }
-
-        if self.state.messages.is_empty() {
-            rows = rows.child(empty_panel(
-                "No messages loaded for the selected folder",
-                cx,
-            ));
-        }
+        let entity = cx.entity();
+        let select_entity = entity.clone();
+        let activate_entity = entity.clone();
+        let message_items = message_list_items(&self.state.messages);
+        let selected_message = self.state.selected_message.clone().or_else(|| {
+            self.state
+                .messages
+                .first()
+                .map(|message| message.id.clone())
+        });
 
         div()
             .size_full()
@@ -673,10 +620,23 @@ impl Render for MessageListPlaceholder {
             )
             .child(
                 div().flex_1().min_h_0().child(
-                    div()
-                        .id("message-list-scroll")
-                        .overflow_y_scroll()
-                        .child(rows),
+                    SelectableList::new("native-message-list")
+                        .items(message_items)
+                        .empty_text("No messages loaded for the selected folder")
+                        .row_height(density.message_row_height.max(56.0))
+                        .on_select(move |message_id, _, app_cx| {
+                            select_entity.update(app_cx, |this, cx| {
+                                this.state.selected_message = Some(message_id.to_string());
+                                cx.notify();
+                            });
+                        })
+                        .on_activate(move |message_id, _, _, app_cx| {
+                            activate_entity.update(app_cx, |this, cx| {
+                                this.state.selected_message = Some(message_id.to_string());
+                                cx.notify();
+                            });
+                        })
+                        .when_some(selected_message, |list, selected| list.selected(selected)),
                 ),
             )
     }
@@ -944,16 +904,40 @@ fn nav_item(
         .child(label)
 }
 
-fn empty_panel(label: &'static str, cx: &mut Context<MessageListPlaceholder>) -> gpui::Div {
-    let theme = cx.theme();
-    div()
-        .m(px(16.0))
-        .p(px(16.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(theme.colors.stroke_neutral_subtle)
-        .text_color(theme.colors.on_subtle)
-        .child(label)
+fn message_list_items(messages: &[Message]) -> Vec<SelectableListItem> {
+    messages
+        .iter()
+        .map(|message| {
+            let title = message
+                .subject
+                .clone()
+                .unwrap_or_else(|| "(no subject)".to_string());
+            let sender = message
+                .from_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| message.from_email.clone())
+                .unwrap_or_else(|| "Unknown sender".to_string());
+            let mut item = SelectableListItem::new(message.id.clone(), title)
+                .subtitle(sender)
+                .detail(message.preview.clone().unwrap_or_default())
+                .emphasized(!message.is_read);
+
+            if let Some(date) = message.date.clone().filter(|date| !date.trim().is_empty()) {
+                item = item.meta(date);
+            }
+
+            if message.is_flagged {
+                item = item.badge("Flagged");
+            } else if message.has_attachments {
+                item = item.badge("Attachment");
+            } else if message.snoozed_until.is_some() {
+                item = item.badge("Snoozed");
+            }
+
+            item
+        })
+        .collect()
 }
 
 fn reading_placeholder(
