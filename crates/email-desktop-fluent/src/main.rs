@@ -10,8 +10,8 @@ use chrono::{Datelike as _, Duration as ChronoDuration, Local, TimeZone as _, Ut
 use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
-    Account, Folder, FullMessage, Label, Message, PatchMessageRequest, SendRequest, SnoozeRequest,
-    SyncEvent,
+    Account, BulkAction, BulkRequest, Folder, FullMessage, Label, Message, PatchMessageRequest,
+    SendRequest, SnoozeRequest, SyncEvent,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -20,12 +20,14 @@ use fluent_layout::{
     Pane, PaneConstraints, PaneGroup, RichDocument, Workspace,
 };
 use fluent_primitives::{
-    Button, ButtonAppearance, ButtonSize, DateTimePicker, DateTimeValue, IconButton, ProgressBar,
-    Searchbox, TextInput, TokenInput, TokenInputSuggestion, TokenInputToken,
+    Button, ButtonAppearance, ButtonSize, Checkbox, CheckboxState, DateTimePicker, DateTimeValue,
+    IconButton, ProgressBar, Searchbox, TextInput, TokenInput, TokenInputSuggestion,
+    TokenInputToken,
 };
 use gpui::{
     actions, div, prelude::*, px, svg, uniform_list, App, Context, Entity, FontWeight, IntoElement,
-    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Render, SharedString, Window,
+    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString,
+    Window,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -686,6 +688,7 @@ struct NativeAppState {
     selected_folder: Option<String>,
     selected_label: Option<String>,
     selected_message: Option<String>,
+    selected_message_ids: Vec<String>,
     selected_full_message: Option<FullMessage>,
     selected_message_resource: AsyncResource<FullMessage, String>,
     selected_message_labels: Vec<Label>,
@@ -715,6 +718,7 @@ impl Default for NativeAppState {
             selected_folder: None,
             selected_label: None,
             selected_message: None,
+            selected_message_ids: Vec::new(),
             selected_full_message: None,
             selected_message_resource: AsyncResource::new(),
             selected_message_labels: Vec::new(),
@@ -1128,13 +1132,17 @@ impl Render for SidebarPlaceholder {
 #[derive(Clone)]
 struct MessageListPlaceholder {
     state: Entity<NativeAppState>,
+    context_menu: Option<Entity<ContextMenu>>,
 }
 
 impl MessageListPlaceholder {
     fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        Self { state }
+        Self {
+            state,
+            context_menu: None,
+        }
     }
 }
 
@@ -1151,16 +1159,21 @@ impl Render for MessageListPlaceholder {
             .iter()
             .filter(|message| !message.is_read)
             .count();
+        let selected_count = state.selected_message_ids.len();
         let mailbox_summary = if state.messages_resource.is_loading() {
             format!("{message_count} cached messages - loading")
         } else if let Some(error) = state.messages_resource.error() {
             format!("{message_count} cached messages - {error}")
+        } else if selected_count > 0 {
+            format!("{selected_count} selected")
         } else {
             format!("{message_count} messages - {unread_count} unread")
         };
-        let can_mark_all_read = selected_regular_folder_id(&state).is_some() && unread_count > 0;
+        let can_mark_all_read =
+            selected_count == 0 && selected_regular_folder_id(&state).is_some() && unread_count > 0;
+        let select_all_state = message_select_all_state(&state);
 
-        div()
+        let mut list = div()
             .size_full()
             .flex()
             .flex_col()
@@ -1185,6 +1198,24 @@ impl Render for MessageListPlaceholder {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
+                            .child(
+                                Checkbox::new("message-list-select-all")
+                                    .state(select_all_state)
+                                    .disabled(state.messages.is_empty())
+                                    .on_click({
+                                        let state_entity = self.state.clone();
+                                        move |next, _, _, app_cx| {
+                                            app_cx.stop_propagation();
+                                            state_entity.update(app_cx, |state, cx| {
+                                                set_all_message_selection(
+                                                    state,
+                                                    matches!(next, CheckboxState::Checked),
+                                                );
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -1220,6 +1251,87 @@ impl Render for MessageListPlaceholder {
                                             }
                                         }),
                                 )
+                            })
+                            .when(selected_count > 0, |row| {
+                                row.child(
+                                    Button::new("message-list-bulk-archive")
+                                        .label("Archive")
+                                        .appearance(ButtonAppearance::Subtle)
+                                        .size(ButtonSize::Compact)
+                                        .on_click({
+                                            let state_entity = self.state.clone();
+                                            move |_, _, app_cx| {
+                                                start_bulk_message_action(
+                                                    &state_entity,
+                                                    BulkAction::Archive,
+                                                    app_cx,
+                                                );
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    Button::new("message-list-bulk-read")
+                                        .label("Mark read")
+                                        .appearance(ButtonAppearance::Subtle)
+                                        .size(ButtonSize::Compact)
+                                        .on_click({
+                                            let state_entity = self.state.clone();
+                                            move |_, _, app_cx| {
+                                                start_bulk_message_action(
+                                                    &state_entity,
+                                                    BulkAction::MarkRead,
+                                                    app_cx,
+                                                );
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    Button::new("message-list-bulk-unread")
+                                        .label("Mark unread")
+                                        .appearance(ButtonAppearance::Subtle)
+                                        .size(ButtonSize::Compact)
+                                        .on_click({
+                                            let state_entity = self.state.clone();
+                                            move |_, _, app_cx| {
+                                                start_bulk_message_action(
+                                                    &state_entity,
+                                                    BulkAction::MarkUnread,
+                                                    app_cx,
+                                                );
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    Button::new("message-list-bulk-delete")
+                                        .label("Delete")
+                                        .appearance(ButtonAppearance::Danger)
+                                        .size(ButtonSize::Compact)
+                                        .on_click({
+                                            let state_entity = self.state.clone();
+                                            move |_, _, app_cx| {
+                                                start_bulk_message_action(
+                                                    &state_entity,
+                                                    BulkAction::Delete,
+                                                    app_cx,
+                                                );
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    Button::new("message-list-clear-selection")
+                                        .label("Clear")
+                                        .appearance(ButtonAppearance::Subtle)
+                                        .size(ButtonSize::Compact)
+                                        .on_click({
+                                            let state_entity = self.state.clone();
+                                            move |_, _, app_cx| {
+                                                state_entity.update(app_cx, |state, cx| {
+                                                    state.selected_message_ids.clear();
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }),
+                                )
                             }),
                     ),
             )
@@ -1228,7 +1340,15 @@ impl Render for MessageListPlaceholder {
                     .flex_1()
                     .min_h_0()
                     .child(mail_message_list(&self.state, &state, cx)),
-            )
+            );
+
+        if let Some(menu_entity) = &self.context_menu {
+            if menu_entity.read(cx).open {
+                list = list.child(menu_entity.clone());
+            }
+        }
+
+        list
     }
 }
 
@@ -1598,10 +1718,24 @@ struct LoadedSyncRefresh {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NativeMessageMutation {
-    Archive { message_id: String },
-    Delete { message_id: String },
-    SetRead { message_id: String, is_read: bool },
-    Snooze { message_id: String, until: String },
+    Archive {
+        message_id: String,
+    },
+    Delete {
+        message_id: String,
+    },
+    SetRead {
+        message_id: String,
+        is_read: bool,
+    },
+    SetFlagged {
+        message_id: String,
+        is_flagged: bool,
+    },
+    Snooze {
+        message_id: String,
+        until: String,
+    },
 }
 
 impl NativeMessageMutation {
@@ -1610,6 +1744,7 @@ impl NativeMessageMutation {
             Self::Archive { message_id }
             | Self::Delete { message_id }
             | Self::SetRead { message_id, .. }
+            | Self::SetFlagged { message_id, .. }
             | Self::Snooze { message_id, .. } => message_id,
         }
     }
@@ -1620,6 +1755,12 @@ impl NativeMessageMutation {
             Self::Delete { .. } => "delete message",
             Self::SetRead { is_read: true, .. } => "mark message read",
             Self::SetRead { is_read: false, .. } => "mark message unread",
+            Self::SetFlagged {
+                is_flagged: true, ..
+            } => "flag message",
+            Self::SetFlagged {
+                is_flagged: false, ..
+            } => "unflag message",
             Self::Snooze { .. } => "snooze message",
         }
     }
@@ -1699,6 +1840,7 @@ fn begin_message_collection_load(
     source.apply_selection(state);
     state.messages.clear();
     state.selected_message = None;
+    state.selected_message_ids.clear();
     state.selected_full_message = None;
     state.selected_message_resource.reset();
     state.selected_message_labels.clear();
@@ -1779,6 +1921,7 @@ fn apply_loaded_message_collection(
     }
 
     state.messages = loaded.messages;
+    retain_existing_message_selection(state);
     state.selected_message = loaded
         .selected_message
         .or_else(|| state.messages.first().map(|message| message.id.clone()));
@@ -1812,6 +1955,7 @@ fn reject_message_collection_load(
 
     state.messages.clear();
     state.selected_message = None;
+    state.selected_message_ids.clear();
     state.selected_full_message = None;
     state.selected_message_resource.reset();
     state.selected_message_labels.clear();
@@ -1999,6 +2143,54 @@ fn start_message_label_mutation(
         .detach();
 }
 
+fn start_bulk_message_action(
+    state_entity: &Entity<NativeAppState>,
+    action: BulkAction,
+    app_cx: &mut App,
+) {
+    let Some((base_url, request, ids)) = state_entity.update(app_cx, |state, cx| {
+        let ids = selected_action_message_ids(state, None);
+        if ids.is_empty() {
+            return None;
+        }
+        let request = begin_sync_complete_refresh(state);
+        state.selected_message_ids.clear();
+        state.last_error = None;
+        cx.notify();
+        Some((state.api_base_url.clone(), request, ids))
+    }) else {
+        return;
+    };
+
+    let load_request = request.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { bulk_message_action_and_refresh(base_url, ids, action, load_request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_sync_refresh(state, request, loaded);
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native bulk message action refresh: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
 fn begin_sync_complete_refresh(state: &mut NativeAppState) -> NativeSyncRefreshRequest {
     let source = NativeMessageSource::from_state(state);
     let selected_message = state.selected_message.clone();
@@ -2103,6 +2295,20 @@ fn mutate_message_and_refresh(
                     )
                     .await?;
             }
+            NativeMessageMutation::SetFlagged {
+                message_id,
+                is_flagged,
+            } => {
+                client
+                    .patch_message(
+                        message_id,
+                        &PatchMessageRequest {
+                            is_read: None,
+                            is_flagged: Some(*is_flagged),
+                        },
+                    )
+                    .await?;
+            }
             NativeMessageMutation::Snooze { message_id, until } => {
                 client
                     .snooze_message(
@@ -2139,6 +2345,52 @@ fn mutate_message_and_refresh(
             messages,
         })
     })
+}
+
+fn bulk_message_action_and_refresh(
+    base_url: String,
+    ids: Vec<String>,
+    action: BulkAction,
+    request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let action_label = bulk_action_label(&action);
+        client
+            .bulk_messages(&BulkRequest { ids, action })
+            .await
+            .with_context(|| format!("bulk {action_label}"))?;
+
+        let tree = load_account_tree(&client)
+            .await
+            .with_context(|| format!("refresh after bulk {action_label}"))?;
+        let messages = if let Some(source) = request.source {
+            Some(
+                load_message_collection_with_client(&client, source, request.selected_message)
+                    .await
+                    .with_context(|| format!("reload active mailbox after bulk {action_label}"))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(LoadedSyncRefresh {
+            accounts: tree.accounts,
+            folders_by_account: tree.folders_by_account,
+            labels: tree.labels,
+            messages,
+        })
+    })
+}
+
+fn bulk_action_label(action: &BulkAction) -> &'static str {
+    match action {
+        BulkAction::Archive => "archive",
+        BulkAction::Delete => "delete",
+        BulkAction::MarkRead => "mark read",
+        BulkAction::MarkUnread => "mark unread",
+    }
 }
 
 fn mutate_message_label_and_reload(
@@ -2392,6 +2644,91 @@ fn decrement_folder_unread(
             folder.unread_count = folder.unread_count.saturating_sub(1);
             break;
         }
+    }
+}
+
+fn selected_action_message_ids(
+    state: &NativeAppState,
+    fallback_message_id: Option<&str>,
+) -> Vec<String> {
+    let visible = state
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut ids = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for id in &state.selected_message_ids {
+        if visible.contains(id.as_str()) && seen.insert(id.clone()) {
+            ids.push(id.clone());
+        }
+    }
+
+    if ids.is_empty() {
+        if let Some(id) = fallback_message_id {
+            if visible.contains(id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+
+    ids
+}
+
+fn toggle_message_selection(state: &mut NativeAppState, message_id: &str) {
+    if let Some(pos) = state
+        .selected_message_ids
+        .iter()
+        .position(|selected_id| selected_id == message_id)
+    {
+        state.selected_message_ids.remove(pos);
+    } else if state
+        .messages
+        .iter()
+        .any(|message| message.id == message_id)
+    {
+        state.selected_message_ids.push(message_id.to_string());
+    }
+}
+
+fn set_all_message_selection(state: &mut NativeAppState, selected: bool) {
+    if selected {
+        state.selected_message_ids = state
+            .messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect();
+    } else {
+        state.selected_message_ids.clear();
+    }
+}
+
+fn retain_existing_message_selection(state: &mut NativeAppState) {
+    let visible = state
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    state
+        .selected_message_ids
+        .retain(|id| visible.contains(id.as_str()) && seen.insert(id.clone()));
+}
+
+fn message_select_all_state(state: &NativeAppState) -> CheckboxState {
+    if state.messages.is_empty() || state.selected_message_ids.is_empty() {
+        return CheckboxState::Unchecked;
+    }
+
+    let visible_count = state.messages.len();
+    let selected_visible_count = selected_action_message_ids(state, None).len();
+    if selected_visible_count == 0 {
+        CheckboxState::Unchecked
+    } else if selected_visible_count == visible_count {
+        CheckboxState::Checked
+    } else {
+        CheckboxState::Indeterminate
     }
 }
 
@@ -3019,6 +3356,41 @@ mod tests {
     }
 
     #[test]
+    fn message_selection_helpers_track_visible_rows() {
+        let mut state = NativeAppState {
+            messages: vec![
+                message("a", "inbox", true),
+                message("b", "inbox", false),
+                message("c", "inbox", true),
+            ],
+            ..NativeAppState::default()
+        };
+
+        assert_eq!(message_select_all_state(&state), CheckboxState::Unchecked);
+        toggle_message_selection(&mut state, "b");
+        assert_eq!(state.selected_message_ids, vec!["b"]);
+        assert_eq!(
+            selected_action_message_ids(&state, Some("a")),
+            vec!["b".to_string()]
+        );
+        assert_eq!(
+            message_select_all_state(&state),
+            CheckboxState::Indeterminate
+        );
+
+        set_all_message_selection(&mut state, true);
+        assert_eq!(state.selected_message_ids, vec!["a", "b", "c"]);
+        assert_eq!(message_select_all_state(&state), CheckboxState::Checked);
+
+        state.messages.remove(1);
+        retain_existing_message_selection(&mut state);
+        assert_eq!(state.selected_message_ids, vec!["a", "c"]);
+
+        set_all_message_selection(&mut state, false);
+        assert!(state.selected_message_ids.is_empty());
+    }
+
+    #[test]
     fn sender_initials_use_display_name_or_fallback() {
         assert_eq!(sender_initials("Ada Lovelace"), "AL");
         assert_eq!(sender_initials("alerts@example.test"), "A");
@@ -3576,6 +3948,7 @@ fn handle_sidebar_search_change(
                 state.search.submitted_query = None;
                 state.search.previous_source = None;
                 state.selected_message = None;
+                state.selected_message_ids.clear();
                 state.selected_full_message = None;
                 state.selected_message_resource.reset();
                 state.selected_message_labels.clear();
@@ -4070,6 +4443,18 @@ fn mail_message_list(
             let selected_id = selected_id.clone();
             let state_entity = state_entity.clone();
             move |ev: &KeyDownEvent, _, app_cx| {
+                if handle_message_list_key(
+                    &state_entity,
+                    &ids,
+                    selected_id.as_deref(),
+                    ev.keystroke.key.as_str(),
+                    ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform,
+                    app_cx,
+                ) {
+                    app_cx.stop_propagation();
+                    return;
+                }
+
                 if let Some(target) =
                     message_key_target(&ids, selected_id.as_deref(), ev.keystroke.key.as_str())
                 {
@@ -4100,7 +4485,13 @@ fn mail_message_list(
 
     let messages = state.messages.clone();
     let selected_id_for_rows = selected_id.clone();
+    let selected_ids_for_rows = state
+        .selected_message_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let row_state = state_entity.clone();
+    let list_entity = cx.entity();
     root = root.child(
         uniform_list(
             "native-mail-message-rows",
@@ -4112,8 +4503,10 @@ fn mail_message_list(
                             idx,
                             &messages[idx],
                             selected_id_for_rows.as_deref() == Some(messages[idx].id.as_str()),
+                            selected_ids_for_rows.contains(&messages[idx].id),
                             row_height,
                             row_state.clone(),
+                            list_entity.clone(),
                             app_cx,
                         )
                     })
@@ -4173,12 +4566,239 @@ fn message_key_target(ids: &[String], selected_id: Option<&str>, key: &str) -> O
     Some(ids[next].clone())
 }
 
+fn handle_message_list_key(
+    state_entity: &Entity<NativeAppState>,
+    ids: &[String],
+    selected_id: Option<&str>,
+    key: &str,
+    command: bool,
+    app_cx: &mut App,
+) -> bool {
+    if ids.is_empty() {
+        return false;
+    }
+
+    if command && key == "a" {
+        state_entity.update(app_cx, |state, cx| {
+            let all_selected = message_select_all_state(state) == CheckboxState::Checked;
+            set_all_message_selection(state, !all_selected);
+            cx.notify();
+        });
+        return true;
+    }
+
+    match key {
+        "escape" => {
+            state_entity.update(app_cx, |state, cx| {
+                if state.selected_message_ids.is_empty() {
+                    state.selected_message = None;
+                    state.selected_full_message = None;
+                    state.selected_message_resource.reset();
+                    state.selected_message_labels.clear();
+                    state.selected_message_labels_resource.reset();
+                    state.compose = ComposeState::default();
+                } else {
+                    state.selected_message_ids.clear();
+                }
+                cx.notify();
+            });
+            true
+        }
+        "x" => {
+            if let Some(selected_id) = selected_id {
+                state_entity.update(app_cx, |state, cx| {
+                    toggle_message_selection(state, selected_id);
+                    cx.notify();
+                });
+                true
+            } else {
+                false
+            }
+        }
+        "e" => start_message_list_target_action(
+            state_entity,
+            selected_id,
+            BulkAction::Archive,
+            |message_id| NativeMessageMutation::Archive { message_id },
+            app_cx,
+        ),
+        "backspace" | "delete" => start_message_list_target_action(
+            state_entity,
+            selected_id,
+            BulkAction::Delete,
+            |message_id| NativeMessageMutation::Delete { message_id },
+            app_cx,
+        ),
+        "u" => start_message_list_read_toggle(state_entity, selected_id, app_cx),
+        _ => false,
+    }
+}
+
+fn start_message_list_target_action(
+    state_entity: &Entity<NativeAppState>,
+    selected_id: Option<&str>,
+    bulk_action: BulkAction,
+    single_mutation: impl Fn(String) -> NativeMessageMutation,
+    app_cx: &mut App,
+) -> bool {
+    let state = state_entity.read(app_cx).clone();
+    if state.selected_message_ids.is_empty() {
+        let Some(message_id) = selected_id.map(str::to_string) else {
+            return false;
+        };
+        start_message_mutation_and_refresh(state_entity, single_mutation(message_id), app_cx);
+    } else {
+        start_bulk_message_action(state_entity, bulk_action, app_cx);
+    }
+    true
+}
+
+fn start_message_list_read_toggle(
+    state_entity: &Entity<NativeAppState>,
+    selected_id: Option<&str>,
+    app_cx: &mut App,
+) -> bool {
+    let state = state_entity.read(app_cx).clone();
+    if state.selected_message_ids.is_empty() {
+        let Some(message_id) = selected_id else {
+            return false;
+        };
+        let is_read = state
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .map(|message| message.is_read)
+            .unwrap_or(true);
+        start_message_mutation_and_refresh(
+            state_entity,
+            NativeMessageMutation::SetRead {
+                message_id: message_id.to_string(),
+                is_read: !is_read,
+            },
+            app_cx,
+        );
+    } else {
+        let selected_ids = selected_action_message_ids(&state, None)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let any_unread = state
+            .messages
+            .iter()
+            .filter(|message| selected_ids.contains(&message.id))
+            .any(|message| !message.is_read);
+        start_bulk_message_action(
+            state_entity,
+            if any_unread {
+                BulkAction::MarkRead
+            } else {
+                BulkAction::MarkUnread
+            },
+            app_cx,
+        );
+    }
+    true
+}
+
+fn message_row_context_menu(
+    state_entity: Entity<NativeAppState>,
+    message: Message,
+    position: Point<Pixels>,
+    app_cx: &mut App,
+) -> Entity<ContextMenu> {
+    let message_id = message.id.clone();
+    let open_state = state_entity.clone();
+    let reply_state = state_entity.clone();
+    let forward_state = state_entity.clone();
+    let archive_state = state_entity.clone();
+    let delete_state = state_entity.clone();
+    let read_state = state_entity.clone();
+    let flag_state = state_entity;
+    let is_read = message.is_read;
+    let is_flagged = message.is_flagged;
+
+    app_cx.new(move |_| {
+        ContextMenu::build(position)
+            .action("Open", {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_full_message_load(&open_state, &message_id, app_cx);
+                }
+            })
+            .action("Reply", {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_full_message_load(&reply_state, &message_id, app_cx);
+                }
+            })
+            .action("Forward", {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_full_message_load(&forward_state, &message_id, app_cx);
+                }
+            })
+            .separator()
+            .action("Archive", {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_message_mutation_and_refresh(
+                        &archive_state,
+                        NativeMessageMutation::Archive {
+                            message_id: message_id.clone(),
+                        },
+                        app_cx,
+                    );
+                }
+            })
+            .action("Delete", {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_message_mutation_and_refresh(
+                        &delete_state,
+                        NativeMessageMutation::Delete {
+                            message_id: message_id.clone(),
+                        },
+                        app_cx,
+                    );
+                }
+            })
+            .separator()
+            .action(if is_read { "Mark unread" } else { "Mark read" }, {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_message_mutation_and_refresh(
+                        &read_state,
+                        NativeMessageMutation::SetRead {
+                            message_id: message_id.clone(),
+                            is_read: !is_read,
+                        },
+                        app_cx,
+                    );
+                }
+            })
+            .action(if is_flagged { "Unflag" } else { "Flag" }, {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_message_mutation_and_refresh(
+                        &flag_state,
+                        NativeMessageMutation::SetFlagged {
+                            message_id: message_id.clone(),
+                            is_flagged: !is_flagged,
+                        },
+                        app_cx,
+                    );
+                }
+            })
+    })
+}
+
 fn mail_message_row(
     idx: usize,
     message: &Message,
     selected: bool,
+    checked: bool,
     row_height: f32,
     state_entity: Entity<NativeAppState>,
+    list_entity: Entity<MessageListPlaceholder>,
     cx: &mut App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -4198,6 +4818,12 @@ fn mail_message_row(
         .unwrap_or_else(|| "No date".to_string());
     let unread = !message.is_read;
     let message_id = message.id.clone();
+    let checkbox_message_id = message.id.clone();
+    let click_state = state_entity.clone();
+    let checkbox_state = state_entity.clone();
+    let context_message = message.clone();
+    let context_state = state_entity.clone();
+    let context_list = list_entity.clone();
 
     div()
         .id(("native-mail-message-row", idx as u64))
@@ -4219,7 +4845,20 @@ fn mail_message_row(
             move |style| style.bg(if selected { selected_bg } else { hover })
         })
         .on_click(move |_, _, app_cx| {
-            start_full_message_load(&state_entity, &message_id, app_cx);
+            start_full_message_load(&click_state, &message_id, app_cx);
+        })
+        .on_mouse_down(MouseButton::Right, move |ev, _, app_cx| {
+            let menu = message_row_context_menu(
+                context_state.clone(),
+                context_message.clone(),
+                ev.position,
+                app_cx,
+            );
+            context_list.update(app_cx, |list, cx| {
+                list.context_menu = Some(menu);
+                cx.notify();
+            });
+            app_cx.stop_propagation();
         })
         .child(div().h_full().w(px(3.0)).bg(if selected || unread {
             colors.accent
@@ -4234,6 +4873,19 @@ fn mail_message_row(
                 .gap(px(10.0))
                 .min_w_0()
                 .flex_1()
+                .child(
+                    Checkbox::new(("message-row-select", idx))
+                        .checked(checked)
+                        .on_click({
+                            move |_, _, _, app_cx| {
+                                app_cx.stop_propagation();
+                                checkbox_state.update(app_cx, |state, cx| {
+                                    toggle_message_selection(state, &checkbox_message_id);
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
                 .child(
                     div()
                         .flex_none()
