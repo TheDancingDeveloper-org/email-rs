@@ -24,6 +24,8 @@ actions!(
     email_desktop_fluent,
     [
         TogglePalette,
+        SelectMailView,
+        SelectCalendarView,
         ApplyLightTheme,
         ApplyDarkTheme,
         IncreaseDensity,
@@ -118,7 +120,7 @@ fn main() -> Result<()> {
             let palette = cx.new({
                 let state = initial_state.clone();
                 move |cx| {
-                    let mut palette = CommandPalette::new(cx);
+                    let mut palette = CommandPalette::new(cx).max_results(14);
                     palette.set_entries(palette_entries(&state), cx);
                     palette
                 }
@@ -416,6 +418,18 @@ impl Render for EmailDesktopApp {
                 cx.listener(|app: &mut EmailDesktopApp, _: &ApplyDarkTheme, _, cx| {
                     app.state.theme = ThemeMode::Dark;
                     Theme::apply_dark(cx);
+                    cx.notify();
+                }),
+            )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &SelectMailView, _, cx| {
+                    app.state.selected_view = SelectedView::Mail;
+                    cx.notify();
+                }),
+            )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &SelectCalendarView, _, cx| {
+                    app.state.selected_view = SelectedView::Calendar;
                     cx.notify();
                 }),
             )
@@ -718,16 +732,95 @@ impl Render for StatusBar {
 
 fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
     let mut entries = vec![
-        PaletteEntry::new("view-mail", "Mail").subtitle("Open the mail workspace"),
-        PaletteEntry::new("view-calendar", "Calendar").subtitle("Open the calendar placeholder"),
-        PaletteEntry::new("theme-light", "Light theme").subtitle("Apply Fluent light theme"),
-        PaletteEntry::new("theme-dark", "Dark theme").subtitle("Apply Fluent dark theme"),
+        PaletteEntry::new("compose", "New Message")
+            .group("Actions")
+            .hint("c")
+            .subtitle("Compose editor lands in Phase 5")
+            .keyword("compose")
+            .keyword("write")
+            .disabled(true),
+        PaletteEntry::new("advanced-search", "Advanced Search")
+            .group("Actions")
+            .subtitle("Advanced search modal lands in Phase 4")
+            .keyword("search")
+            .keyword("filter")
+            .disabled(true),
+        PaletteEntry::new("settings", "Open Settings")
+            .group("Actions")
+            .subtitle("Settings modal lands in Phase 6")
+            .keyword("preferences")
+            .keyword("options")
+            .disabled(true),
+        PaletteEntry::new("theme-light", "Light theme")
+            .group("Actions")
+            .hint("Ctrl+Shift+L")
+            .subtitle("Apply Fluent light theme")
+            .keyword("appearance")
+            .action(|_, cx| cx.dispatch_action(&ApplyLightTheme)),
+        PaletteEntry::new("theme-dark", "Dark theme")
+            .group("Actions")
+            .hint("Ctrl+Shift+D")
+            .subtitle("Apply Fluent dark theme")
+            .keyword("appearance")
+            .action(|_, cx| cx.dispatch_action(&ApplyDarkTheme)),
+        PaletteEntry::new("density-down", "Density: Denser")
+            .group("Actions")
+            .hint("Ctrl+-")
+            .keyword("compact")
+            .keyword("layout")
+            .disabled(state.density.level == 0)
+            .action(|_, cx| cx.dispatch_action(&DecreaseDensity)),
+        PaletteEntry::new("density-up", "Density: Spacious")
+            .group("Actions")
+            .hint("Ctrl++")
+            .keyword("spacious")
+            .keyword("layout")
+            .disabled(state.density.level >= 8)
+            .action(|_, cx| cx.dispatch_action(&IncreaseDensity)),
+        PaletteEntry::new("view-mail", "Go to Mail")
+            .group("Navigate")
+            .subtitle("Open the mail workspace")
+            .keyword("inbox")
+            .action(|_, cx| cx.dispatch_action(&SelectMailView)),
+        PaletteEntry::new("view-calendar", "Go to Calendar")
+            .group("Navigate")
+            .subtitle("Open the calendar placeholder")
+            .keyword("events")
+            .keyword("schedule")
+            .action(|_, cx| cx.dispatch_action(&SelectCalendarView)),
     ];
+
+    entries.extend(state.labels.iter().map(|label| {
+        PaletteEntry::new(format!("label:{}", label.id), label.name.clone())
+            .group("Labels")
+            .hint("label")
+            .subtitle("Label navigation lands in Phase 4")
+            .keyword("label")
+            .keyword("tag")
+            .disabled(true)
+    }));
+
+    entries.extend(state.folders_by_account.iter().flat_map(|(_, folders)| {
+        folders
+            .iter()
+            .filter(|folder| !folder.is_excluded)
+            .map(|folder| {
+                PaletteEntry::new(format!("folder:{}", folder.id), folder.name.clone())
+                    .group("Folders")
+                    .hint(folder.full_path.clone())
+                    .subtitle("Folder navigation lands in Phase 4")
+                    .keyword("folder")
+                    .keyword(folder.full_path.clone())
+                    .disabled(true)
+            })
+    }));
 
     entries.extend(state.accounts.iter().map(|account| {
         PaletteEntry::new(account.id.clone(), account.name.clone())
+            .group("Accounts")
             .subtitle(account.email.clone())
             .keyword("account")
+            .disabled(true)
     }));
 
     entries
