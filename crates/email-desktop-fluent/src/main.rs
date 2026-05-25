@@ -10,8 +10,8 @@ use chrono::{Datelike as _, Duration as ChronoDuration, Local, TimeZone as _, Ut
 use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
-    Account, BulkAction, BulkRequest, Folder, FullMessage, Label, Message, PatchMessageRequest,
-    SendRequest, SnoozeRequest, SyncEvent,
+    Account, AccountSettings, BulkAction, BulkRequest, Folder, FullMessage, Label, Message,
+    PatchMessageRequest, SendRequest, SnoozeRequest, SyncEvent,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -21,7 +21,7 @@ use fluent_layout::{
 };
 use fluent_primitives::{
     Button, ButtonAppearance, ButtonSize, Checkbox, CheckboxState, DateTimePicker, DateTimeValue,
-    IconButton, ProgressBar, Searchbox, TextInput, TokenInput, TokenInputSuggestion,
+    IconButton, ProgressBar, Searchbox, TextInput, Textarea, TokenInput, TokenInputSuggestion,
     TokenInputToken,
 };
 use gpui::{
@@ -40,7 +40,10 @@ actions!(
         ApplyLightTheme,
         ApplyDarkTheme,
         IncreaseDensity,
-        DecreaseDensity
+        DecreaseDensity,
+        StartCompose,
+        StartReplyCompose,
+        StartForwardCompose
     ]
 );
 
@@ -629,8 +632,19 @@ struct ComposeState {
     open: bool,
     mode: Option<String>,
     account_id: Option<String>,
+    to: Vec<String>,
+    cc: Vec<String>,
+    bcc: Vec<String>,
     subject: Option<String>,
+    body: String,
     in_reply_to: Option<String>,
+    quoted_text: Option<String>,
+    quoted_from: Option<String>,
+    signature: Option<String>,
+    signature_loading: bool,
+    show_cc: bool,
+    show_bcc: bool,
+    revision: u64,
     sending: bool,
     error: Option<String>,
     notice: Option<String>,
@@ -862,6 +876,13 @@ impl EmailDesktopApp {
             });
         }
     }
+
+    fn refresh_palette_entries(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx).clone();
+        self.palette.update(cx, |palette, cx| {
+            palette.set_entries(palette_entries(&state), cx)
+        });
+    }
 }
 
 impl Render for EmailDesktopApp {
@@ -871,6 +892,7 @@ impl Render for EmailDesktopApp {
             .size_full()
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &TogglePalette, _, cx| {
+                    app.refresh_palette_entries(cx);
                     app.state.update(cx, |state, cx| {
                         state.palette.open = true;
                         cx.notify();
@@ -917,6 +939,27 @@ impl Render for EmailDesktopApp {
                     app.adjust_density(-1, cx);
                 }),
             )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &StartCompose, _, cx| {
+                    start_new_compose(&app.state, cx);
+                    app.refresh_palette_entries(cx);
+                    cx.notify();
+                }),
+            )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &StartReplyCompose, _, cx| {
+                    start_reply_draft(&app.state, cx);
+                    app.refresh_palette_entries(cx);
+                    cx.notify();
+                }),
+            )
+            .on_action(cx.listener(
+                |app: &mut EmailDesktopApp, _: &StartForwardCompose, _, cx| {
+                    start_forward_draft(&app.state, cx);
+                    app.refresh_palette_entries(cx);
+                    cx.notify();
+                },
+            ))
             .child(self.workspace.clone())
             .child(self.palette.clone())
     }
@@ -1095,6 +1138,14 @@ impl Render for SidebarPlaceholder {
                             .text_size(px(typography.body.size))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.on_accent)
+                            .id("sidebar-compose")
+                            .cursor_pointer()
+                            .on_click({
+                                let state_entity = self.state.clone();
+                                move |_, _, app_cx| {
+                                    start_new_compose(&state_entity, app_cx);
+                                }
+                            })
                             .child("Compose"),
                     ),
             )
@@ -1357,7 +1408,13 @@ struct ReadingPanePlaceholder {
     state: Entity<NativeAppState>,
     recipient_input: Entity<TokenInput>,
     quick_reply_input: Entity<TextInput>,
+    compose_to_input: Entity<TokenInput>,
+    compose_cc_input: Entity<TokenInput>,
+    compose_bcc_input: Entity<TokenInput>,
+    compose_subject_input: Entity<TextInput>,
+    compose_body_input: Entity<Textarea>,
     snooze_picker: Entity<DateTimePicker>,
+    synced_compose_revision: u64,
 }
 
 impl ReadingPanePlaceholder {
@@ -1365,6 +1422,7 @@ impl ReadingPanePlaceholder {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         let suggestions = recipient_suggestions(state.read(cx));
+        let compose_suggestions = suggestions.clone();
         let recipient_input = cx.new(move |_| {
             TokenInput::new()
                 .placeholder("Add recipient")
@@ -1372,6 +1430,93 @@ impl ReadingPanePlaceholder {
                 .allow_freeform(true)
         });
         let quick_reply_input = cx.new(|_| TextInput::new().placeholder("Write a quick reply"));
+        let compose_to_input = cx.new({
+            let state = state.clone();
+            let suggestions = compose_suggestions.clone();
+            move |_| {
+                TokenInput::new()
+                    .placeholder("recipient@example.com")
+                    .suggestions(suggestions.clone())
+                    .allow_freeform(true)
+                    .on_change({
+                        let state = state.clone();
+                        move |tokens, app_cx| {
+                            update_compose_recipients(
+                                &state,
+                                ComposeRecipientField::To,
+                                tokens,
+                                app_cx,
+                            );
+                        }
+                    })
+            }
+        });
+        let compose_cc_input = cx.new({
+            let state = state.clone();
+            let suggestions = compose_suggestions.clone();
+            move |_| {
+                TokenInput::new()
+                    .placeholder("cc@example.com")
+                    .suggestions(suggestions.clone())
+                    .allow_freeform(true)
+                    .on_change({
+                        let state = state.clone();
+                        move |tokens, app_cx| {
+                            update_compose_recipients(
+                                &state,
+                                ComposeRecipientField::Cc,
+                                tokens,
+                                app_cx,
+                            );
+                        }
+                    })
+            }
+        });
+        let compose_bcc_input = cx.new({
+            let state = state.clone();
+            move |_| {
+                TokenInput::new()
+                    .placeholder("bcc@example.com")
+                    .suggestions(compose_suggestions.clone())
+                    .allow_freeform(true)
+                    .on_change({
+                        let state = state.clone();
+                        move |tokens, app_cx| {
+                            update_compose_recipients(
+                                &state,
+                                ComposeRecipientField::Bcc,
+                                tokens,
+                                app_cx,
+                            );
+                        }
+                    })
+            }
+        });
+        let compose_subject_input = cx.new({
+            let state = state.clone();
+            move |_| {
+                TextInput::new().placeholder("Subject").on_change({
+                    let state = state.clone();
+                    move |subject, app_cx| {
+                        update_compose_subject(&state, subject.to_string(), app_cx);
+                    }
+                })
+            }
+        });
+        let compose_body_input = cx.new({
+            let state = state.clone();
+            move |_| {
+                Textarea::new()
+                    .placeholder("Write your message...")
+                    .rows(12)
+                    .on_change({
+                        let state = state.clone();
+                        move |body, app_cx| {
+                            update_compose_body(&state, body.to_string(), app_cx);
+                        }
+                    })
+            }
+        });
         let default_snooze = default_snooze_value();
         let snooze_picker = cx.new(move |_| {
             DateTimePicker::new()
@@ -1382,7 +1527,13 @@ impl ReadingPanePlaceholder {
             state,
             recipient_input,
             quick_reply_input,
+            compose_to_input,
+            compose_cc_input,
+            compose_bcc_input,
+            compose_subject_input,
+            compose_body_input,
             snooze_picker,
+            synced_compose_revision: 0,
         }
     }
 }
@@ -1390,6 +1541,20 @@ impl ReadingPanePlaceholder {
 impl Render for ReadingPanePlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx).clone();
+        self.sync_compose_inputs(&state, cx);
+        if state.compose.open {
+            return compose_placeholder(
+                &self.state,
+                &state,
+                self.compose_to_input.clone(),
+                self.compose_cc_input.clone(),
+                self.compose_bcc_input.clone(),
+                self.compose_subject_input.clone(),
+                self.compose_body_input.clone(),
+                cx,
+            );
+        }
+
         reading_placeholder(
             &self.state,
             &state,
@@ -1398,6 +1563,31 @@ impl Render for ReadingPanePlaceholder {
             self.snooze_picker.clone(),
             cx,
         )
+    }
+}
+
+impl ReadingPanePlaceholder {
+    fn sync_compose_inputs(&mut self, state: &NativeAppState, cx: &mut Context<Self>) {
+        if state.compose.revision == self.synced_compose_revision {
+            return;
+        }
+
+        self.compose_to_input.update(cx, |input, cx| {
+            input.set_tokens(compose_tokens(&state.compose.to), cx);
+        });
+        self.compose_cc_input.update(cx, |input, cx| {
+            input.set_tokens(compose_tokens(&state.compose.cc), cx);
+        });
+        self.compose_bcc_input.update(cx, |input, cx| {
+            input.set_tokens(compose_tokens(&state.compose.bcc), cx);
+        });
+        self.compose_subject_input.update(cx, |input, cx| {
+            input.set_value(state.compose.subject.clone().unwrap_or_default(), cx);
+        });
+        self.compose_body_input.update(cx, |input, cx| {
+            input.set_value(state.compose.body.clone(), cx);
+        });
+        self.synced_compose_revision = state.compose.revision;
     }
 }
 
@@ -1769,7 +1959,13 @@ impl NativeMessageMutation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NativeDraftSeed {
     recipients: Vec<(String, String)>,
-    body: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposeRecipientField {
+    To,
+    Cc,
+    Bcc,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2534,7 +2730,7 @@ fn begin_full_message_load(
     }
 
     if state.selected_message.as_deref() != Some(message_id) {
-        state.compose = ComposeState::default();
+        reset_compose_state(state, None);
     }
     state.selected_message = Some(message_id.to_string());
     state.selected_full_message = None;
@@ -2732,46 +2928,91 @@ fn message_select_all_state(state: &NativeAppState) -> CheckboxState {
     }
 }
 
-fn start_reply_draft(
-    state_entity: &Entity<NativeAppState>,
-    recipient_input: Entity<TokenInput>,
-    quick_reply_input: Entity<TextInput>,
-    app_cx: &mut App,
-) {
-    let seed = state_entity.update(app_cx, |state, cx| {
-        let Some(seed) = selected_reply_seed(state) else {
-            let message = "Select a loaded message before replying.".to_string();
+fn start_new_compose(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let load = state_entity.update(app_cx, |state, cx| {
+        let Some(account_id) = state.accounts.first().map(|account| account.id.clone()) else {
+            let message = "Add an account before composing a message.".to_string();
             state.compose.error = Some(message.clone());
             state.last_error = Some(message);
             cx.notify();
             return None;
         };
 
-        state.compose.open = true;
-        state.compose.mode = Some("reply".to_string());
-        state.compose.account_id = selected_account_id(state);
-        state.compose.subject = Some(reply_subject(selected_subject(state)));
-        state.compose.in_reply_to = selected_in_reply_to(state);
-        state.compose.sending = false;
-        state.compose.error = None;
-        state.compose.notice = None;
+        state.compose = ComposeState {
+            open: true,
+            mode: Some("compose".to_string()),
+            account_id: Some(account_id.clone()),
+            revision: state.compose.revision.saturating_add(1),
+            signature_loading: true,
+            ..ComposeState::default()
+        };
+        state.selected_view = SelectedView::Mail;
         state.last_error = None;
         cx.notify();
-        Some(seed)
+        Some((
+            state.api_base_url.clone(),
+            account_id,
+            state.compose.revision,
+        ))
     });
 
-    if let Some(seed) = seed {
-        apply_draft_seed(recipient_input, quick_reply_input, seed, app_cx);
+    if let Some((base_url, account_id, revision)) = load {
+        start_compose_signature_load(state_entity, base_url, account_id, revision, app_cx);
     }
 }
 
-fn start_forward_draft(
-    state_entity: &Entity<NativeAppState>,
-    recipient_input: Entity<TokenInput>,
-    quick_reply_input: Entity<TextInput>,
-    app_cx: &mut App,
-) {
-    let seed = state_entity.update(app_cx, |state, cx| {
+fn start_reply_draft(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let load = state_entity.update(app_cx, |state, cx| {
+        let Some(seed) = selected_reply_seed(state) else {
+            let message = "Select a message before replying.".to_string();
+            state.compose.error = Some(message.clone());
+            state.last_error = Some(message);
+            cx.notify();
+            return None;
+        };
+        let Some(account_id) = selected_account_id(state) else {
+            let message = "No account is available for this message.".to_string();
+            state.compose.error = Some(message.clone());
+            state.last_error = Some(message);
+            cx.notify();
+            return None;
+        };
+
+        state.compose = ComposeState {
+            open: true,
+            mode: Some("reply".to_string()),
+            account_id: Some(account_id.clone()),
+            to: seed
+                .recipients
+                .into_iter()
+                .map(|(value, _)| value)
+                .collect(),
+            subject: Some(reply_subject(selected_subject(state))),
+            body: String::new(),
+            in_reply_to: selected_in_reply_to(state),
+            quoted_text: selected_quote_text(state),
+            quoted_from: Some(selected_sender(state)),
+            signature_loading: true,
+            revision: state.compose.revision.saturating_add(1),
+            ..ComposeState::default()
+        };
+        state.selected_view = SelectedView::Mail;
+        state.last_error = None;
+        cx.notify();
+        Some((
+            state.api_base_url.clone(),
+            account_id,
+            state.compose.revision,
+        ))
+    });
+
+    if let Some((base_url, account_id, revision)) = load {
+        start_compose_signature_load(state_entity, base_url, account_id, revision, app_cx);
+    }
+}
+
+fn start_forward_draft(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let load = state_entity.update(app_cx, |state, cx| {
         if state.selected_message.is_none() {
             let message = "Select a message before forwarding.".to_string();
             state.compose.error = Some(message.clone());
@@ -2779,45 +3020,139 @@ fn start_forward_draft(
             cx.notify();
             return None;
         }
+        let Some(account_id) = selected_account_id(state) else {
+            let message = "No account is available for this message.".to_string();
+            state.compose.error = Some(message.clone());
+            state.last_error = Some(message);
+            cx.notify();
+            return None;
+        };
 
-        state.compose.open = true;
-        state.compose.mode = Some("forward".to_string());
-        state.compose.account_id = selected_account_id(state);
-        state.compose.subject = Some(forward_subject(selected_subject(state)));
-        state.compose.in_reply_to = None;
-        state.compose.sending = false;
-        state.compose.error = None;
-        state.compose.notice = None;
+        state.compose = ComposeState {
+            open: true,
+            mode: Some("forward".to_string()),
+            account_id: Some(account_id.clone()),
+            subject: Some(forward_subject(selected_subject(state))),
+            body: selected_forward_body(state),
+            quoted_text: selected_quote_text(state),
+            quoted_from: Some(selected_sender(state)),
+            signature_loading: true,
+            revision: state.compose.revision.saturating_add(1),
+            ..ComposeState::default()
+        };
+        state.selected_view = SelectedView::Mail;
         state.last_error = None;
         cx.notify();
-        Some(NativeDraftSeed {
-            recipients: Vec::new(),
-            body: selected_forward_body(state),
-        })
+        Some((
+            state.api_base_url.clone(),
+            account_id,
+            state.compose.revision,
+        ))
     });
 
-    if let Some(seed) = seed {
-        apply_draft_seed(recipient_input, quick_reply_input, seed, app_cx);
+    if let Some((base_url, account_id, revision)) = load {
+        start_compose_signature_load(state_entity, base_url, account_id, revision, app_cx);
     }
 }
 
-fn apply_draft_seed(
-    recipient_input: Entity<TokenInput>,
-    quick_reply_input: Entity<TextInput>,
-    seed: NativeDraftSeed,
+fn start_compose_signature_load(
+    state_entity: &Entity<NativeAppState>,
+    base_url: String,
+    account_id: String,
+    revision: u64,
     app_cx: &mut App,
 ) {
-    recipient_input.update(app_cx, |input, cx| {
-        input.set_tokens(
-            seed.recipients
-                .iter()
-                .map(|(value, label)| TokenInputToken::new(value.clone(), label.clone())),
-            cx,
-        );
+    let task = app_cx.background_executor().spawn(async move {
+        load_account_signature(base_url, account_id.clone())
+            .map(|signature| (account_id, signature))
     });
-    quick_reply_input.update(app_cx, |input, cx| {
-        input.set_value(seed.body, cx);
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    if state.compose.revision != revision || !state.compose.open {
+                        return;
+                    }
+                    state.compose.signature_loading = false;
+                    match result {
+                        Ok((account_id, settings)) => {
+                            if state.compose.account_id.as_deref() == Some(account_id.as_str()) {
+                                state.compose.signature = settings
+                                    .signature
+                                    .filter(|signature| !signature.trim().is_empty());
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!("failed to load native compose signature: {err:#}");
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native compose signature: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn load_account_signature(base_url: String, account_id: String) -> Result<AccountSettings> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .account_settings(&account_id)
+            .await
+            .with_context(|| format!("get account settings for {account_id}"))
+    })
+}
+
+fn update_compose_recipients(
+    state_entity: &Entity<NativeAppState>,
+    field: ComposeRecipientField,
+    tokens: Vec<TokenInputToken>,
+    app_cx: &mut App,
+) {
+    let values = tokens
+        .into_iter()
+        .filter(|token| token.valid)
+        .map(|token| token.value.to_string())
+        .collect::<Vec<_>>();
+    state_entity.update(app_cx, |state, cx| {
+        match field {
+            ComposeRecipientField::To => state.compose.to = values,
+            ComposeRecipientField::Cc => state.compose.cc = values,
+            ComposeRecipientField::Bcc => state.compose.bcc = values,
+        }
+        cx.notify();
     });
+}
+
+fn update_compose_subject(
+    state_entity: &Entity<NativeAppState>,
+    subject: String,
+    app_cx: &mut App,
+) {
+    state_entity.update(app_cx, |state, cx| {
+        state.compose.subject = Some(subject);
+        cx.notify();
+    });
+}
+
+fn update_compose_body(state_entity: &Entity<NativeAppState>, body: String, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.compose.body = body;
+        cx.notify();
+    });
+}
+
+fn compose_tokens(values: &[String]) -> Vec<TokenInputToken> {
+    values
+        .iter()
+        .map(|value| TokenInputToken::new(value.clone(), value.clone()))
+        .collect()
 }
 
 fn start_snooze_from_picker(
@@ -2925,7 +3260,122 @@ fn start_quick_reply_send(
         .detach();
 }
 
+fn start_compose_send(
+    state_entity: &Entity<NativeAppState>,
+    to_input: Entity<TokenInput>,
+    cc_input: Entity<TokenInput>,
+    bcc_input: Entity<TokenInput>,
+    subject_input: Entity<TextInput>,
+    body_input: Entity<Textarea>,
+    app_cx: &mut App,
+) {
+    let to = token_input_values(&to_input, app_cx);
+    let cc = token_input_values(&cc_input, app_cx);
+    let bcc = token_input_values(&bcc_input, app_cx);
+    let subject = subject_input.read(app_cx).text().to_string();
+    let body = body_input.read(app_cx).text().to_string();
+
+    let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
+        match build_compose_request(state, to, cc, bcc, subject, body) {
+            Ok(request) => {
+                state.compose.sending = true;
+                state.compose.error = None;
+                state.compose.notice = None;
+                state.last_error = None;
+                cx.notify();
+                Some((state.api_base_url.clone(), request))
+            }
+            Err(message) => {
+                state.compose.error = Some(message.clone());
+                state.last_error = Some(message);
+                cx.notify();
+                None
+            }
+        }
+    }) else {
+        return;
+    };
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { send_message_request(base_url, request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let sent = result.is_ok();
+                let error = result.err().map(|err| err.to_string());
+
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state.compose.sending = false;
+                    if sent {
+                        reset_compose_state(state, Some("Message sent".to_string()));
+                        state.last_error = None;
+                    } else if let Some(error) = error.clone() {
+                        state.compose.error = Some(error.clone());
+                        state.last_error = Some(error);
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native compose send status: {err}");
+                }
+
+                if sent {
+                    let _ = to_input.update(&mut async_cx, |input, cx| {
+                        input.set_tokens(Vec::<TokenInputToken>::new(), cx);
+                    });
+                    let _ = cc_input.update(&mut async_cx, |input, cx| {
+                        input.set_tokens(Vec::<TokenInputToken>::new(), cx);
+                    });
+                    let _ = bcc_input.update(&mut async_cx, |input, cx| {
+                        input.set_tokens(Vec::<TokenInputToken>::new(), cx);
+                    });
+                    let _ = subject_input.update(&mut async_cx, |input, cx| {
+                        input.set_value("", cx);
+                    });
+                    let _ = body_input.update(&mut async_cx, |input, cx| {
+                        input.set_value("", cx);
+                    });
+                }
+            }
+        })
+        .detach();
+}
+
+fn discard_compose(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        reset_compose_state(state, None);
+        state.last_error = None;
+        cx.notify();
+    });
+}
+
+fn token_input_values(input: &Entity<TokenInput>, app_cx: &App) -> Vec<String> {
+    input
+        .read(app_cx)
+        .values()
+        .iter()
+        .filter(|token| token.valid)
+        .map(|token| token.value.to_string())
+        .collect()
+}
+
+fn reset_compose_state(state: &mut NativeAppState, notice: Option<String>) {
+    let revision = state.compose.revision.saturating_add(1);
+    state.compose = ComposeState {
+        revision,
+        notice,
+        ..ComposeState::default()
+    };
+}
+
 fn send_quick_reply(base_url: String, request: SendRequest) -> Result<()> {
+    send_message_request(base_url, request)
+}
+
+fn send_message_request(base_url: String, request: SendRequest) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
@@ -2990,12 +3440,129 @@ fn build_quick_reply_request(
     })
 }
 
+fn build_compose_request(
+    state: &NativeAppState,
+    to: Vec<String>,
+    cc: Vec<String>,
+    bcc: Vec<String>,
+    subject: String,
+    body: String,
+) -> std::result::Result<SendRequest, String> {
+    let mode = state.compose.mode.as_deref().unwrap_or("compose");
+    if state.compose.signature_loading {
+        return Err("Wait for the account signature to load.".to_string());
+    }
+
+    let mut to = normalize_recipients(to);
+    if to.is_empty() && mode == "reply" {
+        if let Some(email) = selected_from_email(state) {
+            to.push(email);
+        }
+    }
+    if to.is_empty() {
+        return Err("Add at least one recipient.".to_string());
+    }
+
+    let text_body = build_compose_text_body(state, mode, body)?;
+    let account_id = state
+        .compose
+        .account_id
+        .clone()
+        .or_else(|| selected_account_id(state))
+        .or_else(|| state.accounts.first().map(|account| account.id.clone()))
+        .ok_or_else(|| "No account is available for this message.".to_string())?;
+    let subject = subject.trim().to_string();
+    let in_reply_to = if mode == "reply" {
+        state
+            .compose
+            .in_reply_to
+            .clone()
+            .or_else(|| selected_in_reply_to(state))
+    } else {
+        None
+    };
+
+    Ok(SendRequest {
+        account_id,
+        to,
+        cc: normalize_recipients(cc),
+        bcc: normalize_recipients(bcc),
+        subject,
+        text_body: Some(text_body),
+        html_body: None,
+        in_reply_to,
+    })
+}
+
+fn build_compose_text_body(
+    state: &NativeAppState,
+    mode: &str,
+    body: String,
+) -> std::result::Result<String, String> {
+    let mut text_body = body.trim().to_string();
+    if text_body.is_empty() {
+        return Err("Write a message before sending.".to_string());
+    }
+
+    if mode == "reply" {
+        if let Some(quote) = state
+            .compose
+            .quoted_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|quote| !quote.is_empty())
+        {
+            text_body.push_str("\n\n");
+            text_body.push_str(&build_quoted_block(
+                quote,
+                state.compose.quoted_from.as_deref(),
+            ));
+        }
+    }
+
+    if let Some(signature) = state
+        .compose
+        .signature
+        .as_deref()
+        .map(str::trim)
+        .filter(|signature| !signature.is_empty())
+    {
+        text_body.push_str("\n\n-- \n");
+        text_body.push_str(signature);
+    }
+
+    Ok(text_body)
+}
+
+fn build_quoted_block(text: &str, from: Option<&str>) -> String {
+    let prefix = from
+        .map(str::trim)
+        .filter(|from| !from.is_empty())
+        .map(|from| format!("{from} wrote:\n"))
+        .unwrap_or_else(|| "Original message:\n".to_string());
+    format!(
+        "{prefix}{}",
+        text.lines()
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn build_forward_body(text: &str, from: Option<&str>) -> String {
+    let header = from
+        .map(str::trim)
+        .filter(|from| !from.is_empty())
+        .map(|from| format!("---------- Forwarded message from {from} ----------\n\n"))
+        .unwrap_or_else(|| "---------- Forwarded message ----------\n\n".to_string());
+    format!("{header}{}", text.trim())
+}
+
 fn selected_reply_seed(state: &NativeAppState) -> Option<NativeDraftSeed> {
     let email = selected_from_email(state)?;
     let label = selected_sender(state);
     Some(NativeDraftSeed {
         recipients: vec![(email, label)],
-        body: String::new(),
     })
 }
 
@@ -3026,7 +3593,17 @@ fn selected_from_email(state: &NativeAppState) -> Option<String> {
 }
 
 fn selected_forward_body(state: &NativeAppState) -> String {
-    let body = state
+    let body = selected_quote_text(state).unwrap_or_default();
+
+    if body.is_empty() {
+        return String::new();
+    }
+
+    build_forward_body(&body, Some(&selected_sender(state)))
+}
+
+fn selected_quote_text(state: &NativeAppState) -> Option<String> {
+    state
         .selected_full_message
         .as_ref()
         .and_then(|message| message.body.as_ref())
@@ -3034,17 +3611,6 @@ fn selected_forward_body(state: &NativeAppState) -> String {
         .or_else(|| selected_summary(state).and_then(|message| message.preview.as_ref()))
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
-        .unwrap_or_default();
-
-    if body.is_empty() {
-        return String::new();
-    }
-
-    format!(
-        "\n\n---------- Forwarded message from {} ----------\n\n{}",
-        selected_sender(state),
-        body
-    )
 }
 
 fn reply_subject(subject: String) -> String {
@@ -3095,6 +3661,7 @@ fn date_time_value_to_utc_iso(value: DateTimeValue) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use email_types::MessageBody;
 
     fn account(id: &str) -> Account {
         Account {
@@ -3747,6 +4314,104 @@ mod tests {
 
         assert_eq!(err, "Add at least one recipient.");
     }
+
+    #[test]
+    fn compose_reply_request_appends_quote_and_signature() {
+        let mut state = NativeAppState::default();
+        let mut full = full_message("message", "inbox", true, false);
+        full.subject = Some("Status".to_string());
+        full.from_name = Some("Ada Lovelace".to_string());
+        full.from_email = Some("ada@example.test".to_string());
+        full.message_id = Some("<message@example.test>".to_string());
+        full.body = Some(MessageBody {
+            html_body: None,
+            text_body: Some("Original line\nSecond line".to_string()),
+        });
+        state.selected_message = Some("message".to_string());
+        state.selected_full_message = Some(full);
+        state.compose.open = true;
+        state.compose.mode = Some("reply".to_string());
+        state.compose.account_id = Some("account".to_string());
+        state.compose.subject = Some("Re: Status".to_string());
+        state.compose.in_reply_to = Some("<message@example.test>".to_string());
+        state.compose.quoted_text = Some("Original line\nSecond line".to_string());
+        state.compose.quoted_from = Some("Ada Lovelace".to_string());
+        state.compose.signature = Some("Regards,\nAda".to_string());
+
+        let request = build_compose_request(
+            &state,
+            vec![" ada@example.test ".to_string()],
+            vec![" team@example.test ".to_string()],
+            Vec::new(),
+            " Re: Status ".to_string(),
+            "  Thanks  ".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(request.to, vec!["ada@example.test"]);
+        assert_eq!(request.cc, vec!["team@example.test"]);
+        assert_eq!(request.subject, "Re: Status");
+        assert_eq!(
+            request.text_body.as_deref(),
+            Some(
+                "Thanks\n\nAda Lovelace wrote:\n> Original line\n> Second line\n\n-- \nRegards,\nAda"
+            )
+        );
+        assert_eq!(
+            request.in_reply_to.as_deref(),
+            Some("<message@example.test>")
+        );
+    }
+
+    #[test]
+    fn compose_forward_request_omits_in_reply_to_and_normalizes_recipients() {
+        let mut state = NativeAppState::default();
+        state.compose.open = true;
+        state.compose.mode = Some("forward".to_string());
+        state.compose.account_id = Some("account".to_string());
+        state.compose.subject = Some("Fwd: Plans".to_string());
+        state.compose.in_reply_to = Some("<ignored@example.test>".to_string());
+
+        let request = build_compose_request(
+            &state,
+            vec![
+                " bob@example.test ".to_string(),
+                "BOB@example.test".to_string(),
+            ],
+            vec![" cc@example.test ".to_string()],
+            vec![" audit@example.test ".to_string()],
+            "Fwd: Plans".to_string(),
+            "See below".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(request.to, vec!["bob@example.test"]);
+        assert_eq!(request.cc, vec!["cc@example.test"]);
+        assert_eq!(request.bcc, vec!["audit@example.test"]);
+        assert_eq!(request.in_reply_to, None);
+        assert_eq!(request.text_body.as_deref(), Some("See below"));
+    }
+
+    #[test]
+    fn compose_request_waits_for_signature_load() {
+        let mut state = NativeAppState::default();
+        state.compose.open = true;
+        state.compose.mode = Some("compose".to_string());
+        state.compose.account_id = Some("account".to_string());
+        state.compose.signature_loading = true;
+
+        let err = build_compose_request(
+            &state,
+            vec!["bob@example.test".to_string()],
+            Vec::new(),
+            Vec::new(),
+            "Subject".to_string(),
+            "Body".to_string(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "Wait for the account signature to load.");
+    }
 }
 
 fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
@@ -3754,10 +4419,11 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
         PaletteEntry::new("compose", "New Message")
             .group("Actions")
             .hint("c")
-            .subtitle("Compose editor lands in Phase 5")
+            .subtitle("Compose a new email")
             .keyword("compose")
             .keyword("write")
-            .disabled(true),
+            .disabled(state.accounts.is_empty())
+            .action(|_, cx| cx.dispatch_action(&StartCompose)),
         PaletteEntry::new("advanced-search", "Advanced Search")
             .group("Actions")
             .subtitle("Advanced search modal lands in Phase 4")
@@ -3808,6 +4474,23 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
             .keyword("schedule")
             .action(|_, cx| cx.dispatch_action(&SelectCalendarView)),
     ];
+
+    if state.selected_message.is_some() {
+        entries.push(
+            PaletteEntry::new("message-reply", "Reply")
+                .group("Message")
+                .hint("r")
+                .keyword("respond")
+                .action(|_, cx| cx.dispatch_action(&StartReplyCompose)),
+        );
+        entries.push(
+            PaletteEntry::new("message-forward", "Forward")
+                .group("Message")
+                .hint("f")
+                .keyword("forward")
+                .action(|_, cx| cx.dispatch_action(&StartForwardCompose)),
+        );
+    }
 
     entries.extend(state.labels.iter().map(|label| {
         PaletteEntry::new(format!("label:{}", label.id), label.name.clone())
@@ -4596,7 +5279,7 @@ fn handle_message_list_key(
                     state.selected_message_resource.reset();
                     state.selected_message_labels.clear();
                     state.selected_message_labels_resource.reset();
-                    state.compose = ComposeState::default();
+                    reset_compose_state(state, None);
                 } else {
                     state.selected_message_ids.clear();
                 }
@@ -4728,12 +5411,14 @@ fn message_row_context_menu(
                 let message_id = message_id.clone();
                 move |_, _, app_cx| {
                     start_full_message_load(&reply_state, &message_id, app_cx);
+                    start_reply_draft(&reply_state, app_cx);
                 }
             })
             .action("Forward", {
                 let message_id = message_id.clone();
                 move |_, _, app_cx| {
                     start_full_message_load(&forward_state, &message_id, app_cx);
+                    start_forward_draft(&forward_state, app_cx);
                 }
             })
             .separator()
@@ -5254,6 +5939,389 @@ fn reading_label_row(
     row
 }
 
+fn compose_placeholder(
+    state_entity: &Entity<NativeAppState>,
+    state: &NativeAppState,
+    to_input: Entity<TokenInput>,
+    cc_input: Entity<TokenInput>,
+    bcc_input: Entity<TokenInput>,
+    subject_input: Entity<TextInput>,
+    body_input: Entity<Textarea>,
+    cx: &mut Context<ReadingPanePlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let compose = &state.compose;
+    let mode = compose.mode.as_deref().unwrap_or("compose");
+    let mode_label = compose_mode_label(mode);
+    let header_subject = compose
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+        .unwrap_or("No subject")
+        .to_string();
+    let show_cc = compose.show_cc || !cc_input.read(cx).values().is_empty();
+    let show_bcc = compose.show_bcc || !bcc_input.read(cx).values().is_empty();
+    let has_to = token_input_has_value(&to_input, cx);
+    let has_body = !body_input.read(cx).text().trim().is_empty();
+    let can_send = !compose.sending && !compose.signature_loading && has_to && has_body;
+    let compose_status = compose
+        .error
+        .clone()
+        .map(|error| (error, true))
+        .or_else(|| {
+            compose
+                .signature_loading
+                .then(|| ("Loading signature...".to_string(), false))
+        })
+        .or_else(|| compose.notice.clone().map(|notice| (notice, false)));
+    let signature = compose
+        .signature
+        .clone()
+        .filter(|signature| !signature.trim().is_empty());
+    let quoted_text = (mode == "reply")
+        .then(|| compose.quoted_text.clone())
+        .flatten()
+        .filter(|quote| !quote.trim().is_empty());
+    let quoted_from = compose.quoted_from.clone();
+    let mut body_section = div()
+        .id("compose-body-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .px(px(20.0))
+        .py(px(16.0))
+        .flex()
+        .flex_col()
+        .gap(px(14.0))
+        .child(body_input.clone());
+    if let Some(signature) = signature.as_deref() {
+        body_section = body_section.child(compose_signature_block(signature, cx));
+    }
+    if let Some(quote) = quoted_text.as_deref() {
+        body_section = body_section.child(compose_quote_block(quote, quoted_from.as_deref(), cx));
+    }
+
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .border_l_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .bg(colors.surface)
+        .child(
+            div()
+                .px(px(20.0))
+                .py(px(12.0))
+                .border_b_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .h(px(24.0))
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.0))
+                        .bg(colors.neutral)
+                        .text_size(px(typography.caption.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_neutral)
+                        .child(mode_label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(typography.subtitle.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_neutral)
+                        .child(header_subject),
+                )
+                .child(
+                    Button::new("compose-header-discard")
+                        .label("Discard")
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(compose.sending)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| {
+                                discard_compose(&state_entity, app_cx);
+                            }
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .px(px(20.0))
+                .py(px(12.0))
+                .border_b_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(compose_field_label("To", cx))
+                        .child(div().flex_1().min_w_0().child(to_input.clone()))
+                        .when(!show_cc, |row| {
+                            row.child(
+                                Button::new("compose-show-cc")
+                                    .label("Cc")
+                                    .appearance(ButtonAppearance::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .on_click({
+                                        let state_entity = state_entity.clone();
+                                        move |_, _, app_cx| {
+                                            set_compose_cc_visible(&state_entity, true, app_cx);
+                                        }
+                                    }),
+                            )
+                        })
+                        .when(!show_bcc, |row| {
+                            row.child(
+                                Button::new("compose-show-bcc")
+                                    .label("Bcc")
+                                    .appearance(ButtonAppearance::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .on_click({
+                                        let state_entity = state_entity.clone();
+                                        move |_, _, app_cx| {
+                                            set_compose_bcc_visible(&state_entity, true, app_cx);
+                                        }
+                                    }),
+                            )
+                        }),
+                )
+                .when(show_cc, |fields| {
+                    fields.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(compose_field_label("Cc", cx))
+                            .child(div().flex_1().min_w_0().child(cc_input.clone())),
+                    )
+                })
+                .when(show_bcc, |fields| {
+                    fields.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(compose_field_label("Bcc", cx))
+                            .child(div().flex_1().min_w_0().child(bcc_input.clone())),
+                    )
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(compose_field_label("Subject", cx))
+                        .child(div().flex_1().min_w_0().child(subject_input.clone())),
+                ),
+        )
+        .child(body_section)
+        .child(
+            div()
+                .border_t_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .px(px(20.0))
+                .py(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    Button::new("compose-send")
+                        .label(if compose.sending {
+                            "Sending..."
+                        } else {
+                            "Send"
+                        })
+                        .appearance(ButtonAppearance::Accent)
+                        .size(ButtonSize::Compact)
+                        .disabled(!can_send)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let to_input = to_input.clone();
+                            let cc_input = cc_input.clone();
+                            let bcc_input = bcc_input.clone();
+                            let subject_input = subject_input.clone();
+                            let body_input = body_input.clone();
+                            move |_, _, app_cx| {
+                                start_compose_send(
+                                    &state_entity,
+                                    to_input.clone(),
+                                    cc_input.clone(),
+                                    bcc_input.clone(),
+                                    subject_input.clone(),
+                                    body_input.clone(),
+                                    app_cx,
+                                );
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("compose-discard")
+                        .label("Discard")
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(compose.sending)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| {
+                                discard_compose(&state_entity, app_cx);
+                            }
+                        }),
+                )
+                .when_some(compose_status, |footer, (status, is_error)| {
+                    footer.child(
+                        div()
+                            .text_size(px(typography.caption.size))
+                            .text_color(if is_error {
+                                colors.status_error
+                            } else {
+                                colors.on_subtle
+                            })
+                            .child(status),
+                    )
+                }),
+        )
+}
+
+fn compose_mode_label(mode: &str) -> &'static str {
+    match mode {
+        "reply" => "Reply",
+        "forward" => "Forward",
+        _ => "New message",
+    }
+}
+
+fn compose_field_label(label: &'static str, cx: &mut Context<ReadingPanePlaceholder>) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .w(px(58.0))
+        .text_size(px(theme.typography.caption.size))
+        .text_color(theme.colors.on_subtle)
+        .child(label)
+}
+
+fn compose_signature_block(signature: &str, cx: &mut Context<ReadingPanePlaceholder>) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let mut lines = div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .text_size(px(typography.body.size))
+        .line_height(px(typography.body.line_height))
+        .text_color(colors.on_subtle);
+
+    for line in signature.lines() {
+        lines = lines.child(SharedString::from(if line.is_empty() {
+            " ".to_string()
+        } else {
+            line.to_string()
+        }));
+    }
+
+    div()
+        .border_t_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .pt(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(colors.on_subtle)
+                .child("--"),
+        )
+        .child(lines)
+}
+
+fn compose_quote_block(
+    quote: &str,
+    from: Option<&str>,
+    cx: &mut Context<ReadingPanePlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let heading = from
+        .map(str::trim)
+        .filter(|from| !from.is_empty())
+        .map(|from| format!("{from} wrote:"))
+        .unwrap_or_else(|| "Original message:".to_string());
+    let mut lines = div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .text_size(px(typography.caption.size))
+        .line_height(px(typography.body.line_height))
+        .text_color(colors.on_subtle);
+
+    for line in quote.lines() {
+        lines = lines.child(SharedString::from(if line.is_empty() {
+            " ".to_string()
+        } else {
+            line.to_string()
+        }));
+    }
+
+    div()
+        .border_l_1()
+        .border_color(colors.stroke_neutral)
+        .pl(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_size(px(typography.caption.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.on_subtle)
+                .child(heading),
+        )
+        .child(lines)
+}
+
+fn token_input_has_value(input: &Entity<TokenInput>, cx: &App) -> bool {
+    input
+        .read(cx)
+        .values()
+        .iter()
+        .any(|token| token.valid && !token.value.trim().is_empty())
+}
+
+fn set_compose_cc_visible(state_entity: &Entity<NativeAppState>, visible: bool, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.compose.show_cc = visible;
+        cx.notify();
+    });
+}
+
+fn set_compose_bcc_visible(state_entity: &Entity<NativeAppState>, visible: bool, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.compose.show_bcc = visible;
+        cx.notify();
+    });
+}
+
 fn reading_placeholder(
     state_entity: &Entity<NativeAppState>,
     state: &NativeAppState,
@@ -5390,15 +6458,8 @@ fn reading_placeholder(
                                 .disabled(action_busy)
                                 .on_click({
                                     let state_entity = state_entity.clone();
-                                    let recipient_input = recipient_input.clone();
-                                    let quick_reply_input = quick_reply_input.clone();
                                     move |_, _, app_cx| {
-                                        start_reply_draft(
-                                            &state_entity,
-                                            recipient_input.clone(),
-                                            quick_reply_input.clone(),
-                                            app_cx,
-                                        );
+                                        start_reply_draft(&state_entity, app_cx);
                                     }
                                 }),
                         )
@@ -5410,15 +6471,8 @@ fn reading_placeholder(
                                 .disabled(action_busy)
                                 .on_click({
                                     let state_entity = state_entity.clone();
-                                    let recipient_input = recipient_input.clone();
-                                    let quick_reply_input = quick_reply_input.clone();
                                     move |_, _, app_cx| {
-                                        start_forward_draft(
-                                            &state_entity,
-                                            recipient_input.clone(),
-                                            quick_reply_input.clone(),
-                                            app_cx,
-                                        );
+                                        start_forward_draft(&state_entity, app_cx);
                                     }
                                 }),
                         )
