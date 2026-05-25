@@ -18,7 +18,7 @@ use fluent_layout::{
 };
 use fluent_primitives::{
     Button, ButtonAppearance, ButtonSize, DateTimePicker, DateTimeValue, IconButton, ProgressBar,
-    TokenInput, TokenInputSuggestion,
+    Searchbox, TokenInput, TokenInputSuggestion,
 };
 use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, FontWeight, IntoElement, KeyBinding,
@@ -634,6 +634,13 @@ struct ModalStates {
     advanced_search_open: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SearchState {
+    query: String,
+    submitted_query: Option<String>,
+    previous_source: Option<NativeMessageSource>,
+}
+
 #[derive(Clone, Debug, Default)]
 #[allow(dead_code)]
 struct PaletteState {
@@ -674,6 +681,7 @@ struct NativeAppState {
     selected_full_message: Option<FullMessage>,
     selected_message_resource: AsyncResource<FullMessage, String>,
     selected_event: Option<String>,
+    search: SearchState,
     messages: Vec<Message>,
     messages_resource: AsyncResource<Vec<Message>, String>,
     accounts: Vec<Account>,
@@ -700,6 +708,7 @@ impl Default for NativeAppState {
             selected_full_message: None,
             selected_message_resource: AsyncResource::new(),
             selected_event: None,
+            search: SearchState::default(),
             messages: Vec::new(),
             messages_resource: AsyncResource::new(),
             accounts: Vec::new(),
@@ -900,13 +909,33 @@ impl Render for EmailDesktopApp {
 #[derive(Clone)]
 struct SidebarPlaceholder {
     state: Entity<NativeAppState>,
+    searchbox: Entity<Searchbox>,
 }
 
 impl SidebarPlaceholder {
     fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        Self { state }
+        let searchbox = cx.new({
+            let state = state.clone();
+            move |_| {
+                Searchbox::new()
+                    .placeholder("Search mail")
+                    .on_change({
+                        let state = state.clone();
+                        move |query, app_cx| {
+                            handle_sidebar_search_change(&state, query.to_string(), app_cx);
+                        }
+                    })
+                    .on_submit({
+                        let state = state.clone();
+                        move |query, app_cx| {
+                            submit_sidebar_search(&state, query.to_string(), app_cx);
+                        }
+                    })
+            }
+        });
+        Self { state, searchbox }
     }
 }
 
@@ -917,6 +946,7 @@ impl Render for SidebarPlaceholder {
         let colors = theme.colors.clone();
         let typography = theme.typography;
         let density = state.density.clone();
+        sync_searchbox_value(&self.searchbox, &state.search.query, cx);
 
         let mut account_list = div().flex().flex_col().gap(px(2.0));
         for account in &state.accounts {
@@ -981,6 +1011,7 @@ impl Render for SidebarPlaceholder {
                     .py(px(12.0))
                     .border_b_1()
                     .border_color(colors.stroke_neutral_subtle)
+                    .child(div().mb(px(10.0)).child(self.searchbox.clone()))
                     .child(
                         div()
                             .text_size(px(typography.subtitle.size))
@@ -1412,10 +1443,19 @@ enum NativeMessageSource {
     Folder(String),
     Label(String),
     SmartFolder(String),
+    Search(String),
 }
 
 impl NativeMessageSource {
     fn from_state(state: &NativeAppState) -> Option<Self> {
+        if let Some(query) = state.search.submitted_query.as_ref() {
+            return Some(Self::Search(query.clone()));
+        }
+
+        Self::route_from_state(state)
+    }
+
+    fn route_from_state(state: &NativeAppState) -> Option<Self> {
         if let Some(label_id) = state.selected_label.as_ref() {
             return Some(Self::Label(label_id.clone()));
         }
@@ -1443,6 +1483,19 @@ impl NativeMessageSource {
                 state.selected_folder = Some(format!("smart:{kind}"));
                 state.selected_label = None;
             }
+            Self::Search(query) => {
+                if state.search.submitted_query.is_none() {
+                    state.search.previous_source = Self::route_from_state(state);
+                }
+                state.search.query = query.clone();
+                state.search.submitted_query = Some(query.clone());
+                state.selected_folder = None;
+                state.selected_label = None;
+            }
+        }
+
+        if !matches!(self, Self::Search(_)) {
+            state.search = SearchState::default();
         }
     }
 
@@ -1451,6 +1504,7 @@ impl NativeMessageSource {
             Self::Folder(folder_id) => format!("list messages for {folder_id}"),
             Self::Label(label_id) => format!("list messages for label {label_id}"),
             Self::SmartFolder(kind) => format!("list smart folder {kind}"),
+            Self::Search(query) => format!("search messages for {query}"),
         }
     }
 }
@@ -1553,6 +1607,10 @@ async fn load_message_collection_with_client(
         NativeMessageSource::Folder(folder_id) => client.list_folder_messages(folder_id).await,
         NativeMessageSource::Label(label_id) => client.list_label_messages(label_id).await,
         NativeMessageSource::SmartFolder(kind) => client.list_smart_messages(kind).await,
+        NativeMessageSource::Search(query) => client
+            .search(query, None)
+            .await
+            .map(|results| results.messages),
     }
     .with_context(|| source.load_context())?;
 
@@ -2067,6 +2125,54 @@ mod tests {
     }
 
     #[test]
+    fn search_source_records_previous_route_and_updates_title() {
+        let mut state = NativeAppState {
+            selected_folder: Some("inbox".to_string()),
+            ..NativeAppState::default()
+        };
+
+        NativeMessageSource::Search("quarterly report".to_string()).apply_selection(&mut state);
+
+        assert_eq!(state.selected_folder, None);
+        assert_eq!(state.selected_label, None);
+        assert_eq!(state.search.query, "quarterly report");
+        assert_eq!(
+            state.search.submitted_query.as_deref(),
+            Some("quarterly report")
+        );
+        assert_eq!(
+            state.search.previous_source,
+            Some(NativeMessageSource::Folder("inbox".to_string()))
+        );
+        assert_eq!(
+            NativeMessageSource::from_state(&state),
+            Some(NativeMessageSource::Search("quarterly report".to_string()))
+        );
+        assert_eq!(
+            current_mailbox_title(&state),
+            "Results for \"quarterly report\""
+        );
+    }
+
+    #[test]
+    fn route_selection_clears_active_search() {
+        let mut state = NativeAppState {
+            search: SearchState {
+                query: "report".to_string(),
+                submitted_query: Some("report".to_string()),
+                previous_source: Some(NativeMessageSource::Folder("inbox".to_string())),
+            },
+            ..NativeAppState::default()
+        };
+
+        NativeMessageSource::SmartFolder("unread".to_string()).apply_selection(&mut state);
+
+        assert_eq!(state.search, SearchState::default());
+        assert_eq!(state.selected_folder.as_deref(), Some("smart:unread"));
+        assert_eq!(state.selected_label, None);
+    }
+
+    #[test]
     fn sync_updates_track_folder_progress() {
         let mut status = NativeSyncStatus::default();
 
@@ -2512,6 +2618,59 @@ fn empty_sidebar_text(message: &'static str, cx: &mut Context<SidebarPlaceholder
         .child(message)
 }
 
+fn sync_searchbox_value(
+    searchbox: &Entity<Searchbox>,
+    query: &str,
+    cx: &mut Context<SidebarPlaceholder>,
+) {
+    if searchbox.read(cx).text() != query {
+        searchbox.update(cx, |searchbox, cx| {
+            searchbox.set_value(query.to_string(), cx);
+        });
+    }
+}
+
+fn handle_sidebar_search_change(
+    state_entity: &Entity<NativeAppState>,
+    query: String,
+    app_cx: &mut App,
+) {
+    let restore_source = state_entity.update(app_cx, |state, cx| {
+        state.search.query = query.clone();
+        let restore_source = if query.trim().is_empty() && state.search.submitted_query.is_some() {
+            let restore_source = state.search.previous_source.clone();
+            if restore_source.is_none() {
+                state.search.submitted_query = None;
+                state.search.previous_source = None;
+                state.selected_message = None;
+                state.selected_full_message = None;
+                state.selected_message_resource.reset();
+                state.messages.clear();
+                state.messages_resource.reset();
+            }
+            restore_source
+        } else {
+            None
+        };
+        cx.notify();
+        restore_source
+    });
+
+    if let Some(source) = restore_source {
+        start_message_collection_load(state_entity, source, app_cx);
+    }
+}
+
+fn submit_sidebar_search(state_entity: &Entity<NativeAppState>, query: String, app_cx: &mut App) {
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        handle_sidebar_search_change(state_entity, query, app_cx);
+        return;
+    }
+
+    start_message_collection_load(state_entity, NativeMessageSource::Search(query), app_cx);
+}
+
 fn sync_status_strip(status: &NativeSyncStatus, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
     let theme = cx.theme();
     let colors = theme.colors.clone();
@@ -2949,6 +3108,10 @@ fn message_list_items(messages: &[Message]) -> Vec<SelectableListItem> {
 fn current_mailbox_title(state: &NativeAppState) -> String {
     if state.selected_view == SelectedView::Calendar {
         return "Calendar".to_string();
+    }
+
+    if let Some(query) = state.search.submitted_query.as_deref() {
+        return format!("Results for \"{query}\"");
     }
 
     if let Some(label_id) = state.selected_label.as_deref() {
