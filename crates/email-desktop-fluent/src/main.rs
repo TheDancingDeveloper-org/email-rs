@@ -688,6 +688,8 @@ struct NativeAppState {
     selected_message: Option<String>,
     selected_full_message: Option<FullMessage>,
     selected_message_resource: AsyncResource<FullMessage, String>,
+    selected_message_labels: Vec<Label>,
+    selected_message_labels_resource: AsyncResource<Vec<Label>, String>,
     selected_event: Option<String>,
     search: SearchState,
     messages: Vec<Message>,
@@ -715,6 +717,8 @@ impl Default for NativeAppState {
             selected_message: None,
             selected_full_message: None,
             selected_message_resource: AsyncResource::new(),
+            selected_message_labels: Vec::new(),
+            selected_message_labels_resource: AsyncResource::new(),
             selected_event: None,
             search: SearchState::default(),
             messages: Vec::new(),
@@ -1567,6 +1571,13 @@ struct LoadedMessageCollection {
     messages: Vec<Message>,
     selected_message: Option<String>,
     selected_full_message: Option<FullMessage>,
+    selected_message_labels: Vec<Label>,
+}
+
+#[derive(Clone, Debug)]
+struct LoadedFullMessage {
+    message: FullMessage,
+    labels: Vec<Label>,
 }
 
 #[derive(Clone, Debug)]
@@ -1620,6 +1631,26 @@ struct NativeDraftSeed {
     body: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NativeLabelMutation {
+    Add {
+        message_id: String,
+        label_id: String,
+    },
+    Remove {
+        message_id: String,
+        label_id: String,
+    },
+}
+
+impl NativeLabelMutation {
+    fn message_id(&self) -> &str {
+        match self {
+            Self::Add { message_id, .. } | Self::Remove { message_id, .. } => message_id,
+        }
+    }
+}
+
 fn start_message_collection_load(
     state_entity: &Entity<NativeAppState>,
     source: NativeMessageSource,
@@ -1670,6 +1701,8 @@ fn begin_message_collection_load(
     state.selected_message = None;
     state.selected_full_message = None;
     state.selected_message_resource.reset();
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
     state.last_error = None;
     state.messages_resource.begin_load()
 }
@@ -1705,25 +1738,31 @@ async fn load_message_collection_with_client(
     let selected_message = preferred_message_id
         .filter(|message_id| messages.iter().any(|message| message.id == *message_id))
         .or_else(|| messages.first().map(|message| message.id.clone()));
-    let selected_full_message = if let Some(message_id) = selected_message.as_deref() {
-        match client.get_message(&message_id).await {
-            Ok(full_message) => {
-                update_summary_from_full_message(&mut messages, &full_message);
-                Some(full_message)
+    let (selected_full_message, selected_message_labels) =
+        if let Some(message_id) = selected_message.as_deref() {
+            match client.get_message(&message_id).await {
+                Ok(full_message) => {
+                    update_summary_from_full_message(&mut messages, &full_message);
+                    let labels = client
+                        .get_message_labels(message_id)
+                        .await
+                        .with_context(|| format!("get labels for selected message {message_id}"))?;
+                    (Some(full_message), labels)
+                }
+                Err(err) => {
+                    tracing::warn!("failed to load selected message {message_id}: {err}");
+                    (None, Vec::new())
+                }
             }
-            Err(err) => {
-                tracing::warn!("failed to load selected message {message_id}: {err}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            (None, Vec::new())
+        };
 
     Ok(LoadedMessageCollection {
         messages,
         selected_message,
         selected_full_message,
+        selected_message_labels,
     })
 }
 
@@ -1745,11 +1784,16 @@ fn apply_loaded_message_collection(
         .or_else(|| state.messages.first().map(|message| message.id.clone()));
     state.selected_full_message = None;
     state.selected_message_resource.reset();
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
 
     if let Some(full_message) = loaded.selected_full_message {
         state.selected_message = Some(full_message.id.clone());
         state.selected_message_resource = AsyncResource::ready(full_message.clone());
         apply_full_message(state, full_message);
+        state.selected_message_labels = loaded.selected_message_labels.clone();
+        state.selected_message_labels_resource =
+            AsyncResource::ready(loaded.selected_message_labels);
     }
 
     state.last_error = None;
@@ -1770,6 +1814,8 @@ fn reject_message_collection_load(
     state.selected_message = None;
     state.selected_full_message = None;
     state.selected_message_resource.reset();
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
     state.last_error = Some(message);
     true
 }
@@ -1887,6 +1933,66 @@ fn start_message_mutation_and_refresh(
                     cx.notify();
                 }) {
                     tracing::warn!("failed to apply native message mutation refresh: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn start_message_label_mutation(
+    state_entity: &Entity<NativeAppState>,
+    mutation: NativeLabelMutation,
+    app_cx: &mut App,
+) {
+    let message_id = mutation.message_id().to_string();
+    let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
+        if state.selected_message.as_deref() != Some(message_id.as_str()) {
+            return None;
+        }
+        state.last_error = None;
+        let request = state.selected_message_labels_resource.begin_load();
+        cx.notify();
+        Some((state.api_base_url.clone(), request))
+    }) else {
+        return;
+    };
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { mutate_message_label_and_reload(base_url, mutation) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    if state.selected_message.as_deref() != Some(message_id.as_str()) {
+                        return;
+                    }
+                    match result {
+                        Ok(labels) => {
+                            if state
+                                .selected_message_labels_resource
+                                .resolve(request, labels.clone())
+                            {
+                                state.selected_message_labels = labels;
+                                state.last_error = None;
+                            }
+                        }
+                        Err(err) => {
+                            let message = err.to_string();
+                            if state
+                                .selected_message_labels_resource
+                                .reject(request, message.clone())
+                            {
+                                state.last_error = Some(message);
+                            }
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native message label mutation: {err}");
                 }
             }
         })
@@ -2035,6 +2141,43 @@ fn mutate_message_and_refresh(
     })
 }
 
+fn mutate_message_label_and_reload(
+    base_url: String,
+    mutation: NativeLabelMutation,
+) -> Result<Vec<Label>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        match &mutation {
+            NativeLabelMutation::Add {
+                message_id,
+                label_id,
+            } => {
+                client
+                    .add_message_label(message_id, label_id)
+                    .await
+                    .with_context(|| format!("add label {label_id} to message {message_id}"))?;
+            }
+            NativeLabelMutation::Remove {
+                message_id,
+                label_id,
+            } => {
+                client
+                    .remove_message_label(message_id, label_id)
+                    .await
+                    .with_context(|| {
+                        format!("remove label {label_id} from message {message_id}")
+                    })?;
+            }
+        }
+
+        client
+            .get_message_labels(mutation.message_id())
+            .await
+            .with_context(|| format!("reload labels for message {}", mutation.message_id()))
+    })
+}
+
 fn apply_loaded_sync_refresh(
     state: &mut NativeAppState,
     request: NativeSyncRefreshRequest,
@@ -2111,8 +2254,8 @@ fn start_full_message_load(
                 let result = task.await;
                 if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
                     match result {
-                        Ok(full_message) => {
-                            apply_loaded_full_message(state, request, &message_id, full_message);
+                        Ok(loaded) => {
+                            apply_loaded_full_message(state, request, &message_id, loaded);
                         }
                         Err(err) => {
                             reject_full_message_load(state, request, &message_id, err);
@@ -2143,18 +2286,25 @@ fn begin_full_message_load(
     }
     state.selected_message = Some(message_id.to_string());
     state.selected_full_message = None;
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
     state.last_error = None;
     Some(state.selected_message_resource.begin_load())
 }
 
-fn load_full_message(base_url: String, message_id: String) -> Result<FullMessage> {
+fn load_full_message(base_url: String, message_id: String) -> Result<LoadedFullMessage> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
-        client
+        let message = client
             .get_message(&message_id)
             .await
-            .with_context(|| format!("get message {message_id}"))
+            .with_context(|| format!("get message {message_id}"))?;
+        let labels = client
+            .get_message_labels(&message_id)
+            .await
+            .with_context(|| format!("get labels for message {message_id}"))?;
+        Ok(LoadedFullMessage { message, labels })
     })
 }
 
@@ -2162,19 +2312,21 @@ fn apply_loaded_full_message(
     state: &mut NativeAppState,
     request: ResourceRequest,
     message_id: &str,
-    full_message: FullMessage,
+    loaded: LoadedFullMessage,
 ) -> bool {
     if state.selected_message.as_deref() != Some(message_id) {
         return false;
     }
     if !state
         .selected_message_resource
-        .resolve(request, full_message.clone())
+        .resolve(request, loaded.message.clone())
     {
         return false;
     }
 
-    apply_full_message(state, full_message);
+    apply_full_message(state, loaded.message);
+    state.selected_message_labels = loaded.labels.clone();
+    state.selected_message_labels_resource = AsyncResource::ready(loaded.labels);
     state.last_error = None;
     true
 }
@@ -2198,6 +2350,8 @@ fn reject_full_message_load(
     }
 
     state.selected_full_message = None;
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
     state.last_error = Some(message);
     true
 }
@@ -2630,6 +2784,15 @@ mod tests {
         }
     }
 
+    fn label(id: &str) -> Label {
+        Label {
+            id: id.to_string(),
+            account_id: "account".to_string(),
+            name: id.to_string(),
+            color: "#5b5fc7".to_string(),
+        }
+    }
+
     fn message(id: &str, folder_id: &str, is_read: bool) -> Message {
         Message {
             id: id.to_string(),
@@ -2986,6 +3149,7 @@ mod tests {
                 ],
                 selected_message: Some("selected".to_string()),
                 selected_full_message: Some(full_message("selected", "inbox", true, false)),
+                selected_message_labels: vec![label("important")],
             }),
         };
 
@@ -2993,6 +3157,7 @@ mod tests {
         assert_eq!(state.accounts, vec![account("account")]);
         assert_eq!(state.selected_message.as_deref(), Some("selected"));
         assert_eq!(state.messages.len(), 2);
+        assert_eq!(state.selected_message_labels, vec![label("important")]);
         assert_eq!(total_unread_count(&state), 2);
         assert!(state.last_error.is_none());
     }
@@ -3016,6 +3181,7 @@ mod tests {
                 messages: vec![message("new", "inbox", true)],
                 selected_message: Some("new".to_string()),
                 selected_full_message: Some(full_message("new", "inbox", true, false)),
+                selected_message_labels: Vec::new(),
             }),
         };
 
@@ -3045,6 +3211,8 @@ mod tests {
         state.messages.push(message("old", "inbox", false));
         state.selected_message = Some("old".to_string());
         state.selected_full_message = Some(full_message("old", "inbox", false, false));
+        state.selected_message_labels = vec![label("old-label")];
+        state.selected_message_labels_resource = AsyncResource::ready(vec![label("old-label")]);
 
         let request = begin_message_collection_load(
             &mut state,
@@ -3058,6 +3226,8 @@ mod tests {
         assert_eq!(state.selected_message, None);
         assert!(state.selected_full_message.is_none());
         assert!(state.selected_message_resource.is_idle());
+        assert!(state.selected_message_labels.is_empty());
+        assert!(state.selected_message_labels_resource.is_idle());
         assert_eq!(state.messages_resource.current_request(), Some(request));
         assert!(state.messages_resource.is_loading());
     }
@@ -3078,6 +3248,7 @@ mod tests {
             messages: vec![message("stale", "inbox", false)],
             selected_message: Some("stale".to_string()),
             selected_full_message: None,
+            selected_message_labels: Vec::new(),
         };
 
         assert!(!apply_loaded_message_collection(&mut state, stale, loaded));
@@ -3101,6 +3272,7 @@ mod tests {
             messages: vec![message("message", "inbox", false)],
             selected_message: Some("message".to_string()),
             selected_full_message: Some(full_message("message", "inbox", true, true)),
+            selected_message_labels: vec![label("work")],
         };
 
         assert!(apply_loaded_message_collection(&mut state, request, loaded));
@@ -3109,6 +3281,8 @@ mod tests {
         assert!(state.selected_message_resource.is_ready());
         assert!(state.messages[0].is_read);
         assert!(state.messages[0].is_flagged);
+        assert_eq!(state.selected_message_labels, vec![label("work")]);
+        assert!(state.selected_message_labels_resource.is_ready());
         assert_eq!(total_unread_count(&state), 0);
     }
 
@@ -3122,7 +3296,10 @@ mod tests {
             &mut state,
             stale,
             "first",
-            full_message("first", "inbox", true, false),
+            LoadedFullMessage {
+                message: full_message("first", "inbox", true, false),
+                labels: Vec::new(),
+            },
         ));
         assert_eq!(state.selected_message.as_deref(), Some("second"));
         assert_eq!(
@@ -3401,6 +3578,8 @@ fn handle_sidebar_search_change(
                 state.selected_message = None;
                 state.selected_full_message = None;
                 state.selected_message_resource.reset();
+                state.selected_message_labels.clear();
+                state.selected_message_labels_resource.reset();
                 state.messages.clear();
                 state.messages_resource.reset();
             }
@@ -4320,6 +4499,109 @@ fn reading_badge(label: &'static str, cx: &mut Context<ReadingPanePlaceholder>) 
         .child(label)
 }
 
+fn reading_label_row(
+    state_entity: &Entity<NativeAppState>,
+    state: &NativeAppState,
+    message_id: &str,
+    cx: &mut Context<ReadingPanePlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let selected_account_id = selected_account_id(state);
+    let attached_ids = state
+        .selected_message_labels
+        .iter()
+        .map(|label| label.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let addable_labels = state
+        .labels
+        .iter()
+        .filter(|label| {
+            selected_account_id
+                .as_deref()
+                .map_or(true, |id| label.account_id == id)
+        })
+        .filter(|label| !attached_ids.contains(label.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut row = div()
+        .pt(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .flex_wrap();
+
+    if state.selected_message_labels.is_empty()
+        && state.selected_message_labels_resource.is_loading()
+    {
+        row = row.child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(colors.on_subtle)
+                .child("Loading labels..."),
+        );
+    }
+
+    for (idx, label) in state.selected_message_labels.iter().enumerate() {
+        let state_entity = state_entity.clone();
+        let message_id = message_id.to_string();
+        let label_id = label.id.clone();
+        row = row.child(
+            Button::new(("reading-remove-label", idx))
+                .label(format!("{} x", label.name))
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(state.selected_message_labels_resource.is_loading())
+                .on_click(move |_, _, app_cx| {
+                    start_message_label_mutation(
+                        &state_entity,
+                        NativeLabelMutation::Remove {
+                            message_id: message_id.clone(),
+                            label_id: label_id.clone(),
+                        },
+                        app_cx,
+                    );
+                }),
+        );
+    }
+
+    for (idx, label) in addable_labels.into_iter().enumerate() {
+        let state_entity = state_entity.clone();
+        let message_id = message_id.to_string();
+        let label_id = label.id.clone();
+        row = row.child(
+            Button::new(("reading-add-label", idx))
+                .label(format!("+ {}", label.name))
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(state.selected_message_labels_resource.is_loading())
+                .on_click(move |_, _, app_cx| {
+                    start_message_label_mutation(
+                        &state_entity,
+                        NativeLabelMutation::Add {
+                            message_id: message_id.clone(),
+                            label_id: label_id.clone(),
+                        },
+                        app_cx,
+                    );
+                }),
+        );
+    }
+
+    if let Some(error) = state.selected_message_labels_resource.error() {
+        row = row.child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(colors.status_error)
+                .child(format!("Labels failed: {error}")),
+        );
+    }
+
+    row
+}
+
 fn reading_placeholder(
     state_entity: &Entity<NativeAppState>,
     state: &NativeAppState,
@@ -4441,6 +4723,7 @@ fn reading_placeholder(
                                 .child(date),
                         ),
                 )
+                .child(reading_label_row(state_entity, state, &message_id, cx))
                 .child(
                     div()
                         .pt(px(10.0))
