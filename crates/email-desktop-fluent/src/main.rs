@@ -17,8 +17,8 @@ use fluent_layout::{
 };
 use fluent_primitives::{DateTimePicker, DateTimeValue, TokenInput, TokenInputSuggestion};
 use gpui::{
-    actions, div, prelude::*, px, Context, Entity, FontWeight, IntoElement, KeyBinding, Render,
-    Window,
+    actions, div, prelude::*, px, App, Context, Entity, FontWeight, IntoElement, KeyBinding,
+    Render, SharedString, Window,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -73,9 +73,11 @@ fn main() -> Result<()> {
                 KeyBinding::new("ctrl-minus", DecreaseDensity, None),
             ]);
 
+            let state_entity = cx.new(|_| initial_state.clone());
+
             let modal_host = cx.new(ModalHost::new);
             let sidebar = cx.new({
-                let state = initial_state.clone();
+                let state = state_entity.clone();
                 move |cx| SidebarPlaceholder::new(cx, state.clone())
             });
             let sidebar_dock = cx.new(|cx| {
@@ -85,11 +87,11 @@ fn main() -> Result<()> {
             });
 
             let message_list = cx.new({
-                let state = initial_state.clone();
+                let state = state_entity.clone();
                 move |cx| MessageListPlaceholder::new(cx, state.clone())
             });
             let reading_pane = cx.new({
-                let state = initial_state.clone();
+                let state = state_entity.clone();
                 move |cx| ReadingPanePlaceholder::new(cx, state.clone())
             });
             let mail_split = cx.new(|_| {
@@ -110,7 +112,7 @@ fn main() -> Result<()> {
             });
 
             let status_bar = cx.new({
-                let state = initial_state.clone();
+                let state = state_entity.clone();
                 move |cx| StatusBar::new(cx, state.clone())
             });
 
@@ -124,7 +126,7 @@ fn main() -> Result<()> {
             });
 
             let palette = cx.new({
-                let state = initial_state.clone();
+                let state = state_entity.read(cx).clone();
                 move |cx| {
                     let mut palette = CommandPalette::new(cx).max_results(14);
                     palette.set_entries(palette_entries(&state), cx);
@@ -132,7 +134,7 @@ fn main() -> Result<()> {
                 }
             });
 
-            cx.new(|cx| EmailDesktopApp::new(cx, initial_state.clone(), workspace, palette))
+            cx.new(|cx| EmailDesktopApp::new(cx, state_entity.clone(), workspace, palette))
         });
 
     Ok(())
@@ -270,11 +272,18 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
     let selected_full_message = if let Some(message_id) = selected_message.as_deref() {
         match client.get_message(message_id).await {
             Ok(full_message) => {
+                let was_unread = messages
+                    .iter()
+                    .find(|message| message.id == full_message.id)
+                    .is_some_and(|message| !message.is_read);
                 if let Some(summary) = messages
                     .iter_mut()
                     .find(|message| message.id == full_message.id)
                 {
                     summary.is_read = full_message.is_read;
+                }
+                if was_unread && full_message.is_read {
+                    decrement_folder_unread(&mut folders_by_account, &full_message.folder_id);
                 }
                 Some(full_message)
             }
@@ -416,7 +425,7 @@ impl Default for NativeAppState {
 }
 
 struct EmailDesktopApp {
-    state: NativeAppState,
+    state: Entity<NativeAppState>,
     workspace: Entity<Workspace>,
     palette: Entity<CommandPalette>,
 }
@@ -424,13 +433,15 @@ struct EmailDesktopApp {
 impl EmailDesktopApp {
     fn new(
         cx: &mut Context<Self>,
-        state: NativeAppState,
+        state: Entity<NativeAppState>,
         workspace: Entity<Workspace>,
         palette: Entity<CommandPalette>,
     ) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
-        WindowTitle::set_title(cx, native_window_title(&state));
-        WindowTitle::set_status(cx, native_window_status(&state));
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        let state_snapshot = state.read(cx).clone();
+        WindowTitle::set_title(cx, native_window_title(&state_snapshot));
+        WindowTitle::set_status(cx, native_window_status(&state_snapshot));
         Self {
             state,
             workspace,
@@ -446,48 +457,67 @@ impl Render for EmailDesktopApp {
             .size_full()
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &TogglePalette, _, cx| {
-                    app.state.palette.open = true;
+                    app.state.update(cx, |state, cx| {
+                        state.palette.open = true;
+                        cx.notify();
+                    });
                     app.palette.update(cx, |palette, cx| palette.show(cx));
                     cx.notify();
                 }),
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &ApplyLightTheme, _, cx| {
-                    app.state.theme = ThemeMode::Light;
+                    app.state.update(cx, |state, cx| {
+                        state.theme = ThemeMode::Light;
+                        cx.notify();
+                    });
                     Theme::apply_light(cx);
                     cx.notify();
                 }),
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &ApplyDarkTheme, _, cx| {
-                    app.state.theme = ThemeMode::Dark;
+                    app.state.update(cx, |state, cx| {
+                        state.theme = ThemeMode::Dark;
+                        cx.notify();
+                    });
                     Theme::apply_dark(cx);
                     cx.notify();
                 }),
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &SelectMailView, _, cx| {
-                    app.state.selected_view = SelectedView::Mail;
+                    app.state.update(cx, |state, cx| {
+                        state.selected_view = SelectedView::Mail;
+                        cx.notify();
+                    });
                     cx.notify();
                 }),
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &SelectCalendarView, _, cx| {
-                    app.state.selected_view = SelectedView::Calendar;
+                    app.state.update(cx, |state, cx| {
+                        state.selected_view = SelectedView::Calendar;
+                        cx.notify();
+                    });
                     cx.notify();
                 }),
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &IncreaseDensity, _, cx| {
-                    app.state.density =
-                        DensityTokens::new(app.state.density.level.saturating_add(1));
+                    app.state.update(cx, |state, cx| {
+                        state.density = DensityTokens::new(state.density.level.saturating_add(1));
+                        cx.notify();
+                    });
                     cx.notify();
                 }),
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &DecreaseDensity, _, cx| {
-                    app.state.density =
-                        DensityTokens::new(app.state.density.level.saturating_sub(1));
+                    app.state.update(cx, |state, cx| {
+                        state.density = DensityTokens::new(state.density.level.saturating_sub(1));
+                        cx.notify();
+                    });
                     cx.notify();
                 }),
             )
@@ -498,30 +528,31 @@ impl Render for EmailDesktopApp {
 
 #[derive(Clone)]
 struct SidebarPlaceholder {
-    state: NativeAppState,
+    state: Entity<NativeAppState>,
 }
 
 impl SidebarPlaceholder {
-    fn new(cx: &mut Context<Self>, state: NativeAppState) -> Self {
+    fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
         Self { state }
     }
 }
 
 impl Render for SidebarPlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx).clone();
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let typography = theme.typography;
-        let density = self.state.density.clone();
+        let density = state.density.clone();
 
         let mut account_list = div().flex().flex_col().gap(px(density.gap));
-        for account in &self.state.accounts {
-            let folders = self
-                .state
+        for account in &state.accounts {
+            let folders = state
                 .folders_by_account
                 .get(&account.id)
-                .map(|folders| folders.len())
+                .cloned()
                 .unwrap_or_default();
             account_list = account_list.child(
                 div()
@@ -543,12 +574,39 @@ impl Render for SidebarPlaceholder {
                         div()
                             .text_size(px(typography.caption.size))
                             .text_color(colors.on_subtle)
-                            .child(format!("{} folders - {}", folders, account.email)),
+                            .child(format!("{} folders - {}", folders.len(), account.email)),
                     ),
             );
+
+            for folder in folders.iter().filter(|folder| !folder.is_excluded) {
+                let folder_id = folder.id.clone();
+                let folder_key = folder_id.clone();
+                let state_entity = self.state.clone();
+                let selected = state.selected_folder.as_deref() == Some(folder.id.as_str())
+                    && state.selected_label.is_none();
+                account_list = account_list.child(
+                    sidebar_nav_row(
+                        folder_label(folder),
+                        selected,
+                        Some(folder.unread_count),
+                        cx,
+                    )
+                    .id(SharedString::from(format!("sidebar-folder-{folder_key}")))
+                    .cursor_pointer()
+                    .on_click(move |_, _, app_cx| {
+                        state_entity.update(app_cx, |state, cx| {
+                            if let Err(err) = select_folder_sync(state, &folder_id) {
+                                apply_navigation_error(state, err);
+                            }
+                            sync_window_title(state, cx);
+                            cx.notify();
+                        });
+                    }),
+                );
+            }
         }
 
-        if self.state.accounts.is_empty() {
+        if state.accounts.is_empty() {
             account_list = account_list.child(
                 div()
                     .p(px(10.0))
@@ -568,52 +626,73 @@ impl Render for SidebarPlaceholder {
             .gap(px(12.0))
             .p(px(12.0))
             .bg(colors.panel_bg)
+            .child(section_label("Views", cx))
+            .child(smart_folder_rows(&self.state, &state, cx))
             .child(section_label("Accounts", cx))
             .child(account_list)
             .child(section_label("Labels", cx))
-            .child(label_summary(&self.state, cx))
+            .child(label_rows(&self.state, &state, cx))
             .child(section_label("Navigation", cx))
-            .child(nav_item(
-                "Mail",
-                self.state.selected_view == SelectedView::Mail,
-                cx,
-            ))
-            .child(nav_item(
-                "Calendar",
-                self.state.selected_view == SelectedView::Calendar,
-                cx,
-            ))
+            .child(
+                nav_item("Mail", state.selected_view == SelectedView::Mail, cx)
+                    .id("nav-mail")
+                    .cursor_pointer()
+                    .on_click({
+                        let state_entity = self.state.clone();
+                        move |_, _, app_cx| {
+                            state_entity.update(app_cx, |state, cx| {
+                                state.selected_view = SelectedView::Mail;
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(
+                nav_item(
+                    "Calendar",
+                    state.selected_view == SelectedView::Calendar,
+                    cx,
+                )
+                .id("nav-calendar")
+                .cursor_pointer()
+                .on_click({
+                    let state_entity = self.state.clone();
+                    move |_, _, app_cx| {
+                        state_entity.update(app_cx, |state, cx| {
+                            state.selected_view = SelectedView::Calendar;
+                            cx.notify();
+                        });
+                    }
+                }),
+            )
     }
 }
 
 #[derive(Clone)]
 struct MessageListPlaceholder {
-    state: NativeAppState,
+    state: Entity<NativeAppState>,
 }
 
 impl MessageListPlaceholder {
-    fn new(cx: &mut Context<Self>, state: NativeAppState) -> Self {
+    fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
         Self { state }
     }
 }
 
 impl Render for MessageListPlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx).clone();
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let typography = theme.typography;
-        let density = self.state.density.clone();
-        let entity = cx.entity();
-        let select_entity = entity.clone();
-        let activate_entity = entity.clone();
-        let message_items = message_list_items(&self.state.messages);
-        let selected_message = self.state.selected_message.clone().or_else(|| {
-            self.state
-                .messages
-                .first()
-                .map(|message| message.id.clone())
-        });
+        let density = state.density.clone();
+        let message_items = message_list_items(&state.messages);
+        let selected_message = state
+            .selected_message
+            .clone()
+            .or_else(|| state.messages.first().map(|message| message.id.clone()));
 
         div()
             .size_full()
@@ -640,9 +719,9 @@ impl Render for MessageListPlaceholder {
                             .text_color(colors.on_subtle)
                             .child(format!(
                                 "{}; {}; {}",
-                                resource_summary(&self.state.accounts_resource, "accounts"),
-                                resource_summary(&self.state.messages_resource, "messages"),
-                                self.state.api_base_url
+                                resource_summary(&state.accounts_resource, "accounts"),
+                                resource_summary(&state.messages_resource, "messages"),
+                                state.api_base_url
                             )),
                     ),
             )
@@ -652,17 +731,25 @@ impl Render for MessageListPlaceholder {
                         .items(message_items)
                         .empty_text("No messages loaded for the selected folder")
                         .row_height(density.message_row_height.max(56.0))
-                        .on_select(move |message_id, _, app_cx| {
-                            select_entity.update(app_cx, |this, cx| {
-                                this.state.selected_message = Some(message_id.to_string());
-                                cx.notify();
-                            });
+                        .on_select({
+                            let state_entity = self.state.clone();
+                            move |message_id, _, app_cx| {
+                                select_message_from_list(
+                                    &state_entity,
+                                    message_id.as_ref(),
+                                    app_cx,
+                                );
+                            }
                         })
-                        .on_activate(move |message_id, _, _, app_cx| {
-                            activate_entity.update(app_cx, |this, cx| {
-                                this.state.selected_message = Some(message_id.to_string());
-                                cx.notify();
-                            });
+                        .on_activate({
+                            let state_entity = self.state.clone();
+                            move |message_id, _, _, app_cx| {
+                                select_message_from_list(
+                                    &state_entity,
+                                    message_id.as_ref(),
+                                    app_cx,
+                                );
+                            }
                         })
                         .when_some(selected_message, |list, selected| list.selected(selected)),
                 ),
@@ -672,15 +759,16 @@ impl Render for MessageListPlaceholder {
 
 #[derive(Clone)]
 struct ReadingPanePlaceholder {
-    state: NativeAppState,
+    state: Entity<NativeAppState>,
     recipient_input: Entity<TokenInput>,
     snooze_picker: Entity<DateTimePicker>,
 }
 
 impl ReadingPanePlaceholder {
-    fn new(cx: &mut Context<Self>, state: NativeAppState) -> Self {
+    fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
-        let suggestions = recipient_suggestions(&state);
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        let suggestions = recipient_suggestions(state.read(cx));
         let recipient_input = cx.new(move |_| {
             TokenInput::new()
                 .placeholder("Add recipient")
@@ -703,8 +791,9 @@ impl ReadingPanePlaceholder {
 
 impl Render for ReadingPanePlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx).clone();
         reading_placeholder(
-            &self.state,
+            &state,
             self.recipient_input.clone(),
             self.snooze_picker.clone(),
             cx,
@@ -714,27 +803,28 @@ impl Render for ReadingPanePlaceholder {
 
 #[derive(Clone)]
 struct StatusBar {
-    state: NativeAppState,
+    state: Entity<NativeAppState>,
 }
 
 impl StatusBar {
-    fn new(cx: &mut Context<Self>, state: NativeAppState) -> Self {
+    fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
         Self { state }
     }
 }
 
 impl Render for StatusBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx).clone();
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let typography = theme.typography;
-        let status = self
-            .state
+        let status = state
             .last_error
             .clone()
             .unwrap_or_else(|| "Axum in-process server ready".to_string());
-        let unread = total_unread_count(&self.state);
+        let unread = total_unread_count(&state);
 
         div()
             .h(px(28.0))
@@ -745,7 +835,7 @@ impl Render for StatusBar {
             .border_color(colors.stroke_neutral_subtle)
             .bg(colors.panel_bg)
             .text_size(px(typography.caption.size))
-            .text_color(if self.state.last_error.is_some() {
+            .text_color(if state.last_error.is_some() {
                 colors.status_error
             } else {
                 colors.on_subtle
@@ -753,10 +843,10 @@ impl Render for StatusBar {
             .child(format!(
                 "{} | {} | {} | density {} | {:?}",
                 status,
-                resource_summary(&self.state.messages_resource, "messages"),
+                resource_summary(&state.messages_resource, "messages"),
                 unread_status_text(unread),
-                self.state.density.level,
-                self.state.theme
+                state.density.level,
+                state.theme
             ))
     }
 }
@@ -808,6 +898,153 @@ fn unread_status_text(unread: i64) -> String {
     }
 }
 
+fn sync_window_title(state: &NativeAppState, cx: &mut App) {
+    WindowTitle::set_title(cx, native_window_title(state));
+    WindowTitle::set_status(cx, native_window_status(state));
+}
+
+fn select_message_from_list(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    app_cx: &mut App,
+) {
+    let message_id = message_id.to_string();
+    state_entity.update(app_cx, |state, cx| {
+        if let Err(err) = select_message_sync(state, &message_id) {
+            apply_navigation_error(state, err);
+        }
+        sync_window_title(state, cx);
+        cx.notify();
+    });
+}
+
+fn select_folder_sync(state: &mut NativeAppState, folder_id: &str) -> Result<()> {
+    let client = EmailClient::new(&state.api_base_url)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let messages = rt
+        .block_on(client.list_folder_messages(folder_id))
+        .with_context(|| format!("list messages for {folder_id}"))?;
+
+    state.selected_view = SelectedView::Mail;
+    state.selected_folder = Some(folder_id.to_string());
+    state.selected_label = None;
+    apply_message_collection(state, &client, &rt, messages)
+}
+
+fn select_label_sync(state: &mut NativeAppState, label_id: &str) -> Result<()> {
+    let client = EmailClient::new(&state.api_base_url)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let messages = rt
+        .block_on(client.list_label_messages(label_id))
+        .with_context(|| format!("list messages for label {label_id}"))?;
+
+    state.selected_view = SelectedView::Mail;
+    state.selected_folder = None;
+    state.selected_label = Some(label_id.to_string());
+    apply_message_collection(state, &client, &rt, messages)
+}
+
+fn select_smart_folder_sync(state: &mut NativeAppState, kind: &str) -> Result<()> {
+    let client = EmailClient::new(&state.api_base_url)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let messages = rt
+        .block_on(client.list_smart_messages(kind))
+        .with_context(|| format!("list smart folder {kind}"))?;
+
+    state.selected_view = SelectedView::Mail;
+    state.selected_folder = Some(format!("smart:{kind}"));
+    state.selected_label = None;
+    apply_message_collection(state, &client, &rt, messages)
+}
+
+fn select_message_sync(state: &mut NativeAppState, message_id: &str) -> Result<()> {
+    let client = EmailClient::new(&state.api_base_url)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let full_message = rt
+        .block_on(client.get_message(message_id))
+        .with_context(|| format!("get message {message_id}"))?;
+
+    state.selected_message = Some(message_id.to_string());
+    apply_full_message(state, full_message);
+    state.last_error = None;
+    Ok(())
+}
+
+fn apply_message_collection(
+    state: &mut NativeAppState,
+    client: &EmailClient,
+    rt: &tokio::runtime::Runtime,
+    mut messages: Vec<Message>,
+) -> Result<()> {
+    let selected_message = messages.first().map(|message| message.id.clone());
+    let selected_full_message = if let Some(message_id) = selected_message.as_deref() {
+        match rt.block_on(client.get_message(message_id)) {
+            Ok(full_message) => Some(full_message),
+            Err(err) => {
+                tracing::warn!("failed to load selected message {message_id}: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    state.messages = std::mem::take(&mut messages);
+    state.messages_resource = AsyncResource::ready(state.messages.clone());
+    state.selected_message = selected_message;
+    state.selected_full_message = None;
+    if let Some(full_message) = selected_full_message {
+        apply_full_message(state, full_message);
+    }
+    state.last_error = None;
+    Ok(())
+}
+
+fn apply_full_message(state: &mut NativeAppState, full_message: FullMessage) {
+    let was_unread = state
+        .messages
+        .iter()
+        .find(|message| message.id == full_message.id)
+        .is_some_and(|message| !message.is_read);
+    if let Some(summary) = state
+        .messages
+        .iter_mut()
+        .find(|message| message.id == full_message.id)
+    {
+        summary.is_read = full_message.is_read;
+        summary.is_flagged = full_message.is_flagged;
+    }
+    if was_unread && full_message.is_read {
+        decrement_folder_unread(&mut state.folders_by_account, &full_message.folder_id);
+    }
+    state.selected_full_message = Some(full_message);
+    state.messages_resource = AsyncResource::ready(state.messages.clone());
+}
+
+fn decrement_folder_unread(
+    folders_by_account: &mut BTreeMap<String, Vec<Folder>>,
+    folder_id: &str,
+) {
+    for folder in folders_by_account
+        .values_mut()
+        .flat_map(|folders| folders.iter_mut())
+    {
+        if folder.id == folder_id {
+            folder.unread_count = folder.unread_count.saturating_sub(1);
+            break;
+        }
+    }
+}
+
+fn apply_navigation_error(state: &mut NativeAppState, err: anyhow::Error) {
+    let message = err.to_string();
+    state.messages.clear();
+    state.messages_resource = AsyncResource::failed(message.clone());
+    state.selected_message = None;
+    state.selected_full_message = None;
+    state.last_error = Some(message);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,6 +1082,60 @@ mod tests {
 
         assert_eq!(native_window_title(&state), "email-rs FluentGUI");
         assert_eq!(native_window_status(&state), "No unread messages");
+    }
+
+    #[test]
+    fn applying_read_full_message_updates_summary_and_folder_unread() {
+        let mut state = NativeAppState::default();
+        state
+            .folders_by_account
+            .insert("account".to_string(), vec![folder("inbox", 1)]);
+        state.messages.push(Message {
+            id: "message".to_string(),
+            account_id: "account".to_string(),
+            folder_id: "inbox".to_string(),
+            uid: 1,
+            message_id: None,
+            thread_id: None,
+            subject: Some("Subject".to_string()),
+            from_name: None,
+            from_email: None,
+            to_json: None,
+            date: None,
+            is_read: false,
+            is_flagged: false,
+            is_draft: false,
+            has_attachments: false,
+            preview: None,
+            snoozed_until: None,
+        });
+
+        apply_full_message(
+            &mut state,
+            FullMessage {
+                id: "message".to_string(),
+                account_id: "account".to_string(),
+                folder_id: "inbox".to_string(),
+                uid: 1,
+                message_id: None,
+                thread_id: None,
+                subject: Some("Subject".to_string()),
+                from_name: None,
+                from_email: None,
+                to: None,
+                date: None,
+                is_read: true,
+                is_flagged: true,
+                is_draft: false,
+                has_attachments: false,
+                preview: None,
+                body: None,
+            },
+        );
+
+        assert!(state.messages[0].is_read);
+        assert!(state.messages[0].is_flagged);
+        assert_eq!(total_unread_count(&state), 0);
     }
 }
 
@@ -954,28 +1245,139 @@ fn section_label(label: &'static str, cx: &mut Context<SidebarPlaceholder>) -> g
         .child(label)
 }
 
-fn label_summary(state: &NativeAppState, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
+fn smart_folder_rows(
+    state_entity: &Entity<NativeAppState>,
+    state: &NativeAppState,
+    cx: &mut Context<SidebarPlaceholder>,
+) -> gpui::Div {
+    let mut rows = div().flex().flex_col().gap(px(state.density.gap));
+    for (kind, label) in [
+        ("all", "All Inboxes"),
+        ("unread", "Unread"),
+        ("flagged", "Flagged"),
+        ("snoozed", "Snoozed"),
+    ] {
+        let smart_id = format!("smart:{kind}");
+        let selected = state.selected_folder.as_deref() == Some(smart_id.as_str());
+        let kind = kind.to_string();
+        let smart_key = kind.clone();
+        let state_entity = state_entity.clone();
+        rows = rows.child(
+            sidebar_nav_row(label.to_string(), selected, None, cx)
+                .id(SharedString::from(format!("smart-folder-{smart_key}")))
+                .cursor_pointer()
+                .on_click(move |_, _, app_cx| {
+                    state_entity.update(app_cx, |state, cx| {
+                        if let Err(err) = select_smart_folder_sync(state, &kind) {
+                            apply_navigation_error(state, err);
+                        }
+                        sync_window_title(state, cx);
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+    rows
+}
+
+fn label_rows(
+    state_entity: &Entity<NativeAppState>,
+    state: &NativeAppState,
+    cx: &mut Context<SidebarPlaceholder>,
+) -> gpui::Div {
+    if state.labels.is_empty() {
+        let theme = cx.theme();
+        return div()
+            .p(px(10.0))
+            .rounded(px(4.0))
+            .bg(theme.colors.neutral)
+            .text_size(px(theme.typography.body.size))
+            .text_color(theme.colors.on_subtle)
+            .child("No labels loaded");
+    }
+
+    let mut rows = div().flex().flex_col().gap(px(state.density.gap));
+    for label in &state.labels {
+        let label_id = label.id.clone();
+        let label_key = label_id.clone();
+        let selected = state.selected_label.as_deref() == Some(label.id.as_str());
+        let state_entity = state_entity.clone();
+        rows = rows.child(
+            sidebar_nav_row(label.name.clone(), selected, None, cx)
+                .id(SharedString::from(format!("label-{label_key}")))
+                .cursor_pointer()
+                .on_click(move |_, _, app_cx| {
+                    state_entity.update(app_cx, |state, cx| {
+                        if let Err(err) = select_label_sync(state, &label_id) {
+                            apply_navigation_error(state, err);
+                        }
+                        sync_window_title(state, cx);
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+    rows
+}
+
+fn sidebar_nav_row(
+    label: String,
+    selected: bool,
+    count: Option<i64>,
+    cx: &mut Context<SidebarPlaceholder>,
+) -> gpui::Div {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let typography = theme.typography;
-    let text = if state.labels.is_empty() {
-        "No labels loaded".to_string()
-    } else {
-        state
-            .labels
-            .iter()
-            .map(|label| label.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    div()
-        .p(px(10.0))
+    let mut row = div()
+        .min_h(px(30.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .justify_between()
         .rounded(px(4.0))
-        .bg(colors.neutral)
+        .bg(if selected {
+            colors.accent
+        } else {
+            colors.neutral
+        })
         .text_size(px(typography.body.size))
-        .text_color(colors.on_neutral)
-        .child(text)
+        .text_color(if selected {
+            colors.on_accent
+        } else {
+            colors.on_neutral
+        })
+        .child(label);
+
+    if let Some(count) = count.filter(|count| *count > 0) {
+        row = row.child(
+            div()
+                .px(px(6.0))
+                .rounded(px(999.0))
+                .bg(if selected {
+                    colors.on_accent
+                } else {
+                    colors.neutral_hover
+                })
+                .text_size(px(10.0))
+                .text_color(if selected {
+                    colors.accent
+                } else {
+                    colors.on_subtle
+                })
+                .child(count.to_string()),
+        );
+    }
+
+    row
+}
+
+fn folder_label(folder: &Folder) -> String {
+    if folder.full_path == folder.name {
+        folder.name.clone()
+    } else {
+        folder.full_path.clone()
+    }
 }
 
 fn nav_item(
