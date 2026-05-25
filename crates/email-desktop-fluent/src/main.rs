@@ -325,22 +325,12 @@ fn load_initial_state(base_url: &str) -> Result<NativeAppState> {
 }
 
 async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
-    let accounts = client.list_accounts().await.context("list accounts")?;
-    let mut folders_by_account = BTreeMap::new();
-    let mut labels = Vec::new();
-
-    for account in &accounts {
-        let folders = client
-            .list_folders(&account.id)
-            .await
-            .with_context(|| format!("list folders for {}", account.id))?;
-        folders_by_account.insert(account.id.clone(), folders);
-
-        match client.list_labels(&account.id).await {
-            Ok(mut account_labels) => labels.append(&mut account_labels),
-            Err(err) => tracing::warn!("failed to load labels for {}: {err}", account.id),
-        }
-    }
+    let tree = load_account_tree(client).await?;
+    let LoadedAccountTree {
+        accounts,
+        mut folders_by_account,
+        labels,
+    } = tree;
 
     let selected_folder = folders_by_account
         .values()
@@ -409,6 +399,38 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
         selected_full_message,
         selected_message_resource,
         ..NativeAppState::default()
+    })
+}
+
+#[derive(Clone, Debug)]
+struct LoadedAccountTree {
+    accounts: Vec<Account>,
+    folders_by_account: BTreeMap<String, Vec<Folder>>,
+    labels: Vec<Label>,
+}
+
+async fn load_account_tree(client: &EmailClient) -> Result<LoadedAccountTree> {
+    let accounts = client.list_accounts().await.context("list accounts")?;
+    let mut folders_by_account = BTreeMap::new();
+    let mut labels = Vec::new();
+
+    for account in &accounts {
+        let folders = client
+            .list_folders(&account.id)
+            .await
+            .with_context(|| format!("list folders for {}", account.id))?;
+        folders_by_account.insert(account.id.clone(), folders);
+
+        match client.list_labels(&account.id).await {
+            Ok(mut account_labels) => labels.append(&mut account_labels),
+            Err(err) => tracing::warn!("failed to load labels for {}: {err}", account.id),
+        }
+    }
+
+    Ok(LoadedAccountTree {
+        accounts,
+        folders_by_account,
+        labels,
     })
 }
 
@@ -597,10 +619,12 @@ impl EmailDesktopApp {
 
     fn drain_sync_updates(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
+        let mut refresh_requested = false;
         loop {
             match self.sync_updates.try_recv() {
                 Ok(update) => {
                     changed = true;
+                    refresh_requested |= sync_update_requests_refresh(&update);
                     self.state.update(cx, |state, cx| {
                         apply_sync_update(&mut state.sync, update);
                         cx.notify();
@@ -618,6 +642,9 @@ impl EmailDesktopApp {
                     break;
                 }
             }
+        }
+        if refresh_requested {
+            start_sync_complete_refresh(&self.state, cx);
         }
         if changed {
             cx.notify();
@@ -1145,6 +1172,13 @@ fn unread_status_text(unread: i64) -> String {
     }
 }
 
+fn sync_update_requests_refresh(update: &NativeSyncUpdate) -> bool {
+    matches!(
+        update,
+        NativeSyncUpdate::Event(SyncEvent::SyncComplete { .. })
+    )
+}
+
 fn apply_sync_update(status: &mut NativeSyncStatus, update: NativeSyncUpdate) {
     match update {
         NativeSyncUpdate::Connecting => {
@@ -1253,6 +1287,19 @@ enum NativeMessageSource {
 }
 
 impl NativeMessageSource {
+    fn from_state(state: &NativeAppState) -> Option<Self> {
+        if let Some(label_id) = state.selected_label.as_ref() {
+            return Some(Self::Label(label_id.clone()));
+        }
+
+        let selected_folder = state.selected_folder.as_ref()?;
+        if let Some(kind) = selected_folder.strip_prefix("smart:") {
+            Some(Self::SmartFolder(kind.to_string()))
+        } else {
+            Some(Self::Folder(selected_folder.clone()))
+        }
+    }
+
     fn apply_selection(&self, state: &mut NativeAppState) {
         state.selected_view = SelectedView::Mail;
         match self {
@@ -1283,7 +1330,24 @@ impl NativeMessageSource {
 #[derive(Clone, Debug)]
 struct LoadedMessageCollection {
     messages: Vec<Message>,
+    selected_message: Option<String>,
     selected_full_message: Option<FullMessage>,
+}
+
+#[derive(Clone, Debug)]
+struct NativeSyncRefreshRequest {
+    accounts_request: ResourceRequest,
+    messages_request: Option<ResourceRequest>,
+    source: Option<NativeMessageSource>,
+    selected_message: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct LoadedSyncRefresh {
+    accounts: Vec<Account>,
+    folders_by_account: BTreeMap<String, Vec<Folder>>,
+    labels: Vec<Label>,
+    messages: Option<LoadedMessageCollection>,
 }
 
 fn start_message_collection_load(
@@ -1301,7 +1365,7 @@ fn start_message_collection_load(
 
     let task = app_cx
         .background_executor()
-        .spawn(async move { load_message_collection(base_url, load_source) });
+        .spawn(async move { load_message_collection(base_url, load_source, None) });
     let state_entity = state_entity.clone();
     app_cx
         .spawn(move |async_cx: &mut gpui::AsyncApp| {
@@ -1343,37 +1407,49 @@ fn begin_message_collection_load(
 fn load_message_collection(
     base_url: String,
     source: NativeMessageSource,
+    preferred_message_id: Option<String>,
 ) -> Result<LoadedMessageCollection> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
-        let mut messages = match &source {
-            NativeMessageSource::Folder(folder_id) => client.list_folder_messages(folder_id).await,
-            NativeMessageSource::Label(label_id) => client.list_label_messages(label_id).await,
-            NativeMessageSource::SmartFolder(kind) => client.list_smart_messages(kind).await,
-        }
-        .with_context(|| source.load_context())?;
+        load_message_collection_with_client(&client, source, preferred_message_id).await
+    })
+}
 
-        let selected_full_message = if let Some(message_id) = messages.first().map(|m| m.id.clone())
-        {
-            match client.get_message(&message_id).await {
-                Ok(full_message) => {
-                    update_summary_from_full_message(&mut messages, &full_message);
-                    Some(full_message)
-                }
-                Err(err) => {
-                    tracing::warn!("failed to load selected message {message_id}: {err}");
-                    None
-                }
+async fn load_message_collection_with_client(
+    client: &EmailClient,
+    source: NativeMessageSource,
+    preferred_message_id: Option<String>,
+) -> Result<LoadedMessageCollection> {
+    let mut messages = match &source {
+        NativeMessageSource::Folder(folder_id) => client.list_folder_messages(folder_id).await,
+        NativeMessageSource::Label(label_id) => client.list_label_messages(label_id).await,
+        NativeMessageSource::SmartFolder(kind) => client.list_smart_messages(kind).await,
+    }
+    .with_context(|| source.load_context())?;
+
+    let selected_message = preferred_message_id
+        .filter(|message_id| messages.iter().any(|message| message.id == *message_id))
+        .or_else(|| messages.first().map(|message| message.id.clone()));
+    let selected_full_message = if let Some(message_id) = selected_message.as_deref() {
+        match client.get_message(&message_id).await {
+            Ok(full_message) => {
+                update_summary_from_full_message(&mut messages, &full_message);
+                Some(full_message)
             }
-        } else {
-            None
-        };
+            Err(err) => {
+                tracing::warn!("failed to load selected message {message_id}: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
-        Ok(LoadedMessageCollection {
-            messages,
-            selected_full_message,
-        })
+    Ok(LoadedMessageCollection {
+        messages,
+        selected_message,
+        selected_full_message,
     })
 }
 
@@ -1390,7 +1466,9 @@ fn apply_loaded_message_collection(
     }
 
     state.messages = loaded.messages;
-    state.selected_message = state.messages.first().map(|message| message.id.clone());
+    state.selected_message = loaded
+        .selected_message
+        .or_else(|| state.messages.first().map(|message| message.id.clone()));
     state.selected_full_message = None;
     state.selected_message_resource.reset();
 
@@ -1418,6 +1496,133 @@ fn reject_message_collection_load(
     state.selected_message = None;
     state.selected_full_message = None;
     state.selected_message_resource.reset();
+    state.last_error = Some(message);
+    true
+}
+
+fn start_sync_complete_refresh(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        let request = begin_sync_complete_refresh(state);
+        sync_window_title(state, cx);
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let load_request = request.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_sync_complete_refresh(base_url, load_request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_sync_refresh(state, request, loaded);
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native sync refresh: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn begin_sync_complete_refresh(state: &mut NativeAppState) -> NativeSyncRefreshRequest {
+    let source = NativeMessageSource::from_state(state);
+    let selected_message = state.selected_message.clone();
+    let accounts_request = state.accounts_resource.begin_load();
+    let messages_request = source
+        .as_ref()
+        .map(|_| state.messages_resource.begin_load());
+    state.last_error = None;
+
+    NativeSyncRefreshRequest {
+        accounts_request,
+        messages_request,
+        source,
+        selected_message,
+    }
+}
+
+fn load_sync_complete_refresh(
+    base_url: String,
+    request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let tree = load_account_tree(&client).await?;
+        let messages = if let Some(source) = request.source {
+            Some(
+                load_message_collection_with_client(&client, source, request.selected_message)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        Ok(LoadedSyncRefresh {
+            accounts: tree.accounts,
+            folders_by_account: tree.folders_by_account,
+            labels: tree.labels,
+            messages,
+        })
+    })
+}
+
+fn apply_loaded_sync_refresh(
+    state: &mut NativeAppState,
+    request: NativeSyncRefreshRequest,
+    loaded: LoadedSyncRefresh,
+) -> bool {
+    if !state
+        .accounts_resource
+        .resolve(request.accounts_request, loaded.accounts.clone())
+    {
+        return false;
+    }
+
+    state.accounts = loaded.accounts;
+    state.folders_by_account = loaded.folders_by_account;
+    state.labels = loaded.labels;
+
+    if let (Some(messages_request), Some(messages)) = (request.messages_request, loaded.messages) {
+        apply_loaded_message_collection(state, messages_request, messages);
+    }
+
+    state.last_error = None;
+    true
+}
+
+fn reject_sync_refresh(
+    state: &mut NativeAppState,
+    request: NativeSyncRefreshRequest,
+    err: anyhow::Error,
+) -> bool {
+    let message = err.to_string();
+    let accounts_rejected = state
+        .accounts_resource
+        .reject(request.accounts_request, message.clone());
+    let messages_rejected = request.messages_request.is_some_and(|messages_request| {
+        state
+            .messages_resource
+            .reject(messages_request, message.clone())
+    });
+
+    if !accounts_rejected && !messages_rejected {
+        return false;
+    }
+
     state.last_error = Some(message);
     true
 }
@@ -1582,6 +1787,17 @@ fn decrement_folder_unread(
 mod tests {
     use super::*;
 
+    fn account(id: &str) -> Account {
+        Account {
+            id: id.to_string(),
+            name: "Account".to_string(),
+            email: format!("{id}@example.test"),
+            provider_type: "generic_imap".to_string(),
+            auth_type: "basic".to_string(),
+            created_at: "2026-05-25T00:00:00Z".to_string(),
+        }
+    }
+
     fn folder(id: &str, unread_count: i64) -> Folder {
         Folder {
             id: id.to_string(),
@@ -1659,6 +1875,31 @@ mod tests {
 
         assert_eq!(native_window_title(&state), "email-rs FluentGUI");
         assert_eq!(native_window_status(&state), "No unread messages");
+    }
+
+    #[test]
+    fn native_message_source_uses_current_selection() {
+        let mut state = NativeAppState {
+            selected_folder: Some("smart:unread".to_string()),
+            ..NativeAppState::default()
+        };
+        assert_eq!(
+            NativeMessageSource::from_state(&state),
+            Some(NativeMessageSource::SmartFolder("unread".to_string()))
+        );
+
+        state.selected_label = Some("label-a".to_string());
+        assert_eq!(
+            NativeMessageSource::from_state(&state),
+            Some(NativeMessageSource::Label("label-a".to_string()))
+        );
+
+        state.selected_label = None;
+        state.selected_folder = Some("inbox".to_string());
+        assert_eq!(
+            NativeMessageSource::from_state(&state),
+            Some(NativeMessageSource::Folder("inbox".to_string()))
+        );
     }
 
     #[test]
@@ -1753,6 +1994,77 @@ mod tests {
     }
 
     #[test]
+    fn sync_refresh_preserves_selected_message_when_still_present() {
+        let mut state = NativeAppState {
+            accounts: vec![account("old")],
+            accounts_resource: AsyncResource::ready(vec![account("old")]),
+            folders_by_account: BTreeMap::from([("account".to_string(), vec![folder("inbox", 1)])]),
+            selected_folder: Some("inbox".to_string()),
+            selected_message: Some("selected".to_string()),
+            selected_full_message: Some(full_message("selected", "inbox", true, false)),
+            messages: vec![message("selected", "inbox", true)],
+            messages_resource: AsyncResource::ready(vec![message("selected", "inbox", true)]),
+            ..NativeAppState::default()
+        };
+
+        let request = begin_sync_complete_refresh(&mut state);
+        assert!(state.accounts_resource.is_loading());
+        assert!(state.messages_resource.is_loading());
+        assert_eq!(
+            request.source,
+            Some(NativeMessageSource::Folder("inbox".to_string()))
+        );
+
+        let loaded = LoadedSyncRefresh {
+            accounts: vec![account("account")],
+            folders_by_account: BTreeMap::from([("account".to_string(), vec![folder("inbox", 2)])]),
+            labels: Vec::new(),
+            messages: Some(LoadedMessageCollection {
+                messages: vec![
+                    message("newer", "inbox", true),
+                    message("selected", "inbox", true),
+                ],
+                selected_message: Some("selected".to_string()),
+                selected_full_message: Some(full_message("selected", "inbox", true, false)),
+            }),
+        };
+
+        assert!(apply_loaded_sync_refresh(&mut state, request, loaded));
+        assert_eq!(state.accounts, vec![account("account")]);
+        assert_eq!(state.selected_message.as_deref(), Some("selected"));
+        assert_eq!(state.messages.len(), 2);
+        assert_eq!(total_unread_count(&state), 2);
+        assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn stale_sync_refresh_is_ignored() {
+        let mut state = NativeAppState {
+            accounts_resource: AsyncResource::ready(vec![account("old")]),
+            selected_folder: Some("inbox".to_string()),
+            messages_resource: AsyncResource::ready(vec![message("old", "inbox", true)]),
+            ..NativeAppState::default()
+        };
+
+        let stale = begin_sync_complete_refresh(&mut state);
+        let _current = begin_sync_complete_refresh(&mut state);
+        let loaded = LoadedSyncRefresh {
+            accounts: vec![account("new")],
+            folders_by_account: BTreeMap::from([("account".to_string(), vec![folder("inbox", 4)])]),
+            labels: Vec::new(),
+            messages: Some(LoadedMessageCollection {
+                messages: vec![message("new", "inbox", true)],
+                selected_message: Some("new".to_string()),
+                selected_full_message: Some(full_message("new", "inbox", true, false)),
+            }),
+        };
+
+        assert!(!apply_loaded_sync_refresh(&mut state, stale, loaded));
+        assert!(state.accounts.is_empty());
+        assert!(state.messages.is_empty());
+    }
+
+    #[test]
     fn applying_read_full_message_updates_summary_and_folder_unread() {
         let mut state = NativeAppState::default();
         state
@@ -1804,6 +2116,7 @@ mod tests {
 
         let loaded = LoadedMessageCollection {
             messages: vec![message("stale", "inbox", false)],
+            selected_message: Some("stale".to_string()),
             selected_full_message: None,
         };
 
@@ -1826,6 +2139,7 @@ mod tests {
         );
         let loaded = LoadedMessageCollection {
             messages: vec![message("message", "inbox", false)],
+            selected_message: Some("message".to_string()),
             selected_full_message: Some(full_message("message", "inbox", true, true)),
         };
 
