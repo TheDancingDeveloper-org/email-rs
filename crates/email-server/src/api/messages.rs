@@ -4,27 +4,11 @@ use axum::{
     extract::{Path, Query, State},
     Json,
 };
+use email_types::{BulkAction, BulkRequest, Message as MessageRow, PatchMessageRequest};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use chrono;
-
-// ── Bulk action ───────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BulkAction {
-    Archive,
-    Delete,
-    MarkRead,
-    MarkUnread,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BulkRequest {
-    pub ids: Vec<String>,
-    pub action: BulkAction,
-}
 
 pub async fn bulk_messages(
     State(state): State<Arc<AppState>>,
@@ -203,13 +187,6 @@ async fn load_provider(
     Ok(Some((info, provider)))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PatchMessageRequest {
-    pub is_read: Option<bool>,
-    pub is_flagged: Option<bool>,
-}
-
 pub async fn patch_message(
     State(state): State<Arc<AppState>>,
     Path(message_id): Path<String>,
@@ -341,27 +318,6 @@ pub async fn archive_message(
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct MessageRow {
-    pub id: String,
-    pub account_id: String,
-    pub folder_id: String,
-    pub uid: i64,
-    pub message_id: Option<String>,
-    pub thread_id: Option<String>,
-    pub subject: Option<String>,
-    pub from_name: Option<String>,
-    pub from_email: Option<String>,
-    pub to_json: Option<String>,
-    pub date: Option<String>,
-    pub is_read: bool,
-    pub is_flagged: bool,
-    pub is_draft: bool,
-    pub has_attachments: bool,
-    pub preview: Option<String>,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
 pub struct MessageBodyRow {
     pub message_id: String,
     pub html_body: Option<String>,
@@ -390,7 +346,7 @@ pub async fn list_messages(
     let sql = if unread_only {
         r#"SELECT id, account_id, folder_id, uid, message_id, thread_id,
                   subject, from_name, from_email, to_json, date,
-                  is_read, is_flagged, is_draft, has_attachments, preview
+                  is_read, is_flagged, is_draft, has_attachments, preview, snoozed_until
            FROM messages
            WHERE folder_id = ? AND is_read = 0
              AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
@@ -399,7 +355,7 @@ pub async fn list_messages(
     } else {
         r#"SELECT id, account_id, folder_id, uid, message_id, thread_id,
                   subject, from_name, from_email, to_json, date,
-                  is_read, is_flagged, is_draft, has_attachments, preview
+                  is_read, is_flagged, is_draft, has_attachments, preview, snoozed_until
            FROM messages
            WHERE folder_id = ?
              AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
@@ -434,7 +390,7 @@ pub async fn get_message(
     let msg = sqlx::query_as::<_, MessageRow>(
         r#"SELECT id, account_id, folder_id, uid, message_id, thread_id,
                   subject, from_name, from_email, to_json, date,
-                  is_read, is_flagged, is_draft, has_attachments, preview
+                  is_read, is_flagged, is_draft, has_attachments, preview, snoozed_until
            FROM messages WHERE id = ?"#,
     )
     .bind(&message_id)

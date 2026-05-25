@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use email_types::Message as MessageRow;
 use serde::Deserialize;
 
-use crate::api::messages::MessageRow;
 use crate::error::{AppError, Result};
 use crate::state::AppState;
 
@@ -28,7 +28,8 @@ pub async fn list_smart_messages(
             sqlx::query_as::<_, MessageRow>(
                 r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
                           m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
-                          m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview
+                          m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
+                          m.snoozed_until
                    FROM messages m
                    JOIN folders f ON m.folder_id = f.id
                    WHERE f.special_use = 'inbox'
@@ -45,7 +46,8 @@ pub async fn list_smart_messages(
             sqlx::query_as::<_, MessageRow>(
                 r#"SELECT id, account_id, folder_id, uid, message_id,
                           thread_id, subject, from_name, from_email, to_json,
-                          date, is_read, is_flagged, is_draft, has_attachments, preview
+                          date, is_read, is_flagged, is_draft, has_attachments, preview,
+                          snoozed_until
                    FROM messages
                    WHERE is_read = 0
                      AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
@@ -61,7 +63,8 @@ pub async fn list_smart_messages(
             sqlx::query_as::<_, MessageRow>(
                 r#"SELECT id, account_id, folder_id, uid, message_id,
                           thread_id, subject, from_name, from_email, to_json,
-                          date, is_read, is_flagged, is_draft, has_attachments, preview
+                          date, is_read, is_flagged, is_draft, has_attachments, preview,
+                          snoozed_until
                    FROM messages
                    WHERE is_flagged = 1
                      AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
@@ -77,7 +80,8 @@ pub async fn list_smart_messages(
             sqlx::query_as::<_, MessageRow>(
                 r#"SELECT id, account_id, folder_id, uid, message_id,
                           thread_id, subject, from_name, from_email, to_json,
-                          date, is_read, is_flagged, is_draft, has_attachments, preview
+                          date, is_read, is_flagged, is_draft, has_attachments, preview,
+                          snoozed_until
                    FROM messages
                    WHERE snoozed_until IS NOT NULL AND snoozed_until > datetime('now')
                    ORDER BY snoozed_until ASC

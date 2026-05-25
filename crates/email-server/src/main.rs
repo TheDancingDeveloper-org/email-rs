@@ -1,31 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-mod api;
-mod auth;
-mod calendar;
-mod config;
-mod db;
-mod error;
-mod imap;
-mod providers;
-mod rules;
-mod smtp;
-
-mod state;
-mod sync;
-
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use axum::{routing::get_service, Router};
-use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
-use tracing::info;
 #[cfg(not(target_os = "windows"))]
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::config::Config;
-use crate::state::AppState;
-use crate::sync::SyncOrchestrator;
+use email_server::{run_server, Config};
 
 fn main() -> anyhow::Result<()> {
     // Snap injects its own (old) libpthread via LD_LIBRARY_PATH, which conflicts
@@ -105,29 +83,6 @@ fn main() -> anyhow::Result<()> {
         tokio::runtime::Runtime::new()?.block_on(run_server(cfg))?;
     }
 
-    Ok(())
-}
-
-async fn run_server(cfg: Config) -> anyhow::Result<()> {
-    info!("starting email-server on {}", cfg.bind_addr());
-
-    let (pool, has_fts) = db::create_pool(&cfg.database_url).await?;
-    let app_state = Arc::new(AppState::new(pool.clone(), has_fts));
-    SyncOrchestrator::spawn_background(pool, app_state.event_tx.clone());
-
-    let api_routes = api::router(app_state);
-    let static_files = ServeDir::new(&cfg.frontend_dist).append_index_html_on_directories(true);
-
-    let app = Router::new()
-        .nest("/api/v1", api_routes)
-        .fallback_service(get_service(static_files))
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
-
-    let addr: SocketAddr = cfg.bind_addr().parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!("listening on {}", addr);
-    axum::serve(listener, app).await?;
     Ok(())
 }
 

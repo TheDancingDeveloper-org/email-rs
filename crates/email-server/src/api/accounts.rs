@@ -4,40 +4,12 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use serde::{Deserialize, Serialize};
+use email_types::{Account as AccountRow, AccountSettings, CreateAccount, UpdateAccount};
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 use crate::state::AppState;
 use crate::sync::SyncOrchestrator;
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountRow {
-    pub id: String,
-    pub name: String,
-    pub email: String,
-    pub provider_type: String,
-    pub auth_type: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateAccount {
-    pub name: String,
-    pub email: String,
-    pub provider_type: String,
-    pub auth_type: String,
-    pub oauth_token_json: Option<String>,
-    pub host: Option<String>,
-    pub port: Option<i64>,
-    pub use_ssl: Option<bool>,
-    pub password: Option<String>,
-    pub smtp_host: Option<String>,
-    pub smtp_port: Option<i64>,
-    pub smtp_password: Option<String>,
-}
 
 pub async fn list_accounts(State(state): State<Arc<AppState>>) -> Result<Json<Vec<AccountRow>>> {
     let rows = sqlx::query_as::<_, AccountRow>(
@@ -86,14 +58,6 @@ pub async fn create_account(
     .await?;
 
     Ok(Json(row))
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateAccount {
-    pub name: Option<String>,
-    pub sync_days_limit: Option<i64>,
-    pub signature: Option<String>,
 }
 
 pub async fn update_account(
@@ -150,8 +114,8 @@ pub async fn delete_account(
 pub async fn get_account_settings(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>> {
-    let row = sqlx::query(
+) -> Result<Json<AccountSettings>> {
+    let row = sqlx::query_as::<_, AccountSettings>(
         "SELECT id, name, email, provider_type, sync_days_limit, signature FROM accounts WHERE id = ?",
     )
     .bind(&id)
@@ -159,15 +123,7 @@ pub async fn get_account_settings(
     .await?
     .ok_or_else(|| AppError::NotFound(format!("account {} not found", id)))?;
 
-    use sqlx::Row;
-    Ok(Json(serde_json::json!({
-        "id": row.get::<String, _>("id"),
-        "name": row.get::<String, _>("name"),
-        "email": row.get::<String, _>("email"),
-        "providerType": row.get::<String, _>("provider_type"),
-        "syncDaysLimit": row.get::<Option<i64>, _>("sync_days_limit"),
-        "signature": row.get::<Option<String>, _>("signature"),
-    })))
+    Ok(Json(row))
 }
 
 pub async fn trigger_sync(

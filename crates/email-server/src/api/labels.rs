@@ -5,43 +5,17 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use serde::{Deserialize, Serialize};
+use email_types::{CreateLabelBody, Label, Message as MessageRow, UpdateLabelBody};
+use serde::Deserialize;
 
-use crate::api::messages::MessageRow;
 use crate::error::{AppError, Result};
 use crate::state::AppState;
-
-// ── Domain types ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct Label {
-    pub id: String,
-    pub account_id: String,
-    pub name: String,
-    pub color: String,
-}
 
 // ── Query / body types ────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct ListLabelsQuery {
     pub account_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateLabelBody {
-    pub account_id: String,
-    pub name: String,
-    pub color: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateLabelBody {
-    pub name: Option<String>,
-    pub color: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,7 +186,7 @@ pub async fn list_label_messages(
     let rows = sqlx::query_as::<_, MessageRow>(
         r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id, m.thread_id,
                   m.subject, m.from_name, m.from_email, m.to_json, m.date,
-                  m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview
+                  m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview, m.snoozed_until
            FROM messages m
            JOIN message_labels ml ON ml.message_id = m.id
            WHERE ml.label_id = ?

@@ -8,7 +8,8 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     Json,
 };
-use serde::{Deserialize, Serialize};
+use email_types::AuthorizeResponse;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::auth::oauth2::{OAuthConfig, StoredToken};
@@ -25,24 +26,6 @@ pub struct CallbackQuery {
     pub error: Option<String>,
     /// If provided, update this account's token instead of creating a new one.
     pub account_id: Option<String>,
-}
-
-// ── Response types ────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct AuthorizeResponse {
-    pub url: String,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountRow {
-    pub id: String,
-    pub name: String,
-    pub email: String,
-    pub provider_type: String,
-    pub auth_type: String,
-    pub created_at: String,
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

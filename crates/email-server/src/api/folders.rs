@@ -4,30 +4,10 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use serde::{Deserialize, Serialize};
+use email_types::{Folder as FolderRow, PatchFolder};
 
 use crate::error::{AppError, Result};
 use crate::state::AppState;
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderRow {
-    pub id: String,
-    pub account_id: String,
-    pub name: String,
-    pub full_path: String,
-    pub special_use: Option<String>,
-    pub unread_count: i64,
-    pub total_count: i64,
-    pub synced_at: Option<String>,
-    pub is_excluded: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PatchFolder {
-    pub is_excluded: Option<bool>,
-}
 
 pub async fn patch_folder(
     State(state): State<Arc<AppState>>,

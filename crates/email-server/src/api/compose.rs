@@ -1,30 +1,12 @@
 use std::sync::Arc;
 
 use axum::{extract::State, Json};
-use serde::{Deserialize, Serialize};
+use email_types::{SendRequest, SendResponse};
 
 use crate::auth::oauth2::{OAuthConfig, StoredToken};
 use crate::error::{AppError, Result};
 use crate::smtp::{self, OutboundMessage, SmtpConfig};
 use crate::state::AppState;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SendRequest {
-    pub account_id: String,
-    pub to: Vec<String>,
-    pub cc: Vec<String>,
-    pub bcc: Vec<String>,
-    pub subject: String,
-    pub text_body: Option<String>,
-    pub html_body: Option<String>,
-    pub in_reply_to: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SendResponse {
-    pub status: String,
-}
 
 #[derive(Debug, sqlx::FromRow)]
 struct AccountRow {

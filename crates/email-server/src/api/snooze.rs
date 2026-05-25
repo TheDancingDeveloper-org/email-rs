@@ -5,15 +5,10 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use serde::Deserialize;
+use email_types::SnoozeRequest;
 
 use crate::error::Result;
 use crate::state::AppState;
-
-#[derive(Deserialize)]
-pub struct SnoozeRequest {
-    pub until: String, // ISO datetime string — store as-is
-}
 
 /// POST /messages/{id}/snooze
 /// Body: {"until": "2026-04-25T09:00:00Z"}
@@ -206,5 +201,6 @@ mod tests {
         let arr = json.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["id"], "sn1");
+        assert_eq!(arr[0]["snoozedUntil"], "2099-01-01T09:00:00Z");
     }
 }

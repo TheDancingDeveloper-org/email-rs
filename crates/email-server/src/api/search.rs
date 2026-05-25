@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::Json;
+use email_types::Message as MessageRow;
 use serde::{Deserialize, Serialize};
 
-use crate::api::messages::MessageRow;
 use crate::error::Result;
 use crate::state::AppState;
 
@@ -76,7 +76,8 @@ async fn search_fts(
         sqlx::query_as::<_, MessageRow>(
             r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
                       m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
-                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview
+                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
+                      m.snoozed_until
                FROM messages_fts fts
                JOIN messages m ON m.id = fts.message_id
                WHERE messages_fts MATCH ? AND m.account_id = ?
@@ -91,7 +92,8 @@ async fn search_fts(
         sqlx::query_as::<_, MessageRow>(
             r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
                       m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
-                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview
+                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
+                      m.snoozed_until
                FROM messages_fts fts
                JOIN messages m ON m.id = fts.message_id
                WHERE messages_fts MATCH ?
@@ -125,7 +127,8 @@ async fn search_like(
         sqlx::query_as::<_, MessageRow>(&format!(
             r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
                       m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
-                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview
+                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
+                      m.snoozed_until
                FROM messages m
                LEFT JOIN message_bodies mb ON mb.message_id = m.id
                WHERE m.account_id = ?
@@ -153,7 +156,8 @@ async fn search_like(
         sqlx::query_as::<_, MessageRow>(&format!(
             r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
                       m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
-                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview
+                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
+                      m.snoozed_until
                FROM messages m
                LEFT JOIN message_bodies mb ON mb.message_id = m.id
                WHERE m.subject LIKE ? OR m.from_name LIKE ? OR m.from_email LIKE ?

@@ -4,41 +4,12 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use serde::{Deserialize, Serialize};
+use email_types::{CreateWebhook, UpdateWebhook, Webhook as WebhookRow};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 use crate::state::AppState;
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct WebhookRow {
-    pub id: String,
-    pub url: String,
-    pub secret: Option<String>,
-    pub events: String,
-    pub account_id: Option<String>,
-    pub enabled: bool,
-    pub created_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateWebhook {
-    pub url: String,
-    pub secret: Option<String>,
-    pub events: Option<String>,
-    pub account_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateWebhook {
-    pub url: Option<String>,
-    pub secret: Option<String>,
-    pub events: Option<String>,
-    pub enabled: Option<bool>,
-}
 
 pub async fn list_webhooks(State(state): State<Arc<AppState>>) -> Result<Json<Vec<WebhookRow>>> {
     let rows = sqlx::query_as::<_, WebhookRow>(

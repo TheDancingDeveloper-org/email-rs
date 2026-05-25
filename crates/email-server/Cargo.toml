@@ -36,6 +36,7 @@ urlencoding = "2"
 tokio-stream = { version = "0.1", features = ["sync"] }
 hmac-sha256 = "1"
 dotenvy = "0.15"
+email-types = { path = "../email-types", features = ["server"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = "0.19"
