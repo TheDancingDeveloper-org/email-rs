@@ -9,7 +9,7 @@ use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{Account, Folder, Label, Message};
 use fluent_app::FluentApp;
-use fluent_core::{Theme, ThemeProvider as _};
+use fluent_core::{AsyncResource, Theme, ThemeProvider as _};
 use fluent_layout::{
     CommandPalette, DockPanel, DockPosition, ModalHost, PaletteEntry, Pane, PaneConstraints,
     PaneGroup, Workspace,
@@ -212,7 +212,10 @@ fn load_initial_state(base_url: &str) -> Result<NativeAppState> {
                 Ok(loaded)
             }
             Err(err) => {
-                state.last_error = Some(err.to_string());
+                let message = err.to_string();
+                state.accounts_resource = AsyncResource::failed(message.clone());
+                state.messages_resource = AsyncResource::failed(message.clone());
+                state.last_error = Some(message);
                 Ok(state)
             }
         }
@@ -258,11 +261,16 @@ async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
         Vec::new()
     };
 
+    let accounts_resource = AsyncResource::ready(accounts.clone());
+    let messages_resource = AsyncResource::ready(messages.clone());
+
     Ok(NativeAppState {
         accounts,
+        accounts_resource,
         folders_by_account,
         labels,
         messages,
+        messages_resource,
         selected_folder,
         ..NativeAppState::default()
     })
@@ -342,7 +350,9 @@ struct NativeAppState {
     selected_message: Option<String>,
     selected_event: Option<String>,
     messages: Vec<Message>,
+    messages_resource: AsyncResource<Vec<Message>, String>,
     accounts: Vec<Account>,
+    accounts_resource: AsyncResource<Vec<Account>, String>,
     labels: Vec<Label>,
     folders_by_account: BTreeMap<String, Vec<Folder>>,
     compose: ComposeState,
@@ -363,7 +373,9 @@ impl Default for NativeAppState {
             selected_message: None,
             selected_event: None,
             messages: Vec::new(),
+            messages_resource: AsyncResource::new(),
             accounts: Vec::new(),
+            accounts_resource: AsyncResource::new(),
             labels: Vec::new(),
             folders_by_account: BTreeMap::new(),
             compose: ComposeState::default(),
@@ -651,9 +663,9 @@ impl Render for MessageListPlaceholder {
                             .text_size(px(typography.body.size))
                             .text_color(colors.on_subtle)
                             .child(format!(
-                                "{} accounts, {} messages loaded from {}",
-                                self.state.accounts.len(),
-                                self.state.messages.len(),
+                                "{}; {}; {}",
+                                resource_summary(&self.state.accounts_resource, "accounts"),
+                                resource_summary(&self.state.messages_resource, "messages"),
                                 self.state.api_base_url
                             )),
                     ),
@@ -736,9 +748,29 @@ impl Render for StatusBar {
                 colors.on_subtle
             })
             .child(format!(
-                "{} | density {} | {:?}",
-                status, self.state.density.level, self.state.theme
+                "{} | {} | density {} | {:?}",
+                status,
+                resource_summary(&self.state.messages_resource, "messages"),
+                self.state.density.level,
+                self.state.theme
             ))
+    }
+}
+
+fn resource_summary<T>(resource: &AsyncResource<Vec<T>, String>, label: &str) -> String {
+    let count = resource.value().map(Vec::len).unwrap_or_default();
+    if resource.is_loading() {
+        format!("{label} loading ({count} cached)")
+    } else if let Some(error) = resource.error() {
+        if count > 0 {
+            format!("{label} error ({count} cached): {error}")
+        } else {
+            format!("{label} error: {error}")
+        }
+    } else if resource.is_ready() {
+        format!("{count} {label} ready")
+    } else {
+        format!("{label} idle")
     }
 }
 
