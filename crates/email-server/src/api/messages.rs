@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
@@ -15,10 +15,14 @@ pub async fn bulk_messages(
     Json(req): Json<BulkRequest>,
 ) -> crate::error::Result<Json<serde_json::Value>> {
     let mut processed = 0usize;
+    let mut affected_folders = BTreeSet::new();
 
     for id in &req.ids {
         match req.action {
             BulkAction::MarkRead => {
+                if let Some(folder_id) = message_folder_id(&state.pool, id).await? {
+                    affected_folders.insert(folder_id);
+                }
                 sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
                     .bind(id)
                     .execute(&state.pool)
@@ -36,6 +40,9 @@ pub async fn bulk_messages(
                 }
             }
             BulkAction::MarkUnread => {
+                if let Some(folder_id) = message_folder_id(&state.pool, id).await? {
+                    affected_folders.insert(folder_id);
+                }
                 sqlx::query("UPDATE messages SET is_read = 0 WHERE id = ?")
                     .bind(id)
                     .execute(&state.pool)
@@ -53,6 +60,9 @@ pub async fn bulk_messages(
                 }
             }
             BulkAction::Delete => {
+                if let Some(folder_id) = message_folder_id(&state.pool, id).await? {
+                    affected_folders.insert(folder_id);
+                }
                 if let Ok(Some((info, provider))) = load_provider(&state, id).await {
                     let uid = info.uid as u32;
                     let folder = info.full_path.clone();
@@ -68,6 +78,7 @@ pub async fn bulk_messages(
                     .await?;
             }
             BulkAction::Archive => {
+                let source_folder_id = message_folder_id(&state.pool, id).await?;
                 let archive_folder: Option<String> = sqlx::query_scalar(
                     r#"SELECT f.full_path FROM folders f
                        JOIN messages m ON m.account_id = f.account_id
@@ -108,15 +119,26 @@ pub async fn bulk_messages(
                         .bind(id)
                         .execute(&state.pool)
                         .await?;
+                    if let Some(source_folder_id) = source_folder_id {
+                        affected_folders.insert(source_folder_id);
+                    }
+                    affected_folders.insert(folder_id);
                 } else {
                     sqlx::query("DELETE FROM messages WHERE id = ?")
                         .bind(id)
                         .execute(&state.pool)
                         .await?;
+                    if let Some(source_folder_id) = source_folder_id {
+                        affected_folders.insert(source_folder_id);
+                    }
                 }
             }
         }
         processed += 1;
+    }
+
+    for folder_id in affected_folders {
+        refresh_folder_counts(&state.pool, &folder_id).await?;
     }
 
     Ok(Json(serde_json::json!({ "processed": processed })))
@@ -127,6 +149,30 @@ use crate::error::{AppError, Result};
 use crate::providers::gmail::GmailProvider;
 use crate::providers::MailProvider;
 use crate::state::AppState;
+
+async fn message_folder_id(pool: &sqlx::SqlitePool, message_id: &str) -> Result<Option<String>> {
+    sqlx::query_scalar("SELECT folder_id FROM messages WHERE id = ?")
+        .bind(message_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(Into::into)
+}
+
+async fn refresh_folder_counts(pool: &sqlx::SqlitePool, folder_id: &str) -> Result<()> {
+    sqlx::query(
+        r#"UPDATE folders
+           SET total_count = (SELECT COUNT(*) FROM messages WHERE folder_id = ?),
+               unread_count = (SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_read = 0)
+           WHERE id = ?"#,
+    )
+    .bind(folder_id)
+    .bind(folder_id)
+    .bind(folder_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
 
 #[derive(Debug, sqlx::FromRow)]
 struct MessageActionInfo {
@@ -193,11 +239,15 @@ pub async fn patch_message(
     Json(req): Json<PatchMessageRequest>,
 ) -> Result<Json<serde_json::Value>> {
     if let Some(is_read) = req.is_read {
+        let folder_id = message_folder_id(&state.pool, &message_id).await?;
         sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
             .bind(is_read)
             .bind(&message_id)
             .execute(&state.pool)
             .await?;
+        if let Some(folder_id) = folder_id {
+            refresh_folder_counts(&state.pool, &folder_id).await?;
+        }
 
         if let Ok(Some((info, provider))) = load_provider(&state, &message_id).await {
             let uid = info.uid as u32;
@@ -241,6 +291,8 @@ pub async fn delete_message(
     State(state): State<Arc<AppState>>,
     Path(message_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
+    let folder_id = message_folder_id(&state.pool, &message_id).await?;
+
     // Fire IMAP delete in background.
     if let Ok(Some((info, provider))) = load_provider(&state, &message_id).await {
         let uid = info.uid as u32;
@@ -257,6 +309,9 @@ pub async fn delete_message(
         .bind(&message_id)
         .execute(&state.pool)
         .await?;
+    if let Some(folder_id) = folder_id {
+        refresh_folder_counts(&state.pool, &folder_id).await?;
+    }
 
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
@@ -265,6 +320,8 @@ pub async fn archive_message(
     State(state): State<Arc<AppState>>,
     Path(message_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
+    let source_folder_id = message_folder_id(&state.pool, &message_id).await?;
+
     // Find the archive folder for this message's account.
     let archive_folder: Option<String> = sqlx::query_scalar(
         r#"SELECT f.full_path FROM folders f
@@ -306,11 +363,18 @@ pub async fn archive_message(
             .bind(&message_id)
             .execute(&state.pool)
             .await?;
+        if let Some(source_folder_id) = source_folder_id {
+            refresh_folder_counts(&state.pool, &source_folder_id).await?;
+        }
+        refresh_folder_counts(&state.pool, &folder_id).await?;
     } else {
         sqlx::query("DELETE FROM messages WHERE id = ?")
             .bind(&message_id)
             .execute(&state.pool)
             .await?;
+        if let Some(source_folder_id) = source_folder_id {
+            refresh_folder_counts(&state.pool, &source_folder_id).await?;
+        }
     }
 
     Ok(Json(serde_json::json!({ "status": "archived" })))
@@ -511,6 +575,7 @@ pub async fn get_message(
         .bind(&message_id)
         .execute(&state.pool)
         .await?;
+    refresh_folder_counts(&state.pool, &msg.folder_id).await?;
 
     let result = serde_json::json!({
         "id": msg.id,
@@ -598,6 +663,14 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn folder_counts(pool: &SqlitePool, folder_id: &str) -> (i64, i64) {
+        sqlx::query_as("SELECT unread_count, total_count FROM folders WHERE id = ?")
+            .bind(folder_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
     }
 
     async fn req(
@@ -763,6 +836,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_message_refreshes_folder_counts() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "msg-read-count", "acc1", "fld1").await;
+
+        req(
+            crate::api::router(Arc::clone(&state)),
+            "GET",
+            "/messages/msg-read-count",
+            None,
+        )
+        .await;
+
+        assert_eq!(folder_counts(&state.pool, "fld1").await, (0, 1));
+    }
+
+    #[tokio::test]
     async fn get_message_response_has_is_read_true() {
         let state = setup().await;
         seed_account(&state.pool, "acc1").await;
@@ -802,6 +893,24 @@ mod tests {
             .await
             .unwrap();
         assert!(is_read);
+    }
+
+    #[tokio::test]
+    async fn patch_message_refreshes_folder_counts() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "pm-count", "acc1", "fld1").await;
+
+        req(
+            crate::api::router(Arc::clone(&state)),
+            "PATCH",
+            "/messages/pm-count",
+            Some(serde_json::json!({"isRead": true})),
+        )
+        .await;
+
+        assert_eq!(folder_counts(&state.pool, "fld1").await, (0, 1));
     }
 
     #[tokio::test]
@@ -902,6 +1011,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+        assert_eq!(folder_counts(&state.pool, "fld1").await, (0, 0));
     }
 
     #[tokio::test]
@@ -951,6 +1061,8 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(folder_id, "fld-archive");
+        assert_eq!(folder_counts(&state.pool, "fld-inbox").await, (0, 0));
+        assert_eq!(folder_counts(&state.pool, "fld-archive").await, (1, 1));
     }
 
     #[tokio::test]
@@ -978,6 +1090,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(unread, 0);
+        assert_eq!(folder_counts(&state.pool, "fld1").await, (0, 2));
     }
 
     #[tokio::test]
@@ -1004,6 +1117,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!is_read);
+        assert_eq!(folder_counts(&state.pool, "fld1").await, (1, 1));
     }
 
     #[tokio::test]
@@ -1030,6 +1144,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 0);
+        assert_eq!(folder_counts(&state.pool, "fld1").await, (0, 0));
     }
 
     #[tokio::test]
@@ -1054,6 +1169,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 0);
+        assert_eq!(folder_counts(&state.pool, "fld1").await, (0, 0));
     }
 
     #[tokio::test]

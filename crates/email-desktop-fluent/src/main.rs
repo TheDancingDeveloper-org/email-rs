@@ -6,10 +6,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context as _, Result};
-use chrono::{Datelike as _, Duration as ChronoDuration, Local};
+use chrono::{Datelike as _, Duration as ChronoDuration, Local, TimeZone as _, Utc};
 use email_client::EmailClient;
 use email_server::{run_server, Config};
-use email_types::{Account, Folder, FullMessage, Label, Message, SyncEvent};
+use email_types::{
+    Account, Folder, FullMessage, Label, Message, PatchMessageRequest, SendRequest, SnoozeRequest,
+    SyncEvent,
+};
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
 use fluent_layout::{
@@ -18,7 +21,7 @@ use fluent_layout::{
 };
 use fluent_primitives::{
     Button, ButtonAppearance, ButtonSize, DateTimePicker, DateTimeValue, IconButton, ProgressBar,
-    Searchbox, TokenInput, TokenInputSuggestion,
+    Searchbox, TextInput, TokenInput, TokenInputSuggestion, TokenInputToken,
 };
 use gpui::{
     actions, div, prelude::*, px, svg, uniform_list, App, Context, Entity, FontWeight, IntoElement,
@@ -624,6 +627,11 @@ struct ComposeState {
     open: bool,
     mode: Option<String>,
     account_id: Option<String>,
+    subject: Option<String>,
+    in_reply_to: Option<String>,
+    sending: bool,
+    error: Option<String>,
+    notice: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1224,6 +1232,7 @@ impl Render for MessageListPlaceholder {
 struct ReadingPanePlaceholder {
     state: Entity<NativeAppState>,
     recipient_input: Entity<TokenInput>,
+    quick_reply_input: Entity<TextInput>,
     snooze_picker: Entity<DateTimePicker>,
 }
 
@@ -1238,6 +1247,7 @@ impl ReadingPanePlaceholder {
                 .suggestions(suggestions.clone())
                 .allow_freeform(true)
         });
+        let quick_reply_input = cx.new(|_| TextInput::new().placeholder("Write a quick reply"));
         let default_snooze = default_snooze_value();
         let snooze_picker = cx.new(move |_| {
             DateTimePicker::new()
@@ -1247,6 +1257,7 @@ impl ReadingPanePlaceholder {
         Self {
             state,
             recipient_input,
+            quick_reply_input,
             snooze_picker,
         }
     }
@@ -1256,8 +1267,10 @@ impl Render for ReadingPanePlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx).clone();
         reading_placeholder(
+            &self.state,
             &state,
             self.recipient_input.clone(),
+            self.quick_reply_input.clone(),
             self.snooze_picker.clone(),
             cx,
         )
@@ -1572,6 +1585,41 @@ struct LoadedSyncRefresh {
     messages: Option<LoadedMessageCollection>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NativeMessageMutation {
+    Archive { message_id: String },
+    Delete { message_id: String },
+    SetRead { message_id: String, is_read: bool },
+    Snooze { message_id: String, until: String },
+}
+
+impl NativeMessageMutation {
+    fn message_id(&self) -> &str {
+        match self {
+            Self::Archive { message_id }
+            | Self::Delete { message_id }
+            | Self::SetRead { message_id, .. }
+            | Self::Snooze { message_id, .. } => message_id,
+        }
+    }
+
+    fn action_label(&self) -> &'static str {
+        match self {
+            Self::Archive { .. } => "archive message",
+            Self::Delete { .. } => "delete message",
+            Self::SetRead { is_read: true, .. } => "mark message read",
+            Self::SetRead { is_read: false, .. } => "mark message unread",
+            Self::Snooze { .. } => "snooze message",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativeDraftSeed {
+    recipients: Vec<(String, String)>,
+    body: String,
+}
+
 fn start_message_collection_load(
     state_entity: &Entity<NativeAppState>,
     source: NativeMessageSource,
@@ -1804,6 +1852,47 @@ fn start_mark_folder_read(
         .detach();
 }
 
+fn start_message_mutation_and_refresh(
+    state_entity: &Entity<NativeAppState>,
+    mutation: NativeMessageMutation,
+    app_cx: &mut App,
+) {
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        let request = begin_sync_complete_refresh(state);
+        state.last_error = None;
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let load_request = request.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { mutate_message_and_refresh(base_url, mutation, load_request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_sync_refresh(state, request, loaded);
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native message mutation refresh: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
 fn begin_sync_complete_refresh(state: &mut NativeAppState) -> NativeSyncRefreshRequest {
     let source = NativeMessageSource::from_state(state);
     let selected_message = state.selected_message.clone();
@@ -1869,6 +1958,74 @@ fn mark_folder_read_and_refresh(
             None
         };
 
+        Ok(LoadedSyncRefresh {
+            accounts: tree.accounts,
+            folders_by_account: tree.folders_by_account,
+            labels: tree.labels,
+            messages,
+        })
+    })
+}
+
+fn mutate_message_and_refresh(
+    base_url: String,
+    mutation: NativeMessageMutation,
+    request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let action_label = mutation.action_label();
+        match &mutation {
+            NativeMessageMutation::Archive { message_id } => {
+                client.archive_message(message_id).await?;
+            }
+            NativeMessageMutation::Delete { message_id } => {
+                client.delete_message(message_id).await?;
+            }
+            NativeMessageMutation::SetRead {
+                message_id,
+                is_read,
+            } => {
+                client
+                    .patch_message(
+                        message_id,
+                        &PatchMessageRequest {
+                            is_read: Some(*is_read),
+                            is_flagged: None,
+                        },
+                    )
+                    .await?;
+            }
+            NativeMessageMutation::Snooze { message_id, until } => {
+                client
+                    .snooze_message(
+                        message_id,
+                        &SnoozeRequest {
+                            until: until.clone(),
+                        },
+                    )
+                    .await?;
+            }
+        }
+
+        let tree = load_account_tree(&client)
+            .await
+            .with_context(|| format!("refresh after {action_label}"))?;
+        let messages = if let Some(source) = request.source {
+            Some(
+                load_message_collection_with_client(&client, source, request.selected_message)
+                    .await
+                    .with_context(|| format!("reload active mailbox after {action_label}"))?,
+            )
+        } else {
+            None
+        };
+
+        tracing::info!(
+            "completed native {action_label} for {}",
+            mutation.message_id()
+        );
         Ok(LoadedSyncRefresh {
             accounts: tree.accounts,
             folders_by_account: tree.folders_by_account,
@@ -1981,6 +2138,9 @@ fn begin_full_message_load(
         return None;
     }
 
+    if state.selected_message.as_deref() != Some(message_id) {
+        state.compose = ComposeState::default();
+    }
     state.selected_message = Some(message_id.to_string());
     state.selected_full_message = None;
     state.last_error = None;
@@ -2079,6 +2239,366 @@ fn decrement_folder_unread(
             break;
         }
     }
+}
+
+fn start_reply_draft(
+    state_entity: &Entity<NativeAppState>,
+    recipient_input: Entity<TokenInput>,
+    quick_reply_input: Entity<TextInput>,
+    app_cx: &mut App,
+) {
+    let seed = state_entity.update(app_cx, |state, cx| {
+        let Some(seed) = selected_reply_seed(state) else {
+            let message = "Select a loaded message before replying.".to_string();
+            state.compose.error = Some(message.clone());
+            state.last_error = Some(message);
+            cx.notify();
+            return None;
+        };
+
+        state.compose.open = true;
+        state.compose.mode = Some("reply".to_string());
+        state.compose.account_id = selected_account_id(state);
+        state.compose.subject = Some(reply_subject(selected_subject(state)));
+        state.compose.in_reply_to = selected_in_reply_to(state);
+        state.compose.sending = false;
+        state.compose.error = None;
+        state.compose.notice = None;
+        state.last_error = None;
+        cx.notify();
+        Some(seed)
+    });
+
+    if let Some(seed) = seed {
+        apply_draft_seed(recipient_input, quick_reply_input, seed, app_cx);
+    }
+}
+
+fn start_forward_draft(
+    state_entity: &Entity<NativeAppState>,
+    recipient_input: Entity<TokenInput>,
+    quick_reply_input: Entity<TextInput>,
+    app_cx: &mut App,
+) {
+    let seed = state_entity.update(app_cx, |state, cx| {
+        if state.selected_message.is_none() {
+            let message = "Select a message before forwarding.".to_string();
+            state.compose.error = Some(message.clone());
+            state.last_error = Some(message);
+            cx.notify();
+            return None;
+        }
+
+        state.compose.open = true;
+        state.compose.mode = Some("forward".to_string());
+        state.compose.account_id = selected_account_id(state);
+        state.compose.subject = Some(forward_subject(selected_subject(state)));
+        state.compose.in_reply_to = None;
+        state.compose.sending = false;
+        state.compose.error = None;
+        state.compose.notice = None;
+        state.last_error = None;
+        cx.notify();
+        Some(NativeDraftSeed {
+            recipients: Vec::new(),
+            body: selected_forward_body(state),
+        })
+    });
+
+    if let Some(seed) = seed {
+        apply_draft_seed(recipient_input, quick_reply_input, seed, app_cx);
+    }
+}
+
+fn apply_draft_seed(
+    recipient_input: Entity<TokenInput>,
+    quick_reply_input: Entity<TextInput>,
+    seed: NativeDraftSeed,
+    app_cx: &mut App,
+) {
+    recipient_input.update(app_cx, |input, cx| {
+        input.set_tokens(
+            seed.recipients
+                .iter()
+                .map(|(value, label)| TokenInputToken::new(value.clone(), label.clone())),
+            cx,
+        );
+    });
+    quick_reply_input.update(app_cx, |input, cx| {
+        input.set_value(seed.body, cx);
+    });
+}
+
+fn start_snooze_from_picker(
+    state_entity: &Entity<NativeAppState>,
+    snooze_picker: Entity<DateTimePicker>,
+    message_id: String,
+    app_cx: &mut App,
+) {
+    let value = snooze_picker
+        .read(app_cx)
+        .selected_value()
+        .unwrap_or_else(default_snooze_value);
+    let until = match date_time_value_to_utc_iso(value) {
+        Ok(until) => until,
+        Err(err) => {
+            state_entity.update(app_cx, |state, cx| {
+                state.last_error = Some(err.to_string());
+                cx.notify();
+            });
+            return;
+        }
+    };
+
+    start_message_mutation_and_refresh(
+        state_entity,
+        NativeMessageMutation::Snooze { message_id, until },
+        app_cx,
+    );
+}
+
+fn start_quick_reply_send(
+    state_entity: &Entity<NativeAppState>,
+    recipient_input: Entity<TokenInput>,
+    quick_reply_input: Entity<TextInput>,
+    app_cx: &mut App,
+) {
+    let recipients = recipient_input
+        .read(app_cx)
+        .values()
+        .iter()
+        .filter(|token| token.valid)
+        .map(|token| token.value.to_string())
+        .collect::<Vec<_>>();
+    let body = quick_reply_input.read(app_cx).text().trim().to_string();
+
+    let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
+        match build_quick_reply_request(state, recipients, body) {
+            Ok(request) => {
+                state.compose.sending = true;
+                state.compose.error = None;
+                state.compose.notice = None;
+                state.last_error = None;
+                cx.notify();
+                Some((state.api_base_url.clone(), request))
+            }
+            Err(message) => {
+                state.compose.error = Some(message.clone());
+                state.last_error = Some(message);
+                cx.notify();
+                None
+            }
+        }
+    }) else {
+        return;
+    };
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { send_quick_reply(base_url, request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let sent = result.is_ok();
+                let error = result.err().map(|err| err.to_string());
+
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state.compose.sending = false;
+                    if sent {
+                        state.compose.open = false;
+                        state.compose.error = None;
+                        state.compose.notice = Some("Reply sent".to_string());
+                        state.last_error = None;
+                    } else if let Some(error) = error.clone() {
+                        state.compose.error = Some(error.clone());
+                        state.last_error = Some(error);
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native quick reply status: {err}");
+                }
+
+                if sent {
+                    let _ = quick_reply_input.update(&mut async_cx, |input, cx| {
+                        input.set_value("", cx);
+                    });
+                    let _ = recipient_input.update(&mut async_cx, |input, cx| {
+                        input.set_tokens(Vec::<TokenInputToken>::new(), cx);
+                    });
+                }
+            }
+        })
+        .detach();
+}
+
+fn send_quick_reply(base_url: String, request: SendRequest) -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client.send_message(&request).await?;
+        Ok(())
+    })
+}
+
+fn build_quick_reply_request(
+    state: &NativeAppState,
+    recipients: Vec<String>,
+    body: String,
+) -> std::result::Result<SendRequest, String> {
+    let body = body.trim().to_string();
+    if body.is_empty() {
+        return Err("Write a message before sending.".to_string());
+    }
+
+    let mode = state.compose.mode.as_deref().unwrap_or("reply");
+    let mut to = normalize_recipients(recipients);
+    if to.is_empty() && mode != "forward" {
+        if let Some(email) = selected_from_email(state) {
+            to.push(email);
+        }
+    }
+    if to.is_empty() {
+        return Err("Add at least one recipient.".to_string());
+    }
+
+    let account_id = state
+        .compose
+        .account_id
+        .clone()
+        .or_else(|| selected_account_id(state))
+        .ok_or_else(|| "No account is available for this message.".to_string())?;
+    let subject = state.compose.subject.clone().unwrap_or_else(|| {
+        if mode == "forward" {
+            forward_subject(selected_subject(state))
+        } else {
+            reply_subject(selected_subject(state))
+        }
+    });
+    let in_reply_to = if mode == "forward" {
+        None
+    } else {
+        state
+            .compose
+            .in_reply_to
+            .clone()
+            .or_else(|| selected_in_reply_to(state))
+    };
+
+    Ok(SendRequest {
+        account_id,
+        to,
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject,
+        text_body: Some(body),
+        html_body: None,
+        in_reply_to,
+    })
+}
+
+fn selected_reply_seed(state: &NativeAppState) -> Option<NativeDraftSeed> {
+    let email = selected_from_email(state)?;
+    let label = selected_sender(state);
+    Some(NativeDraftSeed {
+        recipients: vec![(email, label)],
+        body: String::new(),
+    })
+}
+
+fn selected_account_id(state: &NativeAppState) -> Option<String> {
+    state
+        .selected_full_message
+        .as_ref()
+        .map(|message| message.account_id.clone())
+        .or_else(|| selected_summary(state).map(|message| message.account_id.clone()))
+}
+
+fn selected_in_reply_to(state: &NativeAppState) -> Option<String> {
+    state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| message.message_id.clone())
+        .or_else(|| selected_summary(state).and_then(|message| message.message_id.clone()))
+}
+
+fn selected_from_email(state: &NativeAppState) -> Option<String> {
+    state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| message.from_email.clone())
+        .or_else(|| selected_summary(state).and_then(|message| message.from_email.clone()))
+        .map(|email| email.trim().to_string())
+        .filter(|email| !email.is_empty())
+}
+
+fn selected_forward_body(state: &NativeAppState) -> String {
+    let body = state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| message.body.as_ref())
+        .and_then(|body| body.text_body.as_ref())
+        .or_else(|| selected_summary(state).and_then(|message| message.preview.as_ref()))
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_default();
+
+    if body.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "\n\n---------- Forwarded message from {} ----------\n\n{}",
+        selected_sender(state),
+        body
+    )
+}
+
+fn reply_subject(subject: String) -> String {
+    if subject.trim_start().to_ascii_lowercase().starts_with("re:") {
+        subject
+    } else {
+        format!("Re: {subject}")
+    }
+}
+
+fn forward_subject(subject: String) -> String {
+    if subject
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("fwd:")
+    {
+        subject
+    } else {
+        format!("Fwd: {subject}")
+    }
+}
+
+fn normalize_recipients(recipients: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    recipients
+        .into_iter()
+        .map(|recipient| recipient.trim().to_string())
+        .filter(|recipient| !recipient.is_empty())
+        .filter(|recipient| seen.insert(recipient.to_ascii_lowercase()))
+        .collect()
+}
+
+fn date_time_value_to_utc_iso(value: DateTimeValue) -> Result<String> {
+    let local = Local
+        .with_ymd_and_hms(
+            value.year,
+            value.month.into(),
+            value.day.into(),
+            value.hour.into(),
+            value.minute.into(),
+            0,
+        )
+        .single()
+        .ok_or_else(|| anyhow!("invalid local snooze time {}", value.display_value()))?;
+    Ok(local.with_timezone(&Utc).to_rfc3339())
 }
 
 #[cfg(test)]
@@ -2611,6 +3131,72 @@ mod tests {
         );
         assert!(state.selected_message_resource.is_loading());
         assert!(state.selected_full_message.is_none());
+    }
+
+    #[test]
+    fn quick_reply_request_defaults_to_selected_sender() {
+        let mut state = NativeAppState::default();
+        let mut summary = message("message", "inbox", true);
+        summary.subject = Some("Status".to_string());
+        summary.from_name = Some("Ada Lovelace".to_string());
+        summary.from_email = Some("ada@example.test".to_string());
+        summary.message_id = Some("<message@example.test>".to_string());
+        state.selected_message = Some("message".to_string());
+        state.messages = vec![summary];
+
+        let request =
+            build_quick_reply_request(&state, Vec::new(), "  Thanks  ".to_string()).unwrap();
+
+        assert_eq!(request.account_id, "account");
+        assert_eq!(request.to, vec!["ada@example.test"]);
+        assert_eq!(request.subject, "Re: Status");
+        assert_eq!(request.text_body.as_deref(), Some("Thanks"));
+        assert_eq!(
+            request.in_reply_to.as_deref(),
+            Some("<message@example.test>")
+        );
+    }
+
+    #[test]
+    fn forward_request_uses_explicit_recipient_and_omits_in_reply_to() {
+        let mut state = NativeAppState::default();
+        let mut full = full_message("message", "inbox", true, false);
+        full.subject = Some("Plans".to_string());
+        full.from_name = Some("Ada Lovelace".to_string());
+        full.from_email = Some("ada@example.test".to_string());
+        full.message_id = Some("<message@example.test>".to_string());
+        state.selected_message = Some("message".to_string());
+        state.selected_full_message = Some(full);
+        state.compose.open = true;
+        state.compose.mode = Some("forward".to_string());
+        state.compose.account_id = Some("account".to_string());
+        state.compose.subject = Some("Fwd: Plans".to_string());
+
+        let request = build_quick_reply_request(
+            &state,
+            vec![
+                " bob@example.test ".to_string(),
+                "BOB@example.test".to_string(),
+            ],
+            "See below".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(request.to, vec!["bob@example.test"]);
+        assert_eq!(request.subject, "Fwd: Plans");
+        assert_eq!(request.in_reply_to, None);
+    }
+
+    #[test]
+    fn forward_request_requires_a_recipient() {
+        let mut state = NativeAppState::default();
+        state.selected_message = Some("message".to_string());
+        state.selected_full_message = Some(full_message("message", "inbox", true, false));
+        state.compose.mode = Some("forward".to_string());
+
+        let err = build_quick_reply_request(&state, Vec::new(), "Body".to_string()).unwrap_err();
+
+        assert_eq!(err, "Add at least one recipient.");
     }
 }
 
@@ -3720,24 +4306,6 @@ fn selected_date(state: &NativeAppState) -> Option<String> {
         .filter(|date| !date.trim().is_empty())
 }
 
-fn reading_toolbar_button(
-    label: &'static str,
-    cx: &mut Context<ReadingPanePlaceholder>,
-) -> gpui::Div {
-    let theme = cx.theme();
-    div()
-        .h(px(28.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(theme.colors.stroke_neutral_subtle)
-        .text_size(px(theme.typography.caption.size))
-        .text_color(theme.colors.on_neutral)
-        .child(label)
-}
-
 fn reading_badge(label: &'static str, cx: &mut Context<ReadingPanePlaceholder>) -> gpui::Div {
     let theme = cx.theme();
     div()
@@ -3753,8 +4321,10 @@ fn reading_badge(label: &'static str, cx: &mut Context<ReadingPanePlaceholder>) 
 }
 
 fn reading_placeholder(
+    state_entity: &Entity<NativeAppState>,
     state: &NativeAppState,
-    _recipient_input: Entity<TokenInput>,
+    recipient_input: Entity<TokenInput>,
+    quick_reply_input: Entity<TextInput>,
     snooze_picker: Entity<DateTimePicker>,
     cx: &mut Context<ReadingPanePlaceholder>,
 ) -> gpui::Div {
@@ -3812,6 +4382,25 @@ fn reading_placeholder(
         .map(|message| message.has_attachments)
         .or_else(|| summary.map(|message| message.has_attachments))
         .unwrap_or(false);
+    let is_read = state
+        .selected_full_message
+        .as_ref()
+        .map(|message| message.is_read)
+        .or_else(|| summary.map(|message| message.is_read))
+        .unwrap_or(true);
+    let message_id = selected_id.unwrap_or_default();
+    let action_busy = state.messages_resource.is_loading() || state.compose.sending;
+    let quick_reply_has_body = !quick_reply_input.read(cx).text().trim().is_empty();
+    let quick_reply_has_recipient =
+        !recipient_input.read(cx).values().is_empty() || selected_from_email(state).is_some();
+    let can_send_quick_reply =
+        !state.compose.sending && quick_reply_has_body && quick_reply_has_recipient;
+    let compose_status = state
+        .compose
+        .error
+        .clone()
+        .map(|error| (error, true))
+        .or_else(|| state.compose.notice.clone().map(|notice| (notice, false)));
 
     div()
         .size_full()
@@ -3858,11 +4447,127 @@ fn reading_placeholder(
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .child(reading_toolbar_button("Reply", cx))
-                        .child(reading_toolbar_button("Forward", cx))
-                        .child(reading_toolbar_button("Archive", cx))
-                        .child(reading_toolbar_button("Delete", cx))
-                        .child(reading_toolbar_button("Snooze", cx))
+                        .child(
+                            Button::new("reading-reply")
+                                .label("Reply")
+                                .appearance(ButtonAppearance::Neutral)
+                                .size(ButtonSize::Compact)
+                                .disabled(action_busy)
+                                .on_click({
+                                    let state_entity = state_entity.clone();
+                                    let recipient_input = recipient_input.clone();
+                                    let quick_reply_input = quick_reply_input.clone();
+                                    move |_, _, app_cx| {
+                                        start_reply_draft(
+                                            &state_entity,
+                                            recipient_input.clone(),
+                                            quick_reply_input.clone(),
+                                            app_cx,
+                                        );
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("reading-forward")
+                                .label("Forward")
+                                .appearance(ButtonAppearance::Neutral)
+                                .size(ButtonSize::Compact)
+                                .disabled(action_busy)
+                                .on_click({
+                                    let state_entity = state_entity.clone();
+                                    let recipient_input = recipient_input.clone();
+                                    let quick_reply_input = quick_reply_input.clone();
+                                    move |_, _, app_cx| {
+                                        start_forward_draft(
+                                            &state_entity,
+                                            recipient_input.clone(),
+                                            quick_reply_input.clone(),
+                                            app_cx,
+                                        );
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("reading-toggle-read")
+                                .label(if is_read { "Mark unread" } else { "Mark read" })
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .disabled(action_busy)
+                                .on_click({
+                                    let state_entity = state_entity.clone();
+                                    let message_id = message_id.clone();
+                                    move |_, _, app_cx| {
+                                        start_message_mutation_and_refresh(
+                                            &state_entity,
+                                            NativeMessageMutation::SetRead {
+                                                message_id: message_id.clone(),
+                                                is_read: !is_read,
+                                            },
+                                            app_cx,
+                                        );
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("reading-archive")
+                                .label("Archive")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .disabled(action_busy)
+                                .on_click({
+                                    let state_entity = state_entity.clone();
+                                    let message_id = message_id.clone();
+                                    move |_, _, app_cx| {
+                                        start_message_mutation_and_refresh(
+                                            &state_entity,
+                                            NativeMessageMutation::Archive {
+                                                message_id: message_id.clone(),
+                                            },
+                                            app_cx,
+                                        );
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("reading-delete")
+                                .label("Delete")
+                                .appearance(ButtonAppearance::Danger)
+                                .size(ButtonSize::Compact)
+                                .disabled(action_busy)
+                                .on_click({
+                                    let state_entity = state_entity.clone();
+                                    let message_id = message_id.clone();
+                                    move |_, _, app_cx| {
+                                        start_message_mutation_and_refresh(
+                                            &state_entity,
+                                            NativeMessageMutation::Delete {
+                                                message_id: message_id.clone(),
+                                            },
+                                            app_cx,
+                                        );
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("reading-snooze")
+                                .label("Snooze")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .disabled(action_busy)
+                                .on_click({
+                                    let state_entity = state_entity.clone();
+                                    let snooze_picker = snooze_picker.clone();
+                                    let message_id = message_id.clone();
+                                    move |_, _, app_cx| {
+                                        start_snooze_from_picker(
+                                            &state_entity,
+                                            snooze_picker.clone(),
+                                            message_id.clone(),
+                                            app_cx,
+                                        );
+                                    }
+                                }),
+                        )
                         .child(div().w(px(190.0)).child(snooze_picker))
                         .when(is_flagged, |row| row.child(reading_badge("Flagged", cx)))
                         .when(has_attachments, |row| {
@@ -3890,6 +4595,73 @@ fn reading_placeholder(
                 .px(px(20.0))
                 .py(px(16.0))
                 .child(DocumentViewer::new(selected_document(state)).max_height(520.0)),
+        )
+        .child(
+            div()
+                .border_t_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .px(px(20.0))
+                .py(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .w(px(34.0))
+                                .text_size(px(typography.caption.size))
+                                .text_color(colors.on_subtle)
+                                .child("To"),
+                        )
+                        .child(div().flex_1().min_w_0().child(recipient_input.clone())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(div().flex_1().min_w_0().child(quick_reply_input.clone()))
+                        .child(
+                            Button::new("reading-send-quick-reply")
+                                .label(if state.compose.sending {
+                                    "Sending..."
+                                } else {
+                                    "Send"
+                                })
+                                .appearance(ButtonAppearance::Accent)
+                                .size(ButtonSize::Compact)
+                                .disabled(!can_send_quick_reply)
+                                .on_click({
+                                    let state_entity = state_entity.clone();
+                                    let recipient_input = recipient_input.clone();
+                                    let quick_reply_input = quick_reply_input.clone();
+                                    move |_, _, app_cx| {
+                                        start_quick_reply_send(
+                                            &state_entity,
+                                            recipient_input.clone(),
+                                            quick_reply_input.clone(),
+                                            app_cx,
+                                        );
+                                    }
+                                }),
+                        ),
+                )
+                .when_some(compose_status, |footer, (status, is_error)| {
+                    footer.child(
+                        div()
+                            .text_size(px(typography.caption.size))
+                            .text_color(if is_error {
+                                colors.status_error
+                            } else {
+                                colors.on_subtle
+                            })
+                            .child(status),
+                    )
+                }),
         )
 }
 
