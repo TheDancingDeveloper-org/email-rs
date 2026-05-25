@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,7 +17,8 @@ use fluent_layout::{
     PaneConstraints, PaneGroup, RichDocument, SelectableList, SelectableListItem, Workspace,
 };
 use fluent_primitives::{
-    DateTimePicker, DateTimeValue, ProgressBar, TokenInput, TokenInputSuggestion,
+    Button, ButtonAppearance, ButtonSize, DateTimePicker, DateTimeValue, IconButton, ProgressBar,
+    TokenInput, TokenInputSuggestion,
 };
 use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, FontWeight, IntoElement, KeyBinding,
@@ -40,6 +42,8 @@ actions!(
 const APP_TITLE: &str = "email-rs FluentGUI";
 const APP_ID: &str = "org.email-rs.desktop.fluent";
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const NATIVE_SETTINGS_ENV: &str = "EMAIL_RS_FLUENT_SETTINGS_PATH";
+const NATIVE_SETTINGS_FILE: &str = "fluentgui-settings.conf";
 
 fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
@@ -58,86 +62,92 @@ fn main() -> Result<()> {
     wait_for_server(&bind_addr, &server_errors)?;
 
     let base_url = format!("http://localhost:{port}");
-    let initial_state = load_initial_state(&base_url)?;
+    let mut initial_state = load_initial_state(&base_url)?;
+    let preferences = load_native_preferences();
+    preferences.apply_to_state(&mut initial_state);
 
-    FluentApp::new(native_window_title(&initial_state))
+    let fluent_app = FluentApp::new(native_window_title(&initial_state))
         .app_id(APP_ID)
         .window_size(1280.0, 800.0)
         .window_min_size(800.0, 600.0)
-        .window_status(native_window_status(&initial_state))
-        .dark_theme()
-        .run(move |cx| {
-            cx.bind_keys([
-                KeyBinding::new("ctrl-k", TogglePalette, None),
-                KeyBinding::new("ctrl-shift-l", ApplyLightTheme, None),
-                KeyBinding::new("ctrl-shift-d", ApplyDarkTheme, None),
-                KeyBinding::new("ctrl-plus", IncreaseDensity, None),
-                KeyBinding::new("ctrl-minus", DecreaseDensity, None),
-            ]);
+        .window_status(native_window_status(&initial_state));
+    let fluent_app = match initial_state.theme {
+        ThemeMode::Dark => fluent_app.dark_theme(),
+        ThemeMode::Light => fluent_app.light_theme(),
+    };
 
-            let state_entity = cx.new(|_| initial_state.clone());
+    fluent_app.run(move |cx| {
+        cx.bind_keys([
+            KeyBinding::new("ctrl-k", TogglePalette, None),
+            KeyBinding::new("ctrl-shift-l", ApplyLightTheme, None),
+            KeyBinding::new("ctrl-shift-d", ApplyDarkTheme, None),
+            KeyBinding::new("ctrl-plus", IncreaseDensity, None),
+            KeyBinding::new("ctrl-minus", DecreaseDensity, None),
+        ]);
 
-            let modal_host = cx.new(ModalHost::new);
-            let sidebar = cx.new({
-                let state = state_entity.clone();
-                move |cx| SidebarPlaceholder::new(cx, state.clone())
-            });
-            let sidebar_dock = cx.new(|cx| {
-                DockPanel::new(cx, DockPosition::Left, "Mail")
-                    .size(280.0)
-                    .content(sidebar.clone().into())
-            });
+        let state_entity = cx.new(|_| initial_state.clone());
 
-            let message_list = cx.new({
-                let state = state_entity.clone();
-                move |cx| MessageListPlaceholder::new(cx, state.clone())
-            });
-            let reading_pane = cx.new({
-                let state = state_entity.clone();
-                move |cx| ReadingPanePlaceholder::new(cx, state.clone())
-            });
-            let mail_split = cx.new(|_| {
-                PaneGroup::horizontal()
-                    .first(message_list.clone().into())
-                    .second(reading_pane.clone().into())
-                    .ratio(0.42)
-                    .constraints(
-                        PaneConstraints::new()
-                            .first_min(320.0)
-                            .second_min(420.0)
-                            .first_max(Some(640.0)),
-                    )
-            });
-            let pane = cx.new(|cx| Pane::new(cx));
-            pane.update(cx, |pane, cx| {
-                pane.set_content(mail_split.clone().into(), cx);
-            });
-
-            let status_bar = cx.new({
-                let state = state_entity.clone();
-                move |cx| StatusBar::new(cx, state.clone())
-            });
-
-            let workspace = cx.new(|cx| {
-                Workspace::new(cx)
-                    .left_dock(sidebar_dock.clone())
-                    .content(pane.clone().into())
-                    .modal_host(modal_host.clone())
-                    .status_bar(status_bar.clone().into())
-                    .with_file_menu("email-rs")
-            });
-
-            let palette = cx.new({
-                let state = state_entity.read(cx).clone();
-                move |cx| {
-                    let mut palette = CommandPalette::new(cx).max_results(14);
-                    palette.set_entries(palette_entries(&state), cx);
-                    palette
-                }
-            });
-
-            cx.new(|cx| EmailDesktopApp::new(cx, state_entity.clone(), workspace, palette))
+        let modal_host = cx.new(ModalHost::new);
+        let sidebar = cx.new({
+            let state = state_entity.clone();
+            move |cx| SidebarPlaceholder::new(cx, state.clone())
         });
+        let sidebar_dock = cx.new(|cx| {
+            DockPanel::new(cx, DockPosition::Left, "Mail")
+                .size(280.0)
+                .content(sidebar.clone().into())
+        });
+
+        let message_list = cx.new({
+            let state = state_entity.clone();
+            move |cx| MessageListPlaceholder::new(cx, state.clone())
+        });
+        let reading_pane = cx.new({
+            let state = state_entity.clone();
+            move |cx| ReadingPanePlaceholder::new(cx, state.clone())
+        });
+        let mail_split = cx.new(|_| {
+            PaneGroup::horizontal()
+                .first(message_list.clone().into())
+                .second(reading_pane.clone().into())
+                .ratio(0.42)
+                .constraints(
+                    PaneConstraints::new()
+                        .first_min(320.0)
+                        .second_min(420.0)
+                        .first_max(Some(640.0)),
+                )
+        });
+        let pane = cx.new(|cx| Pane::new(cx));
+        pane.update(cx, |pane, cx| {
+            pane.set_content(mail_split.clone().into(), cx);
+        });
+
+        let status_bar = cx.new({
+            let state = state_entity.clone();
+            move |cx| StatusBar::new(cx, state.clone())
+        });
+
+        let workspace = cx.new(|cx| {
+            Workspace::new(cx)
+                .left_dock(sidebar_dock.clone())
+                .content(pane.clone().into())
+                .modal_host(modal_host.clone())
+                .status_bar(status_bar.clone().into())
+                .with_file_menu("email-rs")
+        });
+
+        let palette = cx.new({
+            let state = state_entity.read(cx).clone();
+            move |cx| {
+                let mut palette = CommandPalette::new(cx).max_results(14);
+                palette.set_entries(palette_entries(&state), cx);
+                palette
+            }
+        });
+
+        cx.new(|cx| EmailDesktopApp::new(cx, state_entity.clone(), workspace, palette))
+    });
 
     Ok(())
 }
@@ -434,10 +444,118 @@ async fn load_account_tree(client: &EmailClient) -> Result<LoadedAccountTree> {
     })
 }
 
+fn load_native_preferences() -> NativePreferences {
+    let path = native_settings_path();
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => parse_native_preferences(&raw),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => NativePreferences::default(),
+        Err(err) => {
+            tracing::warn!("failed to read native FluentGUI settings from {path:?}: {err}");
+            NativePreferences::default()
+        }
+    }
+}
+
+fn save_native_preferences(preferences: &NativePreferences) -> Result<()> {
+    write_native_preferences(&native_settings_path(), preferences)
+}
+
+fn write_native_preferences(path: &Path, preferences: &NativePreferences) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create native settings directory {parent:?}"))?;
+    }
+    std::fs::write(path, serialize_native_preferences(preferences))
+        .with_context(|| format!("write native settings {path:?}"))
+}
+
+fn parse_native_preferences(raw: &str) -> NativePreferences {
+    let mut preferences = NativePreferences::default();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "theme" => {
+                if let Some(theme) = ThemeMode::parse(value) {
+                    preferences.theme = theme;
+                }
+            }
+            "density" => {
+                if let Ok(level) = value.trim().parse::<u8>() {
+                    preferences.density_level = level.min(8);
+                }
+            }
+            _ => {}
+        }
+    }
+    preferences
+}
+
+fn serialize_native_preferences(preferences: &NativePreferences) -> String {
+    format!(
+        "theme={}\ndensity={}\n",
+        preferences.theme.as_str(),
+        preferences.density_level.min(8)
+    )
+}
+
+fn native_settings_path() -> PathBuf {
+    if let Ok(path) = std::env::var(NATIVE_SETTINGS_ENV) {
+        return PathBuf::from(path);
+    }
+
+    native_config_dir().join(NATIVE_SETTINGS_FILE)
+}
+
+fn native_config_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var("LOCALAPPDATA")
+            .or_else(|_| std::env::var("APPDATA"))
+            .unwrap_or_else(|_| std::env::var("TEMP").unwrap_or_else(|_| ".".to_string()));
+        return PathBuf::from(base).join("email-rs");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(|home| PathBuf::from(home).join(".config"))
+                    .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            });
+        base.join("email-rs")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ThemeMode {
     Dark,
     Light,
+}
+
+impl ThemeMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -468,6 +586,35 @@ impl DensityTokens {
 impl Default for DensityTokens {
     fn default() -> Self {
         Self::new(4)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativePreferences {
+    theme: ThemeMode,
+    density_level: u8,
+}
+
+impl NativePreferences {
+    fn from_state(state: &NativeAppState) -> Self {
+        Self {
+            theme: state.theme.clone(),
+            density_level: state.density.level,
+        }
+    }
+
+    fn apply_to_state(&self, state: &mut NativeAppState) {
+        state.theme = self.theme.clone();
+        state.density = DensityTokens::new(self.density_level);
+    }
+}
+
+impl Default for NativePreferences {
+    fn default() -> Self {
+        Self {
+            theme: ThemeMode::Dark,
+            density_level: DensityTokens::default().level,
+        }
     }
 }
 
@@ -650,6 +797,46 @@ impl EmailDesktopApp {
             cx.notify();
         }
     }
+
+    fn apply_theme_mode(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
+        let preferences = self.state.update(cx, |state, cx| {
+            state.theme = mode.clone();
+            let preferences = NativePreferences::from_state(state);
+            cx.notify();
+            preferences
+        });
+
+        match mode {
+            ThemeMode::Dark => Theme::apply_dark(cx),
+            ThemeMode::Light => Theme::apply_light(cx),
+        }
+
+        self.persist_preferences(preferences, cx);
+        cx.notify();
+    }
+
+    fn adjust_density(&mut self, delta: i8, cx: &mut Context<Self>) {
+        let preferences = self.state.update(cx, |state, cx| {
+            let level = (state.density.level as i16 + delta as i16).clamp(0, 8) as u8;
+            state.density = DensityTokens::new(level);
+            let preferences = NativePreferences::from_state(state);
+            cx.notify();
+            preferences
+        });
+
+        self.persist_preferences(preferences, cx);
+        cx.notify();
+    }
+
+    fn persist_preferences(&mut self, preferences: NativePreferences, cx: &mut Context<Self>) {
+        if let Err(err) = save_native_preferences(&preferences) {
+            tracing::warn!("failed to save native FluentGUI settings: {err:#}");
+            self.state.update(cx, |state, cx| {
+                state.last_error = Some(format!("Failed to save native settings: {err}"));
+                cx.notify();
+            });
+        }
+    }
 }
 
 impl Render for EmailDesktopApp {
@@ -669,22 +856,12 @@ impl Render for EmailDesktopApp {
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &ApplyLightTheme, _, cx| {
-                    app.state.update(cx, |state, cx| {
-                        state.theme = ThemeMode::Light;
-                        cx.notify();
-                    });
-                    Theme::apply_light(cx);
-                    cx.notify();
+                    app.apply_theme_mode(ThemeMode::Light, cx);
                 }),
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &ApplyDarkTheme, _, cx| {
-                    app.state.update(cx, |state, cx| {
-                        state.theme = ThemeMode::Dark;
-                        cx.notify();
-                    });
-                    Theme::apply_dark(cx);
-                    cx.notify();
+                    app.apply_theme_mode(ThemeMode::Dark, cx);
                 }),
             )
             .on_action(
@@ -707,20 +884,12 @@ impl Render for EmailDesktopApp {
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &IncreaseDensity, _, cx| {
-                    app.state.update(cx, |state, cx| {
-                        state.density = DensityTokens::new(state.density.level.saturating_add(1));
-                        cx.notify();
-                    });
-                    cx.notify();
+                    app.adjust_density(1, cx);
                 }),
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &DecreaseDensity, _, cx| {
-                    app.state.update(cx, |state, cx| {
-                        state.density = DensityTokens::new(state.density.level.saturating_sub(1));
-                        cx.notify();
-                    });
-                    cx.notify();
+                    app.adjust_density(-1, cx);
                 }),
             )
             .child(self.workspace.clone())
@@ -865,48 +1034,7 @@ impl Render for SidebarPlaceholder {
                     .child(section_label("Labels", cx))
                     .child(label_rows(&self.state, &state, cx)),
             )
-            .child(
-                div()
-                    .px(px(8.0))
-                    .py(px(10.0))
-                    .border_t_1()
-                    .border_color(colors.stroke_neutral_subtle)
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        nav_item("Mail", state.selected_view == SelectedView::Mail, cx)
-                            .id("nav-mail")
-                            .cursor_pointer()
-                            .on_click({
-                                let state_entity = self.state.clone();
-                                move |_, _, app_cx| {
-                                    state_entity.update(app_cx, |state, cx| {
-                                        state.selected_view = SelectedView::Mail;
-                                        cx.notify();
-                                    });
-                                }
-                            }),
-                    )
-                    .child(
-                        nav_item(
-                            "Calendar",
-                            state.selected_view == SelectedView::Calendar,
-                            cx,
-                        )
-                        .id("nav-calendar")
-                        .cursor_pointer()
-                        .on_click({
-                            let state_entity = self.state.clone();
-                            move |_, _, app_cx| {
-                                state_entity.update(app_cx, |state, cx| {
-                                    state.selected_view = SelectedView::Calendar;
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                    ),
-            )
+            .child(sidebar_footer(&self.state, &state, cx))
     }
 }
 
@@ -1878,6 +2006,42 @@ mod tests {
     }
 
     #[test]
+    fn native_preferences_parse_and_clamp_density() {
+        let preferences =
+            parse_native_preferences("\n# comment\ntheme=light\ndensity=22\nignored=value\n");
+
+        assert_eq!(
+            preferences,
+            NativePreferences {
+                theme: ThemeMode::Light,
+                density_level: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn native_preferences_round_trip_to_disk() {
+        let path = std::env::temp_dir().join(format!(
+            "email-rs-native-prefs-{}-{}.conf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let preferences = NativePreferences {
+            theme: ThemeMode::Light,
+            density_level: 2,
+        };
+
+        write_native_preferences(&path, &preferences).expect("write preferences");
+        let raw = std::fs::read_to_string(&path).expect("read preferences");
+        assert_eq!(parse_native_preferences(&raw), preferences);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn native_message_source_uses_current_selection() {
         let mut state = NativeAppState {
             selected_folder: Some("smart:unread".to_string()),
@@ -2411,6 +2575,140 @@ fn sync_status_strip(status: &NativeSyncStatus, cx: &mut Context<SidebarPlacehol
                     .child(ProgressBar::new(ratio).height(3.0)),
             )
         })
+}
+
+fn sidebar_footer(
+    state_entity: &Entity<NativeAppState>,
+    state: &NativeAppState,
+    cx: &mut Context<SidebarPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let theme_is_dark = state.theme == ThemeMode::Dark;
+    let theme_icon = if theme_is_dark {
+        "icons/sun.svg"
+    } else {
+        "icons/moon.svg"
+    };
+    let theme_label = if theme_is_dark {
+        "Light mode"
+    } else {
+        "Dark mode"
+    };
+
+    div()
+        .px(px(8.0))
+        .py(px(10.0))
+        .border_t_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    nav_item("Mail", state.selected_view == SelectedView::Mail, cx)
+                        .id("nav-mail")
+                        .cursor_pointer()
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| {
+                                state_entity.update(app_cx, |state, cx| {
+                                    state.selected_view = SelectedView::Mail;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    nav_item(
+                        "Calendar",
+                        state.selected_view == SelectedView::Calendar,
+                        cx,
+                    )
+                    .id("nav-calendar")
+                    .cursor_pointer()
+                    .on_click({
+                        let state_entity = state_entity.clone();
+                        move |_, _, app_cx| {
+                            state_entity.update(app_cx, |state, cx| {
+                                state.selected_view = SelectedView::Calendar;
+                                cx.notify();
+                            });
+                        }
+                    }),
+                ),
+        )
+        .child(
+            div()
+                .pt(px(8.0))
+                .border_t_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(typography.caption.size))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.on_neutral)
+                                .child("Density"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(colors.on_subtle)
+                                .child(format!("Level {}", state.density.level)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            IconButton::new("sidebar-density-down", "icons/chevron_down.svg")
+                                .size(ButtonSize::Compact)
+                                .disabled(state.density.level == 0)
+                                .on_click(|_, _, app_cx| {
+                                    app_cx.dispatch_action(&DecreaseDensity);
+                                }),
+                        )
+                        .child(
+                            IconButton::new("sidebar-density-up", "icons/chevron_up.svg")
+                                .size(ButtonSize::Compact)
+                                .disabled(state.density.level >= 8)
+                                .on_click(|_, _, app_cx| {
+                                    app_cx.dispatch_action(&IncreaseDensity);
+                                }),
+                        ),
+                ),
+        )
+        .child(
+            Button::new("sidebar-theme-toggle")
+                .icon(theme_icon)
+                .label(theme_label)
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .on_click(move |_, _, app_cx| {
+                    if theme_is_dark {
+                        app_cx.dispatch_action(&ApplyLightTheme);
+                    } else {
+                        app_cx.dispatch_action(&ApplyDarkTheme);
+                    }
+                }),
+        )
 }
 
 fn smart_folder_rows(
