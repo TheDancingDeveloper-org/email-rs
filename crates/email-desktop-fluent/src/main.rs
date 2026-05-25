@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpStream;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -8,14 +8,16 @@ use anyhow::{anyhow, Context as _, Result};
 use chrono::{Datelike as _, Duration as ChronoDuration, Local};
 use email_client::EmailClient;
 use email_server::{run_server, Config};
-use email_types::{Account, Folder, FullMessage, Label, Message};
+use email_types::{Account, Folder, FullMessage, Label, Message, SyncEvent};
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
 use fluent_layout::{
     CommandPalette, DockPanel, DockPosition, DocumentViewer, ModalHost, PaletteEntry, Pane,
     PaneConstraints, PaneGroup, RichDocument, SelectableList, SelectableListItem, Workspace,
 };
-use fluent_primitives::{DateTimePicker, DateTimeValue, TokenInput, TokenInputSuggestion};
+use fluent_primitives::{
+    DateTimePicker, DateTimeValue, ProgressBar, TokenInput, TokenInputSuggestion,
+};
 use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, FontWeight, IntoElement, KeyBinding,
     Render, SharedString, Window,
@@ -206,6 +208,99 @@ fn wait_for_server(bind_addr: &str, server_errors: &Receiver<String>) -> Result<
     ))
 }
 
+fn start_sync_events_thread(base_url: String, updates: Sender<NativeSyncUpdate>) {
+    thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(err) => {
+                let _ = updates.send(NativeSyncUpdate::Error(format!(
+                    "failed to create sync event runtime: {err:#}"
+                )));
+                return;
+            }
+        };
+
+        loop {
+            if updates.send(NativeSyncUpdate::Connecting).is_err() {
+                break;
+            }
+
+            let message = match rt.block_on(stream_sync_events(&base_url, &updates)) {
+                Ok(()) => "sync event stream closed".to_string(),
+                Err(err) => err.to_string(),
+            };
+            if updates.send(NativeSyncUpdate::Error(message)).is_err() {
+                break;
+            }
+
+            thread::sleep(Duration::from_secs(5));
+        }
+    });
+}
+
+async fn stream_sync_events(base_url: &str, updates: &Sender<NativeSyncUpdate>) -> Result<()> {
+    let client = EmailClient::new(base_url)?;
+    let mut response = client.open_sync_events().await?;
+    updates
+        .send(NativeSyncUpdate::Connected)
+        .map_err(|_| anyhow!("sync event listener stopped"))?;
+
+    let mut buffer = String::new();
+    while let Some(chunk) = response.chunk().await? {
+        let chunk = String::from_utf8_lossy(&chunk);
+        for event in drain_sse_sync_events(&mut buffer, chunk.as_ref()) {
+            match event {
+                Ok(event) => updates
+                    .send(NativeSyncUpdate::Event(event))
+                    .map_err(|_| anyhow!("sync event listener stopped"))?,
+                Err(err) => updates
+                    .send(NativeSyncUpdate::Error(err))
+                    .map_err(|_| anyhow!("sync event listener stopped"))?,
+            }
+        }
+    }
+
+    Err(anyhow!("sync event stream closed"))
+}
+
+fn drain_sse_sync_events(buffer: &mut String, chunk: &str) -> Vec<Result<SyncEvent, String>> {
+    buffer.push_str(chunk);
+    let mut events = Vec::new();
+
+    while let Some((index, delimiter_len)) = sse_event_boundary(buffer) {
+        let block = buffer[..index].to_string();
+        buffer.drain(..index + delimiter_len);
+        if let Some(event) = parse_sse_sync_event_block(&block) {
+            events.push(event);
+        }
+    }
+
+    events
+}
+
+fn sse_event_boundary(buffer: &str) -> Option<(usize, usize)> {
+    ["\r\n\r\n", "\n\n", "\r\r"]
+        .iter()
+        .filter_map(|delimiter| buffer.find(delimiter).map(|index| (index, delimiter.len())))
+        .min_by_key(|(index, _)| *index)
+}
+
+fn parse_sse_sync_event_block(block: &str) -> Option<Result<SyncEvent, String>> {
+    let block = block.replace("\r\n", "\n").replace('\r', "\n");
+    let data = block
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if data.trim().is_empty() {
+        return None;
+    }
+
+    Some(email_client::parse_sync_event(&data).map_err(|err| err.to_string()))
+}
+
 fn load_initial_state(base_url: &str) -> Result<NativeAppState> {
     let client = EmailClient::new(base_url)?;
     let rt = tokio::runtime::Runtime::new()?;
@@ -377,6 +472,26 @@ struct PaletteState {
     query: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NativeSyncStatus {
+    connected: bool,
+    syncing: bool,
+    account_id: Option<String>,
+    folder: Option<String>,
+    done: i64,
+    total: i64,
+    last_message: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NativeSyncUpdate {
+    Connecting,
+    Connected,
+    Event(SyncEvent),
+    Error(String),
+}
+
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 struct NativeAppState {
@@ -399,6 +514,7 @@ struct NativeAppState {
     compose: ComposeState,
     modals: ModalStates,
     palette: PaletteState,
+    sync: NativeSyncStatus,
     last_error: Option<String>,
 }
 
@@ -424,6 +540,7 @@ impl Default for NativeAppState {
             compose: ComposeState::default(),
             modals: ModalStates::default(),
             palette: PaletteState::default(),
+            sync: NativeSyncStatus::default(),
             last_error: None,
         }
     }
@@ -433,6 +550,7 @@ struct EmailDesktopApp {
     state: Entity<NativeAppState>,
     workspace: Entity<Workspace>,
     palette: Entity<CommandPalette>,
+    sync_updates: Receiver<NativeSyncUpdate>,
 }
 
 impl EmailDesktopApp {
@@ -447,10 +565,62 @@ impl EmailDesktopApp {
         let state_snapshot = state.read(cx).clone();
         WindowTitle::set_title(cx, native_window_title(&state_snapshot));
         WindowTitle::set_status(cx, native_window_status(&state_snapshot));
+        let (sync_tx, sync_updates) = mpsc::channel();
+        start_sync_events_thread(state_snapshot.api_base_url.clone(), sync_tx);
+        cx.spawn(
+            |app: gpui::WeakEntity<Self>, async_cx: &mut gpui::AsyncApp| {
+                let mut async_cx = async_cx.clone();
+                async move {
+                    loop {
+                        async_cx
+                            .background_executor()
+                            .timer(Duration::from_millis(250))
+                            .await;
+                        if app
+                            .update(&mut async_cx, |app, cx| app.drain_sync_updates(cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            },
+        )
+        .detach();
         Self {
             state,
             workspace,
             palette,
+            sync_updates,
+        }
+    }
+
+    fn drain_sync_updates(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
+        loop {
+            match self.sync_updates.try_recv() {
+                Ok(update) => {
+                    changed = true;
+                    self.state.update(cx, |state, cx| {
+                        apply_sync_update(&mut state.sync, update);
+                        cx.notify();
+                    });
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    changed = true;
+                    self.state.update(cx, |state, cx| {
+                        state.sync.connected = false;
+                        state.sync.last_error =
+                            Some("Sync event listener disconnected".to_string());
+                        cx.notify();
+                    });
+                    break;
+                }
+            }
+        }
+        if changed {
+            cx.notify();
         }
     }
 }
@@ -649,6 +819,7 @@ impl Render for SidebarPlaceholder {
                             .child("Compose"),
                     ),
             )
+            .child(sync_status_strip(&state.sync, cx))
             .child(
                 div()
                     .id("sidebar-scroll")
@@ -972,6 +1143,101 @@ fn unread_status_text(unread: i64) -> String {
         1 => "1 unread message".to_string(),
         unread => format!("{unread} unread messages"),
     }
+}
+
+fn apply_sync_update(status: &mut NativeSyncStatus, update: NativeSyncUpdate) {
+    match update {
+        NativeSyncUpdate::Connecting => {
+            status.connected = false;
+            status.last_error = None;
+            status.last_message = Some("Connecting to sync events".to_string());
+        }
+        NativeSyncUpdate::Connected => {
+            status.connected = true;
+            status.last_error = None;
+            status.last_message = Some("Waiting for sync activity".to_string());
+        }
+        NativeSyncUpdate::Event(SyncEvent::SyncStart {
+            account_id,
+            folder_count,
+        }) => {
+            status.connected = true;
+            status.syncing = true;
+            status.account_id = Some(account_id);
+            status.folder = None;
+            status.done = 0;
+            status.total = folder_count.unwrap_or_default();
+            status.last_error = None;
+            status.last_message = Some("Sync started".to_string());
+        }
+        NativeSyncUpdate::Event(SyncEvent::SyncFolderDone {
+            account_id,
+            folder,
+            done,
+            total,
+        }) => {
+            status.connected = true;
+            status.syncing = true;
+            status.account_id = Some(account_id);
+            status.folder = folder;
+            status.done = done.unwrap_or(status.done);
+            status.total = total.unwrap_or(status.total);
+            status.last_error = None;
+            status.last_message = Some("Syncing folders".to_string());
+        }
+        NativeSyncUpdate::Event(SyncEvent::SyncComplete { account_id }) => {
+            status.connected = true;
+            status.syncing = false;
+            status.account_id = Some(account_id);
+            status.folder = None;
+            status.done = status.total.max(status.done);
+            status.last_error = None;
+            status.last_message = Some("Sync complete".to_string());
+        }
+        NativeSyncUpdate::Error(message) => {
+            status.connected = false;
+            status.syncing = false;
+            status.last_error = Some(message);
+        }
+    }
+}
+
+fn sync_status_title(status: &NativeSyncStatus) -> String {
+    if let Some(error) = status.last_error.as_deref() {
+        return format!("Sync events offline: {error}");
+    }
+    if status.syncing {
+        if status.total > 0 {
+            return format!("Syncing {} of {}", status.done.max(0), status.total);
+        }
+        return "Syncing".to_string();
+    }
+    status
+        .last_message
+        .clone()
+        .unwrap_or_else(|| "Sync events idle".to_string())
+}
+
+fn sync_status_detail(status: &NativeSyncStatus) -> String {
+    if status.syncing {
+        return status
+            .folder
+            .clone()
+            .filter(|folder| !folder.trim().is_empty())
+            .unwrap_or_else(|| "Preparing folders".to_string());
+    }
+    if status.connected {
+        "Live sync listener connected".to_string()
+    } else {
+        "Live sync listener not connected".to_string()
+    }
+}
+
+fn sync_progress_ratio(status: &NativeSyncStatus) -> f32 {
+    if status.total <= 0 {
+        return 0.0;
+    }
+    (status.done.max(0) as f32 / status.total as f32).clamp(0.0, 1.0)
 }
 
 fn sync_window_title(state: &NativeAppState, cx: &mut App) {
@@ -1396,6 +1662,97 @@ mod tests {
     }
 
     #[test]
+    fn sync_updates_track_folder_progress() {
+        let mut status = NativeSyncStatus::default();
+
+        apply_sync_update(&mut status, NativeSyncUpdate::Connected);
+        assert!(status.connected);
+        assert_eq!(sync_status_title(&status), "Waiting for sync activity");
+
+        apply_sync_update(
+            &mut status,
+            NativeSyncUpdate::Event(SyncEvent::SyncStart {
+                account_id: "account".to_string(),
+                folder_count: Some(4),
+            }),
+        );
+        assert!(status.syncing);
+        assert_eq!(status.total, 4);
+        assert_eq!(sync_progress_ratio(&status), 0.0);
+
+        apply_sync_update(
+            &mut status,
+            NativeSyncUpdate::Event(SyncEvent::SyncFolderDone {
+                account_id: "account".to_string(),
+                folder: Some("INBOX".to_string()),
+                done: Some(2),
+                total: Some(4),
+            }),
+        );
+        assert_eq!(status.folder.as_deref(), Some("INBOX"));
+        assert_eq!(sync_progress_ratio(&status), 0.5);
+
+        apply_sync_update(
+            &mut status,
+            NativeSyncUpdate::Event(SyncEvent::SyncComplete {
+                account_id: "account".to_string(),
+            }),
+        );
+        assert!(!status.syncing);
+        assert_eq!(status.done, 4);
+        assert_eq!(sync_status_title(&status), "Sync complete");
+    }
+
+    #[test]
+    fn sse_parser_handles_split_sync_events() {
+        let mut buffer = String::new();
+        let first = drain_sse_sync_events(
+            &mut buffer,
+            "event: sync\ndata: {\"type\":\"sync_start\",\"accountId\":\"a",
+        );
+        assert!(first.is_empty());
+
+        let events = drain_sse_sync_events(
+            &mut buffer,
+            "1\",\"folderCount\":3}\n\nevent: sync\ndata: {\"type\":\"sync_complete\",\"accountId\":\"a1\"}\n\n",
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                Ok(SyncEvent::SyncStart {
+                    account_id: "a1".to_string(),
+                    folder_count: Some(3),
+                }),
+                Ok(SyncEvent::SyncComplete {
+                    account_id: "a1".to_string(),
+                }),
+            ]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn sse_parser_handles_crlf_event_boundaries() {
+        let mut buffer = String::new();
+        let events = drain_sse_sync_events(
+            &mut buffer,
+            "event: sync\r\ndata: {\"type\":\"sync_folder_done\",\"accountId\":\"a1\",\"folder\":\"INBOX\",\"done\":2,\"total\":5}\r\n\r\n",
+        );
+
+        assert_eq!(
+            events,
+            vec![Ok(SyncEvent::SyncFolderDone {
+                account_id: "a1".to_string(),
+                folder: Some("INBOX".to_string()),
+                done: Some(2),
+                total: Some(5),
+            })]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
     fn applying_read_full_message_updates_summary_and_folder_unread() {
         let mut state = NativeAppState::default();
         state
@@ -1675,6 +2032,71 @@ fn empty_sidebar_text(message: &'static str, cx: &mut Context<SidebarPlaceholder
         .text_size(px(theme.typography.body.size))
         .text_color(theme.colors.on_subtle)
         .child(message)
+}
+
+fn sync_status_strip(status: &NativeSyncStatus, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let ratio = sync_progress_ratio(status);
+
+    div()
+        .mx(px(8.0))
+        .mt(px(8.0))
+        .mb(px(2.0))
+        .px(px(8.0))
+        .py(px(7.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .bg(colors.surface)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(typography.caption.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(if status.last_error.is_some() {
+                            colors.status_error
+                        } else {
+                            colors.on_neutral
+                        })
+                        .child(sync_status_title(status)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.0))
+                        .text_color(colors.on_subtle)
+                        .child(if status.connected { "Live" } else { "Idle" }),
+                ),
+        )
+        .child(
+            div()
+                .pt(px(3.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(typography.caption.size))
+                .text_color(colors.on_subtle)
+                .child(sync_status_detail(status)),
+        )
+        .when(status.syncing, |strip| {
+            strip.child(
+                div()
+                    .mt(px(6.0))
+                    .w_full()
+                    .child(ProgressBar::new(ratio).height(3.0)),
+            )
+        })
 }
 
 fn smart_folder_rows(
