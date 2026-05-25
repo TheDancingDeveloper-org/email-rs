@@ -9,7 +9,7 @@ use chrono::{Datelike as _, Duration as ChronoDuration, Local};
 use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{Account, Folder, FullMessage, Label, Message};
-use fluent_app::FluentApp;
+use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, Theme, ThemeProvider as _};
 use fluent_layout::{
     CommandPalette, DockPanel, DockPosition, DocumentViewer, ModalHost, PaletteEntry, Pane,
@@ -36,6 +36,7 @@ actions!(
 );
 
 const APP_TITLE: &str = "email-rs FluentGUI";
+const APP_ID: &str = "org.email-rs.desktop.fluent";
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() -> Result<()> {
@@ -57,8 +58,11 @@ fn main() -> Result<()> {
     let base_url = format!("http://localhost:{port}");
     let initial_state = load_initial_state(&base_url)?;
 
-    FluentApp::new(APP_TITLE)
+    FluentApp::new(native_window_title(&initial_state))
+        .app_id(APP_ID)
         .window_size(1280.0, 800.0)
+        .window_min_size(800.0, 600.0)
+        .window_status(native_window_status(&initial_state))
         .dark_theme()
         .run(move |cx| {
             cx.bind_keys([
@@ -425,6 +429,8 @@ impl EmailDesktopApp {
         palette: Entity<CommandPalette>,
     ) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        WindowTitle::set_title(cx, native_window_title(&state));
+        WindowTitle::set_status(cx, native_window_status(&state));
         Self {
             state,
             workspace,
@@ -728,6 +734,7 @@ impl Render for StatusBar {
             .last_error
             .clone()
             .unwrap_or_else(|| "Axum in-process server ready".to_string());
+        let unread = total_unread_count(&self.state);
 
         div()
             .h(px(28.0))
@@ -744,9 +751,10 @@ impl Render for StatusBar {
                 colors.on_subtle
             })
             .child(format!(
-                "{} | {} | density {} | {:?}",
+                "{} | {} | {} | density {} | {:?}",
                 status,
                 resource_summary(&self.state.messages_resource, "messages"),
+                unread_status_text(unread),
                 self.state.density.level,
                 self.state.theme
             ))
@@ -767,6 +775,76 @@ fn resource_summary<T>(resource: &AsyncResource<Vec<T>, String>, label: &str) ->
         format!("{count} {label} ready")
     } else {
         format!("{label} idle")
+    }
+}
+
+fn total_unread_count(state: &NativeAppState) -> i64 {
+    state
+        .folders_by_account
+        .values()
+        .flat_map(|folders| folders.iter())
+        .map(|folder| folder.unread_count.max(0))
+        .sum()
+}
+
+fn native_window_title(state: &NativeAppState) -> String {
+    let unread = total_unread_count(state);
+    if unread > 0 {
+        format!("({unread}) {APP_TITLE}")
+    } else {
+        APP_TITLE.to_string()
+    }
+}
+
+fn native_window_status(state: &NativeAppState) -> String {
+    unread_status_text(total_unread_count(state))
+}
+
+fn unread_status_text(unread: i64) -> String {
+    match unread {
+        0 => "No unread messages".to_string(),
+        1 => "1 unread message".to_string(),
+        unread => format!("{unread} unread messages"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(id: &str, unread_count: i64) -> Folder {
+        Folder {
+            id: id.to_string(),
+            account_id: "account".to_string(),
+            name: id.to_string(),
+            full_path: id.to_string(),
+            special_use: None,
+            unread_count,
+            total_count: unread_count.max(0),
+            synced_at: None,
+            is_excluded: false,
+        }
+    }
+
+    #[test]
+    fn native_window_title_uses_folder_unread_counts() {
+        let mut state = NativeAppState::default();
+        state.folders_by_account.insert(
+            "account".to_string(),
+            vec![folder("inbox", 2), folder("archive", 1), folder("bad", -4)],
+        );
+
+        assert_eq!(total_unread_count(&state), 3);
+        assert_eq!(native_window_title(&state), "(3) email-rs FluentGUI");
+        assert_eq!(native_window_status(&state), "3 unread messages");
+    }
+
+    #[test]
+    fn native_window_title_omits_zero_unread_prefix() {
+        let state = NativeAppState::default();
+
+        assert_eq!(native_window_title(&state), "email-rs FluentGUI");
+        assert_eq!(native_window_status(&state), "No unread messages");
     }
 }
 
