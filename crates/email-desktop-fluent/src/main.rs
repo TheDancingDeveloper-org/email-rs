@@ -14,10 +14,11 @@ use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
     Account, AccountSettings, ActionInput, BulkAction, BulkRequest, CalendarEvent,
-    CalendarSearchResult, Condition, ConditionField, ConditionGroup, ConditionInput,
-    ConditionOperator, CreateAccount, CreateWebhook, EventLink, Folder, FullMessage, Label,
-    MatchMode, Message, PatchFolder, PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest,
-    SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
+    CalendarSearchResult, CalendarSuggestion, Condition, ConditionField, ConditionGroup,
+    ConditionInput, ConditionOperator, CreateAccount, CreateWebhook, EventLink, Folder,
+    FullMessage, Label, MatchMode, Message, MessageSuggestion, PatchFolder, PatchMessageRequest,
+    RuleDto, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook,
+    Webhook,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -27,8 +28,8 @@ use fluent_layout::{
 };
 use fluent_primitives::{
     Button, ButtonAppearance, ButtonSize, Checkbox, CheckboxState, DateTimePicker, DateTimeValue,
-    Dropdown, IconButton, ProgressBar, Searchbox, TextInput, Textarea, TokenInput,
-    TokenInputSuggestion, TokenInputToken,
+    Dropdown, IconButton, ProgressBar, Searchbox, SuggestionItem, SuggestionKeyAction,
+    SuggestionListState, TextInput, Textarea, TokenInput, TokenInputSuggestion, TokenInputToken,
 };
 use gpui::{
     actions, div, prelude::*, px, svg, uniform_list, App, ClipboardItem, Context, Entity,
@@ -678,12 +679,23 @@ struct ModalStates {
     advanced_search_open: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NativeSearchSuggestion {
+    Message(MessageSuggestion),
+    Event(CalendarSuggestion),
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SearchState {
     query: String,
     submitted_query: Option<String>,
     condition_group: Option<ConditionGroup>,
     previous_source: Option<NativeMessageSource>,
+    suggestions_query: Option<String>,
+    suggestions: Vec<NativeSearchSuggestion>,
+    suggestions_open: bool,
+    suggestions_resource: AsyncResource<Vec<NativeSearchSuggestion>, String>,
+    suggestion_list: SuggestionListState,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1065,7 +1077,7 @@ impl SidebarPlaceholder {
                     .on_submit({
                         let state = state.clone();
                         move |query, app_cx| {
-                            submit_sidebar_search(&state, query.to_string(), app_cx);
+                            submit_or_select_sidebar_search(&state, query.to_string(), app_cx);
                         }
                     })
             }
@@ -1169,6 +1181,7 @@ impl Render for SidebarPlaceholder {
         }
 
         let unread = total_unread_count(&state);
+        let search_suggestions = sidebar_search_suggestions(&self.state, &state, cx);
 
         let mut sidebar = div()
             .size_full()
@@ -1183,24 +1196,48 @@ impl Render for SidebarPlaceholder {
                     .border_color(colors.stroke_neutral_subtle)
                     .child(
                         div()
+                            .relative()
                             .mb(px(10.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(div().flex_1().min_w_0().child(self.searchbox.clone()))
                             .child(
-                                Button::new("sidebar-advanced-search")
-                                    .label("Filter")
-                                    .appearance(if state.search.condition_group.is_some() {
-                                        ButtonAppearance::Neutral
-                                    } else {
-                                        ButtonAppearance::Subtle
-                                    })
-                                    .size(ButtonSize::Compact)
-                                    .on_click(|_, _, app_cx| {
-                                        app_cx.dispatch_action(&OpenAdvancedSearch);
-                                    }),
-                            ),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .on_key_down({
+                                                let state_entity = self.state.clone();
+                                                move |ev: &KeyDownEvent, _, app_cx| {
+                                                    if handle_sidebar_search_suggestion_key(
+                                                        &state_entity,
+                                                        ev.keystroke.key.as_str(),
+                                                        app_cx,
+                                                    ) {
+                                                        app_cx.stop_propagation();
+                                                    }
+                                                }
+                                            })
+                                            .child(self.searchbox.clone()),
+                                    )
+                                    .child(
+                                        Button::new("sidebar-advanced-search")
+                                            .label("Filter")
+                                            .appearance(if state.search.condition_group.is_some() {
+                                                ButtonAppearance::Neutral
+                                            } else {
+                                                ButtonAppearance::Subtle
+                                            })
+                                            .size(ButtonSize::Compact)
+                                            .on_click(|_, _, app_cx| {
+                                                app_cx.dispatch_action(&OpenAdvancedSearch);
+                                            }),
+                                    ),
+                            )
+                            .when_some(search_suggestions, |area, suggestions| {
+                                area.child(suggestions.absolute().top(px(34.0)).left_0().right_0())
+                            }),
                     )
                     .child(
                         div()
@@ -7427,6 +7464,83 @@ impl NativeLabelMutation {
     }
 }
 
+fn load_sidebar_search_suggestions(
+    base_url: String,
+    query: String,
+) -> Result<Vec<NativeSearchSuggestion>> {
+    thread::sleep(Duration::from_millis(150));
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let response = client
+            .suggest(&query, None)
+            .await
+            .with_context(|| format!("load search suggestions for {query}"))?;
+        let mut suggestions = response
+            .messages
+            .into_iter()
+            .map(NativeSearchSuggestion::Message)
+            .collect::<Vec<_>>();
+        suggestions.extend(
+            response
+                .events
+                .into_iter()
+                .map(NativeSearchSuggestion::Event),
+        );
+        Ok(suggestions)
+    })
+}
+
+fn apply_loaded_sidebar_search_suggestions(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    query: &str,
+    suggestions: Vec<NativeSearchSuggestion>,
+) -> bool {
+    if state.search.query.trim() != query
+        || state.search.suggestions_query.as_deref() != Some(query)
+    {
+        return false;
+    }
+    if !state
+        .search
+        .suggestions_resource
+        .resolve(request, suggestions.clone())
+    {
+        return false;
+    }
+
+    state.search.suggestions = suggestions;
+    state.search.suggestions_open = !state.search.suggestions.is_empty();
+    state.search.suggestion_list.set_highlighted(None);
+    true
+}
+
+fn reject_sidebar_search_suggestions_load(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    query: &str,
+    err: anyhow::Error,
+) -> bool {
+    if state.search.query.trim() != query
+        || state.search.suggestions_query.as_deref() != Some(query)
+    {
+        return false;
+    }
+    if !state
+        .search
+        .suggestions_resource
+        .reject(request, err.to_string())
+    {
+        return false;
+    }
+
+    state.search.suggestions.clear();
+    state.search.suggestions_open = false;
+    state.search.suggestion_list.set_highlighted(None);
+    true
+}
+
 fn load_calendar_events(
     base_url: String,
     from: chrono::DateTime<Utc>,
@@ -9384,6 +9498,25 @@ mod tests {
         }
     }
 
+    fn message_suggestion(id: &str, folder_id: &str) -> MessageSuggestion {
+        MessageSuggestion {
+            id: id.to_string(),
+            folder_id: folder_id.to_string(),
+            subject: Some("Planning notes".to_string()),
+            from_name: Some("Ada".to_string()),
+            from_email: Some("ada@example.test".to_string()),
+            date: Some("2026-05-26T02:00:00Z".to_string()),
+        }
+    }
+
+    fn calendar_suggestion(id: &str, start_at: &str) -> CalendarSuggestion {
+        CalendarSuggestion {
+            id: id.to_string(),
+            title: "Planning".to_string(),
+            start_at: start_at.to_string(),
+        }
+    }
+
     fn calendar_search_result(id: &str, start_at: &str) -> CalendarSearchResult {
         CalendarSearchResult {
             id: id.to_string(),
@@ -9568,6 +9701,110 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_search_suggestion_items_format_message_and_event_metadata() {
+        let suggestions = vec![
+            NativeSearchSuggestion::Message(message_suggestion("message", "inbox")),
+            NativeSearchSuggestion::Event(calendar_suggestion("event", "2026-05-26T02:00:00Z")),
+        ];
+
+        let items = sidebar_search_suggestion_items(&suggestions);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id.as_ref(), "message:message");
+        assert_eq!(items[0].label.as_ref(), "Planning notes");
+        assert_eq!(
+            items[0].detail.as_ref().map(|detail| detail.to_string()),
+            Some("Ada".to_string())
+        );
+        assert_eq!(items[1].id.as_ref(), "event:event");
+        assert_eq!(items[1].label.as_ref(), "Planning");
+        assert_eq!(
+            items[1].detail.as_ref().map(|detail| detail.to_string()),
+            Some("Calendar event".to_string())
+        );
+        assert!(items[1].meta.is_some());
+    }
+
+    #[test]
+    fn applying_sidebar_search_suggestions_tracks_query_and_stale_requests() {
+        let mut state = NativeAppState::default();
+        state.search.query = "plan".to_string();
+        state.search.suggestions_query = Some("plan".to_string());
+        let stale = state.search.suggestions_resource.begin_load();
+        let current = state.search.suggestions_resource.begin_load();
+
+        assert!(!apply_loaded_sidebar_search_suggestions(
+            &mut state,
+            stale,
+            "plan",
+            vec![NativeSearchSuggestion::Message(message_suggestion(
+                "old", "inbox"
+            ))],
+        ));
+        assert!(apply_loaded_sidebar_search_suggestions(
+            &mut state,
+            current,
+            "plan",
+            vec![
+                NativeSearchSuggestion::Message(message_suggestion("message", "inbox")),
+                NativeSearchSuggestion::Event(calendar_suggestion("event", "2026-05-26T02:00:00Z")),
+            ],
+        ));
+        assert!(state.search.suggestions_open);
+        assert_eq!(state.search.suggestions.len(), 2);
+
+        let request = state.search.suggestions_resource.begin_load();
+        state.search.query = "other".to_string();
+        assert!(!apply_loaded_sidebar_search_suggestions(
+            &mut state,
+            request,
+            "plan",
+            vec![NativeSearchSuggestion::Message(message_suggestion(
+                "late", "inbox"
+            ))],
+        ));
+        assert_eq!(state.search.suggestions.len(), 2);
+    }
+
+    #[test]
+    fn sidebar_search_suggestion_keyboard_state_moves_and_clears() {
+        let mut search = SearchState {
+            suggestions_open: true,
+            suggestions: vec![
+                NativeSearchSuggestion::Message(message_suggestion("message", "inbox")),
+                NativeSearchSuggestion::Event(calendar_suggestion("event", "2026-05-26T02:00:00Z")),
+            ],
+            suggestions_resource: AsyncResource::ready(Vec::new()),
+            ..SearchState::default()
+        };
+        let items = sidebar_search_suggestion_items(&search.suggestions);
+
+        assert_eq!(
+            search.suggestion_list.handle_key("down", &items),
+            SuggestionKeyAction::Move(Some(0))
+        );
+        assert_eq!(
+            search.suggestion_list.handle_key("down", &items),
+            SuggestionKeyAction::Move(Some(1))
+        );
+        assert_eq!(
+            search.suggestion_list.handle_key("enter", &items),
+            SuggestionKeyAction::Select("event:event".into())
+        );
+        assert_eq!(
+            highlighted_sidebar_search_suggestion_id(&search).as_deref(),
+            Some("event:event")
+        );
+
+        clear_sidebar_search_suggestions(&mut search);
+        assert!(!search.suggestions_open);
+        assert!(search.suggestions.is_empty());
+        assert!(search.suggestions_resource.is_idle());
+        assert_eq!(search.suggestion_list.highlighted(), None);
+        assert_eq!(highlighted_sidebar_search_suggestion_id(&search), None);
+    }
+
+    #[test]
     fn route_selection_clears_active_search() {
         let mut state = NativeAppState {
             search: SearchState {
@@ -9575,6 +9812,7 @@ mod tests {
                 submitted_query: Some("report".to_string()),
                 condition_group: None,
                 previous_source: Some(NativeMessageSource::Folder("inbox".to_string())),
+                ..SearchState::default()
             },
             ..NativeAppState::default()
         };
@@ -11285,6 +11523,161 @@ fn sync_searchbox_value(
     }
 }
 
+fn sidebar_search_suggestions(
+    state_entity: &Entity<NativeAppState>,
+    state: &NativeAppState,
+    cx: &mut Context<SidebarPlaceholder>,
+) -> Option<gpui::Div> {
+    if !state.search.suggestions_open || state.search.query.trim().len() < 2 {
+        return None;
+    }
+
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let loading = state.search.suggestions_resource.is_loading();
+    let error = state.search.suggestions_resource.error().cloned();
+    if state.search.suggestions.is_empty() && !loading && error.is_none() {
+        return None;
+    }
+
+    let mut panel = div()
+        .border_1()
+        .border_color(colors.stroke_neutral)
+        .rounded(px(4.0))
+        .shadow_md()
+        .bg(colors.surface)
+        .py(px(4.0));
+
+    if state.search.suggestions.is_empty() {
+        let (text, color) = if loading {
+            ("Loading...".to_string(), colors.on_subtle)
+        } else {
+            (
+                error.unwrap_or_else(|| "Search suggestions failed.".to_string()),
+                colors.status_error,
+            )
+        };
+        return Some(
+            panel.child(
+                div()
+                    .min_h(px(32.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(typography.body.size))
+                    .text_color(color)
+                    .child(text),
+            ),
+        );
+    }
+
+    for (idx, suggestion) in state.search.suggestions.iter().enumerate() {
+        panel = panel.child(sidebar_search_suggestion_row(
+            state_entity,
+            suggestion,
+            state.search.suggestion_list.highlighted() == Some(idx),
+            cx,
+        ));
+    }
+
+    Some(panel)
+}
+
+fn sidebar_search_suggestion_row(
+    state_entity: &Entity<NativeAppState>,
+    suggestion: &NativeSearchSuggestion,
+    highlighted: bool,
+    cx: &mut Context<SidebarPlaceholder>,
+) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let id = native_search_suggestion_id(suggestion);
+    let row_id = id.replace(':', "-");
+    let label = native_search_suggestion_label(suggestion);
+    let detail = native_search_suggestion_detail(suggestion);
+    let meta = native_search_suggestion_meta(suggestion);
+
+    div()
+        .id(SharedString::from(format!(
+            "sidebar-search-suggestion-{row_id}"
+        )))
+        .min_h(px(38.0))
+        .px(px(10.0))
+        .py(px(5.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .bg(if highlighted {
+            colors.neutral_selected
+        } else {
+            colors.surface
+        })
+        .hover({
+            let hover = colors.neutral_hover;
+            move |style| style.bg(hover)
+        })
+        .cursor_pointer()
+        .on_mouse_move({
+            let state_entity = state_entity.clone();
+            let id = id.clone();
+            move |_, _, app_cx| {
+                highlight_sidebar_search_suggestion(&state_entity, id.clone(), app_cx);
+            }
+        })
+        .on_click({
+            let state_entity = state_entity.clone();
+            let id = id.clone();
+            move |_, _, app_cx| {
+                select_sidebar_search_suggestion_by_id(&state_entity, id.clone(), app_cx);
+            }
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(typography.body.size))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.on_neutral)
+                                .child(label),
+                        )
+                        .when_some(meta, |row, meta| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(typography.caption.size))
+                                    .text_color(colors.on_subtle)
+                                    .child(meta),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .pt(px(1.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(typography.caption.size))
+                        .text_color(colors.on_subtle)
+                        .child(detail),
+                ),
+        )
+        .into_any_element()
+}
+
 fn open_advanced_search_modal(
     state_entity: &Entity<NativeAppState>,
     modal_entity: &Entity<AdvancedSearchModal>,
@@ -11312,10 +11705,14 @@ fn handle_sidebar_search_change(
     query: String,
     app_cx: &mut App,
 ) {
+    let should_load_suggestions = query.trim().len() >= 2;
     let restore_source = state_entity.update(app_cx, |state, cx| {
         state.search.query = query.clone();
         if !query.trim().is_empty() {
             state.search.condition_group = None;
+        }
+        if !should_load_suggestions {
+            clear_sidebar_search_suggestions(&mut state.search);
         }
         let restore_source = if query.trim().is_empty() && state.search.submitted_query.is_some() {
             let restore_source = state.search.previous_source.clone();
@@ -11342,6 +11739,9 @@ fn handle_sidebar_search_change(
     if let Some(source) = restore_source {
         start_message_collection_load(state_entity, source, app_cx);
     }
+    if should_load_suggestions {
+        start_sidebar_search_suggestions_load(state_entity, query.trim().to_string(), app_cx);
+    }
 }
 
 fn submit_sidebar_search(state_entity: &Entity<NativeAppState>, query: String, app_cx: &mut App) {
@@ -11352,6 +11752,247 @@ fn submit_sidebar_search(state_entity: &Entity<NativeAppState>, query: String, a
     }
 
     start_message_collection_load(state_entity, NativeMessageSource::Search(query), app_cx);
+}
+
+fn submit_or_select_sidebar_search(
+    state_entity: &Entity<NativeAppState>,
+    query: String,
+    app_cx: &mut App,
+) {
+    let selected_id = {
+        let state = state_entity.read(app_cx);
+        highlighted_sidebar_search_suggestion_id(&state.search)
+    };
+
+    if let Some(id) = selected_id {
+        select_sidebar_search_suggestion_by_id(state_entity, id, app_cx);
+    } else {
+        state_entity.update(app_cx, |state, cx| {
+            clear_sidebar_search_suggestions(&mut state.search);
+            cx.notify();
+        });
+        submit_sidebar_search(state_entity, query, app_cx);
+    }
+}
+
+fn start_sidebar_search_suggestions_load(
+    state_entity: &Entity<NativeAppState>,
+    query: String,
+    app_cx: &mut App,
+) {
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        state.search.suggestions_query = Some(query.clone());
+        state.search.suggestions.clear();
+        state.search.suggestions_open = true;
+        state.search.suggestion_list.set_highlighted(None);
+        let request = state.search.suggestions_resource.begin_load();
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let task_query = query.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_sidebar_search_suggestions(base_url, task_query) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(suggestions) => {
+                            apply_loaded_sidebar_search_suggestions(
+                                state,
+                                request,
+                                &query,
+                                suggestions,
+                            );
+                        }
+                        Err(err) => {
+                            reject_sidebar_search_suggestions_load(state, request, &query, err);
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native sidebar search suggestions: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn handle_sidebar_search_suggestion_key(
+    state_entity: &Entity<NativeAppState>,
+    key: &str,
+    app_cx: &mut App,
+) -> bool {
+    if !matches!(key, "down" | "up" | "home" | "end" | "escape") {
+        return false;
+    }
+
+    state_entity.update(app_cx, |state, cx| {
+        if !state.search.suggestions_open {
+            return false;
+        }
+        if key == "escape" {
+            state.search.suggestions_open = false;
+            state.search.suggestion_list.set_highlighted(None);
+            cx.notify();
+            return true;
+        }
+        let items = sidebar_search_suggestion_items(&state.search.suggestions);
+        if items.is_empty() {
+            return false;
+        }
+        match state.search.suggestion_list.handle_key(key, &items) {
+            SuggestionKeyAction::Move(_) => {
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+fn highlight_sidebar_search_suggestion(
+    state_entity: &Entity<NativeAppState>,
+    id: String,
+    app_cx: &mut App,
+) {
+    state_entity.update(app_cx, |state, cx| {
+        let items = sidebar_search_suggestion_items(&state.search.suggestions);
+        if let Some(index) = items
+            .iter()
+            .position(|item| item.id.as_ref() == id.as_str())
+        {
+            state.search.suggestion_list.set_highlighted(Some(index));
+            cx.notify();
+        }
+    });
+}
+
+fn select_sidebar_search_suggestion_by_id(
+    state_entity: &Entity<NativeAppState>,
+    id: String,
+    app_cx: &mut App,
+) -> bool {
+    let suggestion = state_entity.update(app_cx, |state, cx| {
+        let suggestion = state
+            .search
+            .suggestions
+            .iter()
+            .find(|suggestion| native_search_suggestion_id(suggestion) == id)
+            .cloned();
+        if suggestion.is_some() {
+            clear_sidebar_search_suggestions(&mut state.search);
+            cx.notify();
+        }
+        suggestion
+    });
+
+    match suggestion {
+        Some(NativeSearchSuggestion::Message(message)) => {
+            start_message_collection_load_with_preferred(
+                state_entity,
+                NativeMessageSource::Folder(message.folder_id),
+                Some(message.id),
+                app_cx,
+            );
+            true
+        }
+        Some(NativeSearchSuggestion::Event(event)) => {
+            open_calendar_search_result(state_entity, event.id, event.start_at, app_cx);
+            true
+        }
+        None => false,
+    }
+}
+
+fn clear_sidebar_search_suggestions(search: &mut SearchState) {
+    search.suggestions_query = None;
+    search.suggestions.clear();
+    search.suggestions_open = false;
+    search.suggestions_resource.reset();
+    search.suggestion_list.set_highlighted(None);
+}
+
+fn sidebar_search_suggestion_items(suggestions: &[NativeSearchSuggestion]) -> Vec<SuggestionItem> {
+    suggestions
+        .iter()
+        .map(|suggestion| {
+            let mut item = SuggestionItem::new(
+                native_search_suggestion_id(suggestion),
+                native_search_suggestion_label(suggestion),
+            )
+            .detail(native_search_suggestion_detail(suggestion));
+            if let Some(meta) = native_search_suggestion_meta(suggestion) {
+                item = item.meta(meta);
+            }
+            item
+        })
+        .collect()
+}
+
+fn highlighted_sidebar_search_suggestion_id(search: &SearchState) -> Option<String> {
+    let items = sidebar_search_suggestion_items(&search.suggestions);
+    search
+        .suggestion_list
+        .highlighted_item(&items)
+        .map(|item| item.id.to_string())
+}
+
+fn native_search_suggestion_id(suggestion: &NativeSearchSuggestion) -> String {
+    match suggestion {
+        NativeSearchSuggestion::Message(message) => format!("message:{}", message.id),
+        NativeSearchSuggestion::Event(event) => format!("event:{}", event.id),
+    }
+}
+
+fn native_search_suggestion_label(suggestion: &NativeSearchSuggestion) -> String {
+    match suggestion {
+        NativeSearchSuggestion::Message(message) => message
+            .subject
+            .as_deref()
+            .map(str::trim)
+            .filter(|subject| !subject.is_empty())
+            .unwrap_or("(no subject)")
+            .to_string(),
+        NativeSearchSuggestion::Event(event) => event
+            .title
+            .trim()
+            .is_empty()
+            .then(|| "(untitled event)".to_string())
+            .unwrap_or_else(|| event.title.clone()),
+    }
+}
+
+fn native_search_suggestion_detail(suggestion: &NativeSearchSuggestion) -> String {
+    match suggestion {
+        NativeSearchSuggestion::Message(message) => message
+            .from_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                message
+                    .from_email
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or("Unknown")
+            .to_string(),
+        NativeSearchSuggestion::Event(_) => "Calendar event".to_string(),
+    }
+}
+
+fn native_search_suggestion_meta(suggestion: &NativeSearchSuggestion) -> Option<String> {
+    match suggestion {
+        NativeSearchSuggestion::Message(message) => compact_date_label(message.date.as_deref()),
+        NativeSearchSuggestion::Event(event) => compact_date_label(Some(event.start_at.as_str())),
+    }
 }
 
 fn start_advanced_search(
@@ -14748,6 +15389,14 @@ fn calendar_hour_label(hour: u32) -> String {
 
 fn calendar_time_label(value: &chrono::DateTime<Utc>) -> String {
     value.with_timezone(&Local).format("%-I:%M %p").to_string()
+}
+
+fn compact_date_label(value: Option<&str>) -> Option<String> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|parsed| parsed.with_timezone(&Local).format("%b %-d").to_string())
+        .ok()
+        .or_else(|| Some(value.to_string()))
 }
 
 fn calendar_search_result_time_label(event: &CalendarSearchResult) -> String {

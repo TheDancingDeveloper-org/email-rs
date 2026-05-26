@@ -51,8 +51,8 @@ Status values:
 |---|---|---|---|
 | Compose button opens new compose for first account. | Same. | Current audited; pending native. | Disabled/no-op when no account. |
 | Sync progress strip from SSE. | Same. | Current audited; pending native. | Uses `/api/v1/events`, completion hides after 3s. |
-| Search mail and calendar with 150 ms suggestions. | Same. | Native partial; automated tests. | Submitted search shows message plus calendar event results; live suggestions pending. |
-| Search suggestion keyboard Up/Down/Enter/Escape. | Same. | Current audited; pending native. | Enter without active suggestion keeps full search. |
+| Search mail and calendar with 150 ms suggestions. | Same. | Native implemented; automated tests. | Native suggestions fetch messages and events after the existing delay; submitted search also preserves event results. |
+| Search suggestion keyboard Up/Down/Enter/Escape. | Same. | Native implemented; automated tests. | Active suggestion selection is tracked separately from Enter without an active suggestion. |
 | Advanced search filter button state. | Same. | Native implemented; automated tests. | Opens native modal; active state follows advanced search state. |
 | Smart folders All Inboxes, Unread, Flagged, Snoozed. | Same. | Current audited; pending native. | API IDs are `all`, `unread`, `flagged`, `snoozed`. |
 | Calendar nav item. | Same. | Native implemented; cargo check. | Switches to calendar and loads the active week. |
@@ -115,7 +115,7 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Basic search from sidebar searches messages and calendar, with suggestions. | Same. | Native partial; automated tests. | Submitted event results navigate to calendar; live suggestions pending. |
+| Basic search from sidebar searches messages and calendar, with suggestions. | Same. | Native implemented; automated tests. | Message suggestions open the folder/message; event suggestions/results navigate to Calendar. |
 | Advanced search modal with condition builder. | Same. | Native implemented; automated tests. | Native modal uses the existing condition model. |
 | Match all/any. | Same. | Backend implemented; native UI wired. | Search backend parses `match=all/any` for structured message filters. |
 | Text operators contains, not_contains, equals, starts_with. | Same. | Backend implemented; native UI wired. | Search backend parses field operator params for message filters. |
@@ -164,7 +164,7 @@ Status values:
 | Event selection toggles detail panel. | Same. | Native implemented; automated tests. | Calendar search-result navigation selects the matching event week. |
 | Detail shows title, time, location, meet link, description, attendees, linked emails. | Same. | Native implemented; cargo check. | Linked emails load for the selected event and stay scoped to current selection. |
 | Linked emails can navigate to message and unlink. | Same. | Native implemented; automated tests. | Current UI has no add-link control; native supports open-message and unlink flows. |
-| Calendar events appear in search suggestions/results. | Same. | Native partial; automated tests. | Submitted search results render event rows; live suggestions pending. |
+| Calendar events appear in search suggestions/results. | Same. | Native implemented; automated tests. | Native suggestions and submitted search result rows both include calendar events. |
 
 ## Backend And Data Features
 
