@@ -1,6 +1,6 @@
 # FluentGUI Feature Tracker
 
-Last updated: 2026-05-25
+Last updated: 2026-05-26
 
 Status values:
 
@@ -53,7 +53,7 @@ Status values:
 | Sync progress strip from SSE. | Same. | Current audited; pending native. | Uses `/api/v1/events`, completion hides after 3s. |
 | Search mail and calendar with 150 ms suggestions. | Same. | Current audited; pending native. | Message plus event suggestions. |
 | Search suggestion keyboard Up/Down/Enter/Escape. | Same. | Current audited; pending native. | Enter without active suggestion keeps full search. |
-| Advanced search filter button state. | Same. | Current audited; pending native. | Opens modal. |
+| Advanced search filter button state. | Same. | Native implemented; automated tests. | Opens native modal; active state follows advanced search state. |
 | Smart folders All Inboxes, Unread, Flagged, Snoozed. | Same. | Current audited; pending native. | API IDs are `all`, `unread`, `flagged`, `snoozed`. |
 | Calendar nav item. | Same. | Current audited; pending native. | Switches to calendar. |
 | Labels section with color dots. | Same. | Current audited; pending native. | Labels currently fetched only for first account. |
@@ -68,7 +68,7 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Fetch folder, label, smart-folder, search, and advanced-search result messages. | Same through `email-client`. | Current audited; pending native. | Advanced search backend gap logged. |
+| Fetch folder, label, smart-folder, search, and advanced-search result messages. | Same through `email-client`. | Native implemented; automated tests. | Advanced search source wired; backend gap logged. |
 | Debounced search results. | Same. | Current audited; pending native. | Current debounce is 300 ms. |
 | Header shows folder/search label, unread count, search count. | Same. | Current audited; pending native. | Preserve exact labels where possible. |
 | Select-all checkbox with indeterminate state. | Same. | Current audited; pending native. | Needed for bulk actions. |
@@ -116,11 +116,11 @@ Status values:
 | Current | Native | Verified | Notes |
 |---|---|---|---|
 | Basic search from sidebar searches messages and calendar, with suggestions. | Same. | Current audited; pending native. | Event suggestion navigates to calendar. |
-| Advanced search modal with condition builder. | Same. | Current audited; pending native. | Fields match the plan. |
-| Match all/any. | Same. | Product gap; pending native. | Frontend emits `match`; backend currently ignores it. |
-| Text operators contains, not_contains, equals, starts_with. | Same. | Product gap; pending native. | Frontend emits operator params; backend currently ignores them. |
-| Boolean/date controls. | Same. | Product gap; pending native. | Backend support still needs implementation or decision. |
-| Clear, Cancel, Search, Enter/Escape behavior. | Same. | Current audited; pending native. | Search disabled when no active values. |
+| Advanced search modal with condition builder. | Same. | Native implemented; automated tests. | Native modal uses the existing condition model. |
+| Match all/any. | Same. | Product gap; native UI wired. | Frontend and native emit `match`; backend currently ignores it. |
+| Text operators contains, not_contains, equals, starts_with. | Same. | Product gap; native UI wired. | Frontend and native emit operator params; backend currently ignores them. |
+| Boolean/date controls. | Same. | Product gap; native UI wired. | Backend support still needs implementation or decision. |
+| Clear, Cancel, Search, Enter/Escape behavior. | Same. | Native implemented; pending keyboard polish. | Search disabled when no active values. |
 
 ## Settings
 
@@ -147,7 +147,7 @@ Status values:
 | Ctrl/Cmd+K opens/closes palette. | Same. | Current audited; pending native. | Bind through native actions. |
 | Groups: Actions, Navigate, Labels, Folders, Message. | Same. | Current audited; pending native. | Requires enhanced generic palette. |
 | Fuzzy matching with label/keyword scoring. | Same or better. | Current audited; pending native. | Preserve predictable ordering. |
-| Actions: New Message, Advanced Search, Settings, theme, density. | Same. | Current audited; pending native. | Density bounded by 0 and 8. |
+| Actions: New Message, Advanced Search, Settings, theme, density. | Same. | Native partial; Settings pending. | New Message, Advanced Search, theme, and density wired. |
 | Navigation: Mail, Calendar, smart folders, labels, folders. | Same. | Current audited; pending native. | Folder hints include account/full path. |
 | Message actions: reply, forward, archive, delete, read/unread, flag/unflag. | Same. | Current audited; pending native. | Only for selected message. |
 | Keyboard Up/Down, Enter, Escape. | Same. | Current audited; pending native. | Mouse hover/select too. |

@@ -10,8 +10,9 @@ use chrono::{Datelike as _, Duration as ChronoDuration, Local, TimeZone as _, Ut
 use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
-    Account, AccountSettings, BulkAction, BulkRequest, Folder, FullMessage, Label, Message,
-    PatchMessageRequest, SendRequest, SnoozeRequest, SyncEvent,
+    Account, AccountSettings, BulkAction, BulkRequest, Condition, ConditionField, ConditionGroup,
+    ConditionOperator, Folder, FullMessage, Label, MatchMode, Message, PatchMessageRequest,
+    SendRequest, SnoozeRequest, SyncEvent,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -21,8 +22,8 @@ use fluent_layout::{
 };
 use fluent_primitives::{
     Button, ButtonAppearance, ButtonSize, Checkbox, CheckboxState, DateTimePicker, DateTimeValue,
-    IconButton, ProgressBar, Searchbox, TextInput, Textarea, TokenInput, TokenInputSuggestion,
-    TokenInputToken,
+    Dropdown, IconButton, ProgressBar, Searchbox, TextInput, Textarea, TokenInput,
+    TokenInputSuggestion, TokenInputToken,
 };
 use gpui::{
     actions, div, prelude::*, px, svg, uniform_list, App, Context, Entity, FontWeight, IntoElement,
@@ -43,7 +44,8 @@ actions!(
         DecreaseDensity,
         StartCompose,
         StartReplyCompose,
-        StartForwardCompose
+        StartForwardCompose,
+        OpenAdvancedSearch
     ]
 );
 
@@ -662,6 +664,7 @@ struct ModalStates {
 struct SearchState {
     query: String,
     submitted_query: Option<String>,
+    condition_group: Option<ConditionGroup>,
     previous_source: Option<NativeMessageSource>,
 }
 
@@ -758,6 +761,7 @@ struct EmailDesktopApp {
     state: Entity<NativeAppState>,
     workspace: Entity<Workspace>,
     palette: Entity<CommandPalette>,
+    advanced_search_modal: Entity<AdvancedSearchModal>,
     sync_updates: Receiver<NativeSyncUpdate>,
 }
 
@@ -775,6 +779,10 @@ impl EmailDesktopApp {
         WindowTitle::set_status(cx, native_window_status(&state_snapshot));
         let (sync_tx, sync_updates) = mpsc::channel();
         start_sync_events_thread(state_snapshot.api_base_url.clone(), sync_tx);
+        let advanced_search_modal = cx.new({
+            let state = state.clone();
+            move |cx| AdvancedSearchModal::new(cx, state.clone())
+        });
         cx.spawn(
             |app: gpui::WeakEntity<Self>, async_cx: &mut gpui::AsyncApp| {
                 let mut async_cx = async_cx.clone();
@@ -799,6 +807,7 @@ impl EmailDesktopApp {
             state,
             workspace,
             palette,
+            advanced_search_modal,
             sync_updates,
         }
     }
@@ -960,8 +969,16 @@ impl Render for EmailDesktopApp {
                     cx.notify();
                 },
             ))
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &OpenAdvancedSearch, _, cx| {
+                    open_advanced_search_modal(&app.state, &app.advanced_search_modal, cx);
+                    app.refresh_palette_entries(cx);
+                    cx.notify();
+                }),
+            )
             .child(self.workspace.clone())
             .child(self.palette.clone())
+            .child(self.advanced_search_modal.clone())
     }
 }
 
@@ -1106,7 +1123,27 @@ impl Render for SidebarPlaceholder {
                     .py(px(12.0))
                     .border_b_1()
                     .border_color(colors.stroke_neutral_subtle)
-                    .child(div().mb(px(10.0)).child(self.searchbox.clone()))
+                    .child(
+                        div()
+                            .mb(px(10.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(div().flex_1().min_w_0().child(self.searchbox.clone()))
+                            .child(
+                                Button::new("sidebar-advanced-search")
+                                    .label("Filter")
+                                    .appearance(if state.search.condition_group.is_some() {
+                                        ButtonAppearance::Neutral
+                                    } else {
+                                        ButtonAppearance::Subtle
+                                    })
+                                    .size(ButtonSize::Compact)
+                                    .on_click(|_, _, app_cx| {
+                                        app_cx.dispatch_action(&OpenAdvancedSearch);
+                                    }),
+                            ),
+                    )
                     .child(
                         div()
                             .text_size(px(typography.subtitle.size))
@@ -1592,6 +1629,664 @@ impl ReadingPanePlaceholder {
 }
 
 #[derive(Clone)]
+struct AdvancedConditionRow {
+    key: u64,
+    condition: Condition,
+    value_input: Entity<TextInput>,
+    field_dropdown: Entity<Dropdown>,
+    operator_dropdown: Entity<Dropdown>,
+    bool_dropdown: Entity<Dropdown>,
+}
+
+#[derive(Clone)]
+struct AdvancedSearchModal {
+    state: Entity<NativeAppState>,
+    match_mode: MatchMode,
+    rows: Vec<AdvancedConditionRow>,
+    next_condition_id: u64,
+}
+
+impl AdvancedSearchModal {
+    fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        let mut modal = Self {
+            state,
+            match_mode: MatchMode::All,
+            rows: Vec::new(),
+            next_condition_id: 1,
+        };
+        modal.reset_to_group(None, cx);
+        modal
+    }
+
+    fn reset_to_group(&mut self, group: Option<ConditionGroup>, cx: &mut Context<Self>) {
+        self.rows.clear();
+        self.next_condition_id = 1;
+        let group = group.unwrap_or_else(default_condition_group);
+        self.match_mode = group.match_mode;
+        for condition in group.conditions {
+            self.add_condition(condition, cx);
+        }
+        if self.rows.is_empty() {
+            let id = self.take_condition_id();
+            self.add_condition(new_advanced_condition(id), cx);
+        }
+        cx.notify();
+    }
+
+    fn take_condition_id(&mut self) -> String {
+        let id = format!("native-condition-{}", self.next_condition_id);
+        self.next_condition_id = self.next_condition_id.saturating_add(1);
+        id
+    }
+
+    fn add_condition(&mut self, condition: Condition, cx: &mut Context<Self>) {
+        let key = self.next_condition_id;
+        self.next_condition_id = self.next_condition_id.saturating_add(1);
+        let condition_id = condition.id.clone();
+        let initial_value = condition.value.clone();
+        let modal_entity = cx.entity();
+        let value_input = cx.new(move |_| {
+            TextInput::new()
+                .value(initial_value.clone())
+                .placeholder("Value")
+                .on_change({
+                    let modal_entity = modal_entity.clone();
+                    let condition_id = condition_id.clone();
+                    move |value, app_cx| {
+                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                            modal.set_condition_value(&condition_id, value.to_string());
+                            cx.notify();
+                        });
+                    }
+                })
+        });
+        let field_condition_id = condition.id.clone();
+        let field_modal = cx.entity();
+        let field_selected = condition_field_value(&condition.field);
+        let field_dropdown = cx.new(move |_| {
+            condition_field_dropdown(
+                ("advanced-field", key),
+                field_selected,
+                field_modal.clone(),
+                field_condition_id.clone(),
+            )
+        });
+        let operator_condition_id = condition.id.clone();
+        let operator_modal = cx.entity();
+        let operator_selected = condition_operator_value(&condition.operator);
+        let operator_dropdown = cx.new(move |_| {
+            condition_operator_dropdown(
+                ("advanced-op", key),
+                operator_selected,
+                operator_modal.clone(),
+                operator_condition_id.clone(),
+            )
+        });
+        let bool_condition_id = condition.id.clone();
+        let bool_modal = cx.entity();
+        let bool_selected = if condition.value.trim() == "false" {
+            "false"
+        } else {
+            "true"
+        };
+        let bool_dropdown = cx.new(move |_| {
+            boolean_dropdown(
+                ("advanced-bool", key),
+                bool_selected,
+                bool_modal.clone(),
+                bool_condition_id.clone(),
+            )
+        });
+        self.rows.push(AdvancedConditionRow {
+            key,
+            condition,
+            value_input,
+            field_dropdown,
+            operator_dropdown,
+            bool_dropdown,
+        });
+    }
+
+    fn add_blank_condition(&mut self, cx: &mut Context<Self>) {
+        let id = self.take_condition_id();
+        self.add_condition(new_advanced_condition(id), cx);
+        cx.notify();
+    }
+
+    fn remove_condition(&mut self, condition_id: &str, cx: &mut Context<Self>) {
+        self.rows
+            .retain(|row| row.condition.id.as_str() != condition_id);
+        if self.rows.is_empty() {
+            let id = self.take_condition_id();
+            self.add_condition(new_advanced_condition(id), cx);
+        }
+        cx.notify();
+    }
+
+    fn set_condition_field(
+        &mut self,
+        condition_id: &str,
+        field: ConditionField,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.condition.id == condition_id)
+        {
+            row.condition.field = field.clone();
+            row.condition.operator = ConditionOperator::Contains;
+            row.condition.value = default_condition_value(&field).to_string();
+            let value = row.condition.value.clone();
+            row.value_input.update(cx, |input, cx| {
+                input.set_value(value, cx);
+            });
+            row.operator_dropdown.update(cx, |dropdown, cx| {
+                dropdown.set_selected(condition_operator_value(&ConditionOperator::Contains), cx);
+            });
+            row.bool_dropdown.update(cx, |dropdown, cx| {
+                dropdown.set_selected(default_condition_value(&field), cx);
+            });
+            cx.notify();
+        }
+    }
+
+    fn set_condition_operator(&mut self, condition_id: &str, operator: ConditionOperator) {
+        if let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.condition.id == condition_id)
+        {
+            row.condition.operator = operator;
+        }
+    }
+
+    fn set_condition_value(&mut self, condition_id: &str, value: String) {
+        if let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.condition.id == condition_id)
+        {
+            row.condition.value = value;
+        }
+    }
+
+    fn set_match_mode(&mut self, match_mode: MatchMode) {
+        self.match_mode = match_mode;
+    }
+
+    fn condition_group(&self) -> ConditionGroup {
+        ConditionGroup {
+            match_mode: self.match_mode.clone(),
+            conditions: self.rows.iter().map(|row| row.condition.clone()).collect(),
+        }
+    }
+
+    fn has_active_condition(&self) -> bool {
+        condition_group_has_active(&self.condition_group())
+    }
+}
+
+impl Render for AdvancedSearchModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx).clone();
+        if !state.modals.advanced_search_open {
+            return div();
+        }
+
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let typography = theme.typography;
+        let mut backdrop = colors.surface_dim;
+        backdrop.a = 0.58;
+        let has_active = self.has_active_condition();
+        let modal_entity = cx.entity();
+
+        let mut conditions = div().flex().flex_col().gap(px(8.0));
+        for row in self.rows.clone() {
+            conditions = conditions.child(advanced_condition_row(row, modal_entity.clone(), cx));
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(backdrop)
+            .on_mouse_down(MouseButton::Left, {
+                let state_entity = self.state.clone();
+                move |_, _, app_cx| {
+                    close_advanced_search_modal(&state_entity, app_cx);
+                }
+            })
+            .child(
+                div()
+                    .w(px(760.0))
+                    .max_h(px(560.0))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(colors.stroke_neutral)
+                    .bg(colors.surface)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, app_cx| {
+                        app_cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .px(px(18.0))
+                            .py(px(14.0))
+                            .border_b_1()
+                            .border_color(colors.stroke_neutral_subtle)
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(typography.subtitle.size))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(colors.on_neutral)
+                                    .child("Advanced search"),
+                            )
+                            .child(
+                                Button::new("advanced-search-close")
+                                    .label("Close")
+                                    .appearance(ButtonAppearance::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .on_click({
+                                        let state_entity = self.state.clone();
+                                        move |_, _, app_cx| {
+                                            close_advanced_search_modal(&state_entity, app_cx);
+                                        }
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .id("advanced-search-scroll")
+                            .overflow_y_scroll()
+                            .px(px(18.0))
+                            .py(px(16.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(advanced_label("Match", cx))
+                                    .child(
+                                        Button::new("advanced-match-all")
+                                            .label("All")
+                                            .appearance(if self.match_mode == MatchMode::All {
+                                                ButtonAppearance::Neutral
+                                            } else {
+                                                ButtonAppearance::Subtle
+                                            })
+                                            .size(ButtonSize::Compact)
+                                            .on_click({
+                                                let modal_entity = modal_entity.clone();
+                                                move |_, _, app_cx| {
+                                                    let _ =
+                                                        modal_entity.update(app_cx, |modal, cx| {
+                                                            modal.set_match_mode(MatchMode::All);
+                                                            cx.notify();
+                                                        });
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("advanced-match-any")
+                                            .label("Any")
+                                            .appearance(if self.match_mode == MatchMode::Any {
+                                                ButtonAppearance::Neutral
+                                            } else {
+                                                ButtonAppearance::Subtle
+                                            })
+                                            .size(ButtonSize::Compact)
+                                            .on_click({
+                                                let modal_entity = modal_entity.clone();
+                                                move |_, _, app_cx| {
+                                                    let _ =
+                                                        modal_entity.update(app_cx, |modal, cx| {
+                                                            modal.set_match_mode(MatchMode::Any);
+                                                            cx.notify();
+                                                        });
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(typography.body.size))
+                                            .text_color(colors.on_subtle)
+                                            .child("of the following conditions"),
+                                    ),
+                            )
+                            .child(conditions)
+                            .child(
+                                Button::new("advanced-add-condition")
+                                    .label("Add condition")
+                                    .appearance(ButtonAppearance::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .on_click({
+                                        let modal_entity = modal_entity.clone();
+                                        move |_, _, app_cx| {
+                                            let _ = modal_entity.update(app_cx, |modal, cx| {
+                                                modal.add_blank_condition(cx);
+                                            });
+                                        }
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .border_t_1()
+                            .border_color(colors.stroke_neutral_subtle)
+                            .px(px(18.0))
+                            .py(px(12.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                Button::new("advanced-clear")
+                                    .label("Clear")
+                                    .appearance(ButtonAppearance::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .on_click({
+                                        let modal_entity = modal_entity.clone();
+                                        move |_, _, app_cx| {
+                                            let _ = modal_entity.update(app_cx, |modal, cx| {
+                                                modal.reset_to_group(None, cx);
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("advanced-cancel")
+                                    .label("Cancel")
+                                    .appearance(ButtonAppearance::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .on_click({
+                                        let state_entity = self.state.clone();
+                                        move |_, _, app_cx| {
+                                            close_advanced_search_modal(&state_entity, app_cx);
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("advanced-submit")
+                                    .label("Search")
+                                    .appearance(ButtonAppearance::Accent)
+                                    .size(ButtonSize::Compact)
+                                    .disabled(!has_active)
+                                    .on_click({
+                                        let state_entity = self.state.clone();
+                                        let modal_entity = modal_entity.clone();
+                                        move |_, _, app_cx| {
+                                            let group = modal_entity
+                                                .update(app_cx, |modal, _| modal.condition_group());
+                                            start_advanced_search(&state_entity, group, app_cx);
+                                        }
+                                    }),
+                            ),
+                    ),
+            )
+    }
+}
+
+fn advanced_condition_row(
+    row: AdvancedConditionRow,
+    modal_entity: Entity<AdvancedSearchModal>,
+    cx: &mut Context<AdvancedSearchModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let field_type = condition_field_type(&row.condition.field);
+    let condition_id = row.condition.id.clone();
+    let mut line = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(div().w(px(160.0)).child(row.field_dropdown.clone()));
+
+    match field_type {
+        ConditionFieldType::Text => {
+            line = line
+                .child(div().w(px(156.0)).child(row.operator_dropdown.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(180.0))
+                        .child(row.value_input.clone()),
+                );
+        }
+        ConditionFieldType::Boolean => {
+            line = line
+                .child(div().w(px(156.0)).child(row.bool_dropdown.clone()))
+                .child(div().flex_1());
+        }
+        ConditionFieldType::Date => {
+            line = line
+                .child(
+                    div()
+                        .w(px(156.0))
+                        .text_size(px(theme.typography.caption.size))
+                        .text_color(colors.on_subtle)
+                        .child("YYYY-MM-DD"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(180.0))
+                        .child(row.value_input.clone()),
+                );
+        }
+    }
+
+    line.child(
+        Button::new(("advanced-remove", row.key))
+            .label("Remove")
+            .appearance(ButtonAppearance::Subtle)
+            .size(ButtonSize::Compact)
+            .on_click({
+                let modal_entity = modal_entity.clone();
+                move |_, _, app_cx| {
+                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal.remove_condition(&condition_id, cx);
+                    });
+                }
+            }),
+    )
+}
+
+fn condition_field_dropdown(
+    id: impl Into<gpui::ElementId>,
+    selected: &'static str,
+    modal_entity: Entity<AdvancedSearchModal>,
+    condition_id: String,
+) -> Dropdown {
+    Dropdown::new(id)
+        .selected(selected)
+        .option("from", "From")
+        .option("to", "To")
+        .option("cc", "Cc")
+        .option("subject", "Subject")
+        .option("body", "Body")
+        .option("filename", "Filename")
+        .option("has_attachment", "Has attachment")
+        .option("is_read", "Is read")
+        .option("is_flagged", "Is starred")
+        .option("date_after", "Date after")
+        .option("date_before", "Date before")
+        .on_select(move |value, app_cx| {
+            let Some(field) = parse_condition_field(&value.to_string()) else {
+                return;
+            };
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.set_condition_field(&condition_id, field, cx);
+            });
+        })
+}
+
+fn condition_operator_dropdown(
+    id: impl Into<gpui::ElementId>,
+    selected: &'static str,
+    modal_entity: Entity<AdvancedSearchModal>,
+    condition_id: String,
+) -> Dropdown {
+    Dropdown::new(id)
+        .selected(selected)
+        .option("contains", "contains")
+        .option("not_contains", "doesn't contain")
+        .option("equals", "equals")
+        .option("starts_with", "starts with")
+        .on_select(move |value, app_cx| {
+            let Some(operator) = parse_condition_operator(&value.to_string()) else {
+                return;
+            };
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.set_condition_operator(&condition_id, operator);
+                cx.notify();
+            });
+        })
+}
+
+fn boolean_dropdown(
+    id: impl Into<gpui::ElementId>,
+    selected: &'static str,
+    modal_entity: Entity<AdvancedSearchModal>,
+    condition_id: String,
+) -> Dropdown {
+    Dropdown::new(id)
+        .selected(selected)
+        .option("true", "Yes")
+        .option("false", "No")
+        .on_select(move |value, app_cx| {
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.set_condition_value(&condition_id, value.to_string());
+                cx.notify();
+            });
+        })
+}
+
+fn advanced_label(label: &'static str, cx: &mut Context<AdvancedSearchModal>) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .text_size(px(theme.typography.caption.size))
+        .text_color(theme.colors.on_subtle)
+        .child(label)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConditionFieldType {
+    Text,
+    Boolean,
+    Date,
+}
+
+fn condition_field_type(field: &ConditionField) -> ConditionFieldType {
+    match field {
+        ConditionField::HasAttachment | ConditionField::IsRead | ConditionField::IsFlagged => {
+            ConditionFieldType::Boolean
+        }
+        ConditionField::DateAfter | ConditionField::DateBefore => ConditionFieldType::Date,
+        _ => ConditionFieldType::Text,
+    }
+}
+
+fn default_condition_group() -> ConditionGroup {
+    ConditionGroup {
+        match_mode: MatchMode::All,
+        conditions: vec![new_advanced_condition("native-condition-1".to_string())],
+    }
+}
+
+fn new_advanced_condition(id: String) -> Condition {
+    Condition {
+        id,
+        field: ConditionField::From,
+        operator: ConditionOperator::Contains,
+        value: String::new(),
+    }
+}
+
+fn default_condition_value(field: &ConditionField) -> &'static str {
+    if condition_field_type(field) == ConditionFieldType::Boolean {
+        "true"
+    } else {
+        ""
+    }
+}
+
+fn condition_group_has_active(group: &ConditionGroup) -> bool {
+    group
+        .conditions
+        .iter()
+        .any(|condition| !condition.value.trim().is_empty())
+}
+
+fn condition_field_value(field: &ConditionField) -> &'static str {
+    match field {
+        ConditionField::From => "from",
+        ConditionField::To => "to",
+        ConditionField::Cc => "cc",
+        ConditionField::Subject => "subject",
+        ConditionField::Body => "body",
+        ConditionField::Filename => "filename",
+        ConditionField::HasAttachment => "has_attachment",
+        ConditionField::IsRead => "is_read",
+        ConditionField::IsFlagged => "is_flagged",
+        ConditionField::DateAfter => "date_after",
+        ConditionField::DateBefore => "date_before",
+    }
+}
+
+fn parse_condition_field(value: &str) -> Option<ConditionField> {
+    match value {
+        "from" => Some(ConditionField::From),
+        "to" => Some(ConditionField::To),
+        "cc" => Some(ConditionField::Cc),
+        "subject" => Some(ConditionField::Subject),
+        "body" => Some(ConditionField::Body),
+        "filename" => Some(ConditionField::Filename),
+        "has_attachment" => Some(ConditionField::HasAttachment),
+        "is_read" => Some(ConditionField::IsRead),
+        "is_flagged" => Some(ConditionField::IsFlagged),
+        "date_after" => Some(ConditionField::DateAfter),
+        "date_before" => Some(ConditionField::DateBefore),
+        _ => None,
+    }
+}
+
+fn condition_operator_value(operator: &ConditionOperator) -> &'static str {
+    match operator {
+        ConditionOperator::Contains => "contains",
+        ConditionOperator::NotContains => "not_contains",
+        ConditionOperator::Equals => "equals",
+        ConditionOperator::StartsWith => "starts_with",
+    }
+}
+
+fn parse_condition_operator(value: &str) -> Option<ConditionOperator> {
+    match value {
+        "contains" => Some(ConditionOperator::Contains),
+        "not_contains" => Some(ConditionOperator::NotContains),
+        "equals" => Some(ConditionOperator::Equals),
+        "starts_with" => Some(ConditionOperator::StartsWith),
+        _ => None,
+    }
+}
+
+#[derive(Clone)]
 struct StatusBar {
     state: Entity<NativeAppState>,
 }
@@ -1811,10 +2506,15 @@ enum NativeMessageSource {
     Label(String),
     SmartFolder(String),
     Search(String),
+    AdvancedSearch(ConditionGroup),
 }
 
 impl NativeMessageSource {
     fn from_state(state: &NativeAppState) -> Option<Self> {
+        if let Some(group) = state.search.condition_group.as_ref() {
+            return Some(Self::AdvancedSearch(group.clone()));
+        }
+
         if let Some(query) = state.search.submitted_query.as_ref() {
             return Some(Self::Search(query.clone()));
         }
@@ -1856,12 +2556,23 @@ impl NativeMessageSource {
                 }
                 state.search.query = query.clone();
                 state.search.submitted_query = Some(query.clone());
+                state.search.condition_group = None;
+                state.selected_folder = None;
+                state.selected_label = None;
+            }
+            Self::AdvancedSearch(group) => {
+                if state.search.condition_group.is_none() {
+                    state.search.previous_source = Self::route_from_state(state);
+                }
+                state.search.query.clear();
+                state.search.submitted_query = None;
+                state.search.condition_group = Some(group.clone());
                 state.selected_folder = None;
                 state.selected_label = None;
             }
         }
 
-        if !matches!(self, Self::Search(_)) {
+        if !matches!(self, Self::Search(_) | Self::AdvancedSearch(_)) {
             state.search = SearchState::default();
         }
     }
@@ -1872,6 +2583,7 @@ impl NativeMessageSource {
             Self::Label(label_id) => format!("list messages for label {label_id}"),
             Self::SmartFolder(kind) => format!("list smart folder {kind}"),
             Self::Search(query) => format!("search messages for {query}"),
+            Self::AdvancedSearch(_) => "advanced search messages".to_string(),
         }
     }
 }
@@ -2068,6 +2780,10 @@ async fn load_message_collection_with_client(
         NativeMessageSource::SmartFolder(kind) => client.list_smart_messages(kind).await,
         NativeMessageSource::Search(query) => client
             .search(query, None)
+            .await
+            .map(|results| results.messages),
+        NativeMessageSource::AdvancedSearch(group) => client
+            .advanced_search(group)
             .await
             .map(|results| results.messages),
     }
@@ -3854,11 +4570,71 @@ mod tests {
     }
 
     #[test]
+    fn advanced_search_source_records_previous_route_and_updates_title() {
+        let group = ConditionGroup {
+            match_mode: MatchMode::Any,
+            conditions: vec![Condition {
+                id: "c1".to_string(),
+                field: ConditionField::Subject,
+                operator: ConditionOperator::StartsWith,
+                value: "quarterly".to_string(),
+            }],
+        };
+        let mut state = NativeAppState {
+            selected_folder: Some("inbox".to_string()),
+            ..NativeAppState::default()
+        };
+
+        NativeMessageSource::AdvancedSearch(group.clone()).apply_selection(&mut state);
+
+        assert_eq!(state.selected_folder, None);
+        assert_eq!(state.selected_label, None);
+        assert_eq!(state.search.query, "");
+        assert_eq!(state.search.submitted_query, None);
+        assert_eq!(state.search.condition_group, Some(group.clone()));
+        assert_eq!(
+            state.search.previous_source,
+            Some(NativeMessageSource::Folder("inbox".to_string()))
+        );
+        assert_eq!(
+            NativeMessageSource::from_state(&state),
+            Some(NativeMessageSource::AdvancedSearch(group))
+        );
+        assert_eq!(current_mailbox_title(&state), "Advanced search results");
+    }
+
+    #[test]
+    fn basic_search_clears_advanced_search_state() {
+        let mut state = NativeAppState {
+            search: SearchState {
+                condition_group: Some(ConditionGroup {
+                    match_mode: MatchMode::All,
+                    conditions: vec![Condition {
+                        id: "c1".to_string(),
+                        field: ConditionField::From,
+                        operator: ConditionOperator::Contains,
+                        value: "ada".to_string(),
+                    }],
+                }),
+                ..SearchState::default()
+            },
+            ..NativeAppState::default()
+        };
+
+        NativeMessageSource::Search("status".to_string()).apply_selection(&mut state);
+
+        assert_eq!(state.search.condition_group, None);
+        assert_eq!(state.search.submitted_query.as_deref(), Some("status"));
+        assert_eq!(current_mailbox_title(&state), "Results for \"status\"");
+    }
+
+    #[test]
     fn route_selection_clears_active_search() {
         let mut state = NativeAppState {
             search: SearchState {
                 query: "report".to_string(),
                 submitted_query: Some("report".to_string()),
+                condition_group: None,
                 previous_source: Some(NativeMessageSource::Folder("inbox".to_string())),
             },
             ..NativeAppState::default()
@@ -4426,10 +5202,10 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
             .action(|_, cx| cx.dispatch_action(&StartCompose)),
         PaletteEntry::new("advanced-search", "Advanced Search")
             .group("Actions")
-            .subtitle("Advanced search modal lands in Phase 4")
+            .subtitle("Build a structured mail search")
             .keyword("search")
             .keyword("filter")
-            .disabled(true),
+            .action(|_, cx| cx.dispatch_action(&OpenAdvancedSearch)),
         PaletteEntry::new("settings", "Open Settings")
             .group("Actions")
             .subtitle("Settings modal lands in Phase 6")
@@ -4618,6 +5394,28 @@ fn sync_searchbox_value(
     }
 }
 
+fn open_advanced_search_modal(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AdvancedSearchModal>,
+    app_cx: &mut App,
+) {
+    let group = state_entity.update(app_cx, |state, cx| {
+        state.modals.advanced_search_open = true;
+        cx.notify();
+        state.search.condition_group.clone()
+    });
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.reset_to_group(group, cx);
+    });
+}
+
+fn close_advanced_search_modal(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.modals.advanced_search_open = false;
+        cx.notify();
+    });
+}
+
 fn handle_sidebar_search_change(
     state_entity: &Entity<NativeAppState>,
     query: String,
@@ -4625,6 +5423,9 @@ fn handle_sidebar_search_change(
 ) {
     let restore_source = state_entity.update(app_cx, |state, cx| {
         state.search.query = query.clone();
+        if !query.trim().is_empty() {
+            state.search.condition_group = None;
+        }
         let restore_source = if query.trim().is_empty() && state.search.submitted_query.is_some() {
             let restore_source = state.search.previous_source.clone();
             if restore_source.is_none() {
@@ -4660,6 +5461,23 @@ fn submit_sidebar_search(state_entity: &Entity<NativeAppState>, query: String, a
     }
 
     start_message_collection_load(state_entity, NativeMessageSource::Search(query), app_cx);
+}
+
+fn start_advanced_search(
+    state_entity: &Entity<NativeAppState>,
+    group: ConditionGroup,
+    app_cx: &mut App,
+) {
+    if !condition_group_has_active(&group) {
+        return;
+    }
+
+    close_advanced_search_modal(state_entity, app_cx);
+    start_message_collection_load(
+        state_entity,
+        NativeMessageSource::AdvancedSearch(group),
+        app_cx,
+    );
 }
 
 fn sync_status_strip(status: &NativeSyncStatus, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
@@ -5220,6 +6038,10 @@ fn message_list_status(state: &NativeAppState) -> Option<(String, bool)> {
         return Some((format!("No results for \"{query}\""), false));
     }
 
+    if state.search.condition_group.is_some() {
+        return Some(("No advanced search results".to_string(), false));
+    }
+
     if state.selected_folder.is_none() && state.selected_label.is_none() {
         return Some(("No folder selected".to_string(), false));
     }
@@ -5716,7 +6538,10 @@ fn sender_initials(sender: &str) -> String {
 }
 
 fn selected_regular_folder_id(state: &NativeAppState) -> Option<&str> {
-    if state.search.submitted_query.is_some() || state.selected_label.is_some() {
+    if state.search.submitted_query.is_some()
+        || state.search.condition_group.is_some()
+        || state.selected_label.is_some()
+    {
         return None;
     }
 
@@ -5733,6 +6558,10 @@ fn current_mailbox_title(state: &NativeAppState) -> String {
 
     if let Some(query) = state.search.submitted_query.as_deref() {
         return format!("Results for \"{query}\"");
+    }
+
+    if state.search.condition_group.is_some() {
+        return "Advanced search results".to_string();
     }
 
     if let Some(label_id) = state.selected_label.as_deref() {
