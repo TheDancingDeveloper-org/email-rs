@@ -2055,6 +2055,8 @@ struct AdvancedConditionRow {
 #[derive(Clone)]
 struct AdvancedSearchModal {
     state: Entity<NativeAppState>,
+    focus_handle: FocusHandle,
+    focused_on_open: bool,
     match_mode: MatchMode,
     rows: Vec<AdvancedConditionRow>,
     next_condition_id: u64,
@@ -2066,6 +2068,8 @@ impl AdvancedSearchModal {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         let mut modal = Self {
             state,
+            focus_handle: cx.focus_handle(),
+            focused_on_open: false,
             match_mode: MatchMode::All,
             rows: Vec::new(),
             next_condition_id: 1,
@@ -2244,10 +2248,15 @@ impl AdvancedSearchModal {
 }
 
 impl Render for AdvancedSearchModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx).clone();
         if !state.modals.advanced_search_open {
+            self.focused_on_open = false;
             return div();
+        }
+        if !self.focused_on_open {
+            window.focus(&self.focus_handle);
+            self.focused_on_open = true;
         }
 
         let theme = cx.theme();
@@ -2267,10 +2276,27 @@ impl Render for AdvancedSearchModal {
             .absolute()
             .inset_0()
             .size_full()
+            .tab_index(0)
+            .key_context("AdvancedSearchModal")
+            .track_focus(&self.focus_handle)
             .flex()
             .items_center()
             .justify_center()
             .bg(backdrop)
+            .on_key_down({
+                let state_entity = self.state.clone();
+                let modal_entity = modal_entity.clone();
+                move |ev: &KeyDownEvent, _, app_cx| {
+                    if handle_advanced_search_modal_key(
+                        &state_entity,
+                        &modal_entity,
+                        ev.keystroke.key.as_str(),
+                        app_cx,
+                    ) {
+                        app_cx.stop_propagation();
+                    }
+                }
+            })
             .on_mouse_down(MouseButton::Left, {
                 let state_entity = self.state.clone();
                 move |_, _, app_cx| {
@@ -9957,6 +9983,24 @@ mod tests {
     }
 
     #[test]
+    fn advanced_search_key_action_matches_web_modal_shortcuts() {
+        assert_eq!(
+            advanced_search_key_action("escape", false),
+            Some(AdvancedSearchKeyAction::Close)
+        );
+        assert_eq!(
+            advanced_search_key_action("enter", true),
+            Some(AdvancedSearchKeyAction::Submit)
+        );
+        assert_eq!(
+            advanced_search_key_action("return", true),
+            Some(AdvancedSearchKeyAction::Submit)
+        );
+        assert_eq!(advanced_search_key_action("enter", false), None);
+        assert_eq!(advanced_search_key_action("tab", true), None);
+    }
+
+    #[test]
     fn native_preferences_parse_and_clamp_density() {
         let preferences = parse_native_preferences(
             "\n# comment\ntheme=light\ndensity=22\nemail_sidebar_w=900\nemail_msglist_w=99\nignored=value\n",
@@ -12425,6 +12469,47 @@ fn close_advanced_search_modal(state_entity: &Entity<NativeAppState>, app_cx: &m
         state.modals.advanced_search_open = false;
         cx.notify();
     });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdvancedSearchKeyAction {
+    Close,
+    Submit,
+}
+
+fn advanced_search_key_action(key: &str, has_active: bool) -> Option<AdvancedSearchKeyAction> {
+    match key {
+        "escape" => Some(AdvancedSearchKeyAction::Close),
+        "enter" | "return" if has_active => Some(AdvancedSearchKeyAction::Submit),
+        _ => None,
+    }
+}
+
+fn handle_advanced_search_modal_key(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AdvancedSearchModal>,
+    key: &str,
+    app_cx: &mut App,
+) -> bool {
+    let (action, group) = {
+        let modal = modal_entity.read(app_cx);
+        (
+            advanced_search_key_action(key, modal.has_active_condition()),
+            modal.condition_group(),
+        )
+    };
+
+    match action {
+        Some(AdvancedSearchKeyAction::Close) => {
+            close_advanced_search_modal(state_entity, app_cx);
+            true
+        }
+        Some(AdvancedSearchKeyAction::Submit) => {
+            start_advanced_search(state_entity, group, app_cx);
+            true
+        }
+        None => false,
+    }
 }
 
 fn handle_sidebar_search_change(

@@ -120,7 +120,7 @@ Status values:
 | Match all/any. | Same. | Backend implemented; native UI wired. | Search backend parses `match=all/any` for structured message filters. |
 | Text operators contains, not_contains, equals, starts_with. | Same. | Backend implemented; native UI wired. | Search backend parses field operator params for message filters. |
 | Boolean/date controls. | Same. | Backend implemented; native UI wired. | Search backend parses boolean/date params for message filters. |
-| Clear, Cancel, Search, Enter/Escape behavior. | Same. | Native implemented; pending keyboard polish. | Search disabled when no active values. |
+| Clear, Cancel, Search, Enter/Escape behavior. | Same. | Native implemented; automated tests. | Search disabled when no active values; Enter submits active drafts and Escape closes the modal. |
 
 ## Settings
 
