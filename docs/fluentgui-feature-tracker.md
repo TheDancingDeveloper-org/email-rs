@@ -133,7 +133,7 @@ Status values:
 | Sync setting: download last N days or all. | Same. | Native implemented; automated tests. | PATCH account; `null` clear semantics fixed for all/no limit. |
 | Signature textarea. | Same. | Native implemented; automated tests. | Blank signature clears the account signature. |
 | Excluded folders checkbox list. | Same. | Native implemented; cargo check. | Patches folder exclusion and refreshes account tree. |
-| Remove account danger zone with confirmation. | Same. | Current audited; pending native. | Cascade delete remains backend behavior. |
+| Remove account danger zone with confirmation. | Same. | Native implemented; automated tests. | Deletes through account API, reloads native account state, and closes Settings. |
 | Save status. | Same. | Native implemented; cargo check. | Account save and folder-update success/error feedback. |
 | Rules list with enable toggle, name, counts, edit, delete, new. | Same. | Current audited; pending native. | Documented Phase 6b gap; per account. |
 | Rule editor with name, condition builder, actions, folder selector, save/cancel/error. | Same. | Current audited; pending native. | Documented Phase 6b gap. |

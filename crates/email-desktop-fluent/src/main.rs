@@ -2318,6 +2318,8 @@ struct SettingsModal {
     signature_input: Entity<Textarea>,
     loading_account: bool,
     saving_account: bool,
+    deleting_account: bool,
+    confirm_delete_account: Option<String>,
     status: Option<(String, bool)>,
 }
 
@@ -2337,6 +2339,8 @@ impl SettingsModal {
             }),
             loading_account: false,
             saving_account: false,
+            deleting_account: false,
+            confirm_delete_account: None,
             status: None,
         }
     }
@@ -2345,6 +2349,8 @@ impl SettingsModal {
         self.active_tab = SettingsTab::General;
         self.loading_account = false;
         self.saving_account = false;
+        self.deleting_account = false;
+        self.confirm_delete_account = None;
         self.status = None;
         self.name_input
             .update(cx, |input, cx| input.set_value("", cx));
@@ -2359,6 +2365,8 @@ impl SettingsModal {
         self.active_tab = SettingsTab::Account(account.id.clone());
         self.loading_account = true;
         self.saving_account = false;
+        self.deleting_account = false;
+        self.confirm_delete_account = None;
         self.status = None;
         self.name_input
             .update(cx, |input, cx| input.set_value(account.name.clone(), cx));
@@ -2405,6 +2413,7 @@ impl SettingsModal {
     fn set_status(&mut self, status: Option<(String, bool)>, cx: &mut Context<Self>) {
         self.status = status;
         self.saving_account = false;
+        self.deleting_account = false;
         cx.notify();
     }
 }
@@ -2764,6 +2773,8 @@ fn settings_account_body(
         .cloned()
         .unwrap_or_default();
     let status = modal.status.clone();
+    let confirming_delete = modal.confirm_delete_account.as_deref() == Some(account_id);
+    let account_email = account.email.clone();
 
     let mut folder_list = div().flex().flex_col().gap(px(4.0));
     if folders.is_empty() {
@@ -2910,6 +2921,75 @@ fn settings_account_body(
                     }),
             ),
         )
+        .child(settings_section_title("Danger zone", cx))
+        .child(if confirming_delete {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(typography.body.size))
+                        .text_color(colors.on_neutral)
+                        .child(format!("Delete {account_email} and all its cached emails?")),
+                )
+                .child(
+                    Button::new("settings-confirm-delete-account")
+                        .label(if modal.deleting_account {
+                            "Deleting..."
+                        } else {
+                            "Yes, delete"
+                        })
+                        .appearance(ButtonAppearance::Danger)
+                        .size(ButtonSize::Compact)
+                        .disabled(
+                            modal.loading_account || modal.saving_account || modal.deleting_account,
+                        )
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let modal_entity = modal_entity.clone();
+                            let account_id = account_id.to_string();
+                            move |_, _, app_cx| {
+                                start_settings_account_delete(
+                                    &state_entity,
+                                    &modal_entity,
+                                    account_id.clone(),
+                                    app_cx,
+                                );
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("settings-cancel-delete-account")
+                        .label("Cancel")
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(modal.deleting_account)
+                        .on_click({
+                            let modal_entity = modal_entity.clone();
+                            move |_, _, app_cx| {
+                                cancel_settings_account_delete(&modal_entity, app_cx);
+                            }
+                        }),
+                )
+                .into_any_element()
+        } else {
+            Button::new("settings-remove-account")
+                .label("Remove account")
+                .appearance(ButtonAppearance::Danger)
+                .size(ButtonSize::Compact)
+                .disabled(modal.loading_account || modal.saving_account || modal.deleting_account)
+                .on_click({
+                    let modal_entity = modal_entity.clone();
+                    let account_id = account_id.to_string();
+                    move |_, _, app_cx| {
+                        confirm_settings_account_delete(&modal_entity, account_id.clone(), app_cx);
+                    }
+                })
+                .into_any_element()
+        })
 }
 
 fn settings_section_title(label: &'static str, cx: &mut Context<SettingsModal>) -> gpui::Div {
@@ -3042,6 +3122,26 @@ fn select_settings_account(
         .detach();
 }
 
+fn confirm_settings_account_delete(
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    app_cx: &mut App,
+) {
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.confirm_delete_account = Some(account_id);
+        modal.status = None;
+        cx.notify();
+    });
+}
+
+fn cancel_settings_account_delete(modal_entity: &Entity<SettingsModal>, app_cx: &mut App) {
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.confirm_delete_account = None;
+        modal.status = None;
+        cx.notify();
+    });
+}
+
 fn start_settings_save(
     state_entity: &Entity<NativeAppState>,
     modal_entity: &Entity<SettingsModal>,
@@ -3130,6 +3230,83 @@ fn start_settings_save(
         .detach();
 }
 
+fn start_settings_account_delete(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    app_cx: &mut App,
+) {
+    let Some(base_url) = ({
+        let state = state_entity.read(app_cx);
+        state
+            .accounts
+            .iter()
+            .any(|account| account.id == account_id)
+            .then(|| state.api_base_url.clone())
+    }) else {
+        let message = "Account not found.".to_string();
+        let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal.set_status(Some((message.clone(), false)), cx);
+        });
+        state_entity.update(app_cx, |state, cx| {
+            state.last_error = Some(message);
+            cx.notify();
+        });
+        return;
+    };
+
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.deleting_account = true;
+        modal.status = None;
+        cx.notify();
+    });
+    state_entity.update(app_cx, |state, cx| {
+        state.last_error = None;
+        cx.notify();
+    });
+
+    let requested_account_id = account_id.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { delete_account_and_reload(base_url, account_id) });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let error_message = result.as_ref().err().map(|err| err.to_string());
+
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_account_delete_reload(state, &requested_account_id, loaded);
+                        }
+                        Err(err) => {
+                            state.last_error = Some(err.to_string());
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native account delete reload: {err}");
+                }
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                    if let Some(message) = error_message {
+                        modal.set_status(Some((message, false)), cx);
+                    } else {
+                        modal.reset(cx);
+                    }
+                }) {
+                    tracing::warn!("failed to apply native account delete status: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
 fn start_folder_exclusion_toggle(
     state_entity: &Entity<NativeAppState>,
     modal_entity: &Entity<SettingsModal>,
@@ -3187,6 +3364,59 @@ fn start_folder_exclusion_toggle(
             }
         })
         .detach();
+}
+
+fn delete_account_and_reload(base_url: String, account_id: String) -> Result<NativeAppState> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .delete_account(&account_id)
+            .await
+            .with_context(|| format!("delete account {account_id}"))?;
+        let mut loaded = load_accounts(&client)
+            .await
+            .with_context(|| "reload accounts after deleting account")?;
+        loaded.api_base_url = base_url;
+        Ok(loaded)
+    })
+}
+
+fn apply_account_delete_reload(
+    state: &mut NativeAppState,
+    deleted_account_id: &str,
+    mut loaded: NativeAppState,
+) {
+    let theme = state.theme.clone();
+    let density = state.density.clone();
+    let selected_view = state.selected_view.clone();
+    let selected_event = state.selected_event.clone();
+    let palette = state.palette.clone();
+    let sync = state.sync.clone();
+    let account_setup_open = state.modals.account_setup_open;
+    let compose = if state.compose.account_id.as_deref() == Some(deleted_account_id) {
+        ComposeState {
+            revision: state.compose.revision.saturating_add(1),
+            ..ComposeState::default()
+        }
+    } else {
+        state.compose.clone()
+    };
+
+    loaded.theme = theme;
+    loaded.density = density;
+    loaded.selected_view = selected_view;
+    loaded.selected_event = selected_event;
+    loaded.palette = palette;
+    loaded.sync = sync;
+    loaded.compose = compose;
+    loaded.modals = ModalStates {
+        account_setup_open,
+        settings_open: false,
+        advanced_search_open: false,
+    };
+    loaded.last_error = None;
+    *state = loaded;
 }
 
 fn update_account_settings_and_refresh(
@@ -6230,6 +6460,62 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "Download days must be a positive whole number.");
+    }
+
+    #[test]
+    fn account_delete_reload_preserves_native_state_and_resets_deleted_compose() {
+        let mut state = NativeAppState {
+            theme: ThemeMode::Light,
+            density: DensityTokens::new(7),
+            selected_view: SelectedView::Calendar,
+            selected_event: Some("event-1".to_string()),
+            compose: ComposeState {
+                open: true,
+                account_id: Some("deleted".to_string()),
+                revision: 4,
+                ..ComposeState::default()
+            },
+            modals: ModalStates {
+                account_setup_open: true,
+                settings_open: true,
+                advanced_search_open: true,
+            },
+            palette: PaletteState {
+                open: true,
+                query: "settings".to_string(),
+            },
+            sync: NativeSyncStatus {
+                connected: true,
+                ..NativeSyncStatus::default()
+            },
+            last_error: Some("old".to_string()),
+            ..NativeAppState::default()
+        };
+        let loaded = NativeAppState {
+            api_base_url: "http://localhost:3000".to_string(),
+            accounts: vec![account("remaining")],
+            accounts_resource: AsyncResource::ready(vec![account("remaining")]),
+            theme: ThemeMode::Dark,
+            density: DensityTokens::new(1),
+            selected_view: SelectedView::Mail,
+            ..NativeAppState::default()
+        };
+
+        apply_account_delete_reload(&mut state, "deleted", loaded);
+
+        assert_eq!(state.accounts, vec![account("remaining")]);
+        assert_eq!(state.theme, ThemeMode::Light);
+        assert_eq!(state.density.level, 7);
+        assert_eq!(state.selected_view, SelectedView::Calendar);
+        assert_eq!(state.selected_event.as_deref(), Some("event-1"));
+        assert!(state.modals.account_setup_open);
+        assert!(!state.modals.settings_open);
+        assert!(!state.modals.advanced_search_open);
+        assert!(state.palette.open);
+        assert!(state.sync.connected);
+        assert!(!state.compose.open);
+        assert_eq!(state.compose.revision, 5);
+        assert!(state.last_error.is_none());
     }
 }
 
