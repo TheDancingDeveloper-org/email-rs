@@ -30,9 +30,9 @@ Last updated: 2026-05-26
   still manual.
 - Settings focus management still needs manual UI walkthrough once the broader
   account setup surfaces exist.
-- Advanced-search backend behavior remains a product/backend gap: native and web
-  clients emit match/operator/boolean/date values, but backend parsing still
-  ignores some structured params.
+- Advanced-search backend structured message params were implemented in Phase
+  7b; remaining search work is native/manual UI verification and
+  calendar-event palette navigation.
 - Larger native parity remains open for Calendar, command-palette navigation and
   message actions, richer message-list and reading-pane polish, Windows
   lifecycle/tray behavior, and real-provider verification.

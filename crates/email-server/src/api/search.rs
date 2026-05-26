@@ -10,8 +10,27 @@ use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
-    pub q: String,
+    pub q: Option<String>,
     pub account_id: Option<String>,
+    #[serde(rename = "match")]
+    pub match_mode: Option<String>,
+    pub from: Option<String>,
+    pub from_op: Option<String>,
+    pub to: Option<String>,
+    pub to_op: Option<String>,
+    pub cc: Option<String>,
+    pub cc_op: Option<String>,
+    pub subject: Option<String>,
+    pub subject_op: Option<String>,
+    pub body: Option<String>,
+    pub body_op: Option<String>,
+    pub filename: Option<String>,
+    pub filename_op: Option<String>,
+    pub has_attachment: Option<String>,
+    pub is_read: Option<String>,
+    pub is_flagged: Option<String>,
+    pub date_after: Option<String>,
+    pub date_before: Option<String>,
 }
 
 // ── FTS5 query helpers ────────────────────────────────────────────────────────
@@ -46,22 +65,272 @@ pub async fn search_messages(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>> {
-    let term = params.q.trim();
-    if term.is_empty() {
+    let term = params.q.as_deref().unwrap_or("").trim();
+    let structured = structured_search_parts(&params);
+    let has_structured = !structured.is_empty();
+    if term.is_empty() && !has_structured {
         return Ok(Json(SearchResponse {
             messages: vec![],
             events: vec![],
         }));
     }
 
-    let messages = if state.has_fts {
+    let messages = if has_structured {
+        search_structured(
+            &state,
+            params.account_id.as_deref(),
+            &params.match_mode,
+            structured,
+        )
+        .await?
+    } else if state.has_fts {
         search_fts(&state, term, params.account_id.as_deref()).await?
     } else {
         search_like(&state, term, params.account_id.as_deref()).await?
     };
-    let events = search_calendar_events(&state, term, params.account_id.as_deref(), 20).await?;
+    let events = if term.is_empty() || has_structured {
+        Vec::new()
+    } else {
+        search_calendar_events(&state, term, params.account_id.as_deref(), 20).await?
+    };
 
     Ok(Json(SearchResponse { messages, events }))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SearchBind {
+    Bool(bool),
+    Text(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StructuredSearchPart {
+    clause: String,
+    binds: Vec<SearchBind>,
+}
+
+fn structured_search_parts(params: &SearchQuery) -> Vec<StructuredSearchPart> {
+    let mut parts = Vec::new();
+    push_text_search_part(
+        &mut parts,
+        "COALESCE(m.from_name, '') || ' ' || COALESCE(m.from_email, '')",
+        params.from.as_deref(),
+        params.from_op.as_deref(),
+    );
+    push_text_search_part(
+        &mut parts,
+        "COALESCE(m.to_json, '')",
+        params.to.as_deref(),
+        params.to_op.as_deref(),
+    );
+    push_text_search_part(
+        &mut parts,
+        "COALESCE(m.cc_json, '')",
+        params.cc.as_deref(),
+        params.cc_op.as_deref(),
+    );
+    push_text_search_part(
+        &mut parts,
+        "COALESCE(m.subject, '')",
+        params.subject.as_deref(),
+        params.subject_op.as_deref(),
+    );
+    push_text_search_part(
+        &mut parts,
+        "COALESCE(m.preview, '') || ' ' || COALESCE(mb.text_body, '') || ' ' || COALESCE(mb.html_body, '')",
+        params.body.as_deref(),
+        params.body_op.as_deref(),
+    );
+    push_filename_search_part(
+        &mut parts,
+        params.filename.as_deref(),
+        params.filename_op.as_deref(),
+    );
+    push_bool_search_part(
+        &mut parts,
+        "m.has_attachments",
+        params.has_attachment.as_deref(),
+    );
+    push_bool_search_part(&mut parts, "m.is_read", params.is_read.as_deref());
+    push_bool_search_part(&mut parts, "m.is_flagged", params.is_flagged.as_deref());
+    push_date_search_part(&mut parts, ">", params.date_after.as_deref());
+    push_date_search_part(&mut parts, "<", params.date_before.as_deref());
+    parts
+}
+
+fn push_text_search_part(
+    parts: &mut Vec<StructuredSearchPart>,
+    expression: &'static str,
+    value: Option<&str>,
+    operator: Option<&str>,
+) {
+    let Some(value) = trimmed_non_empty(value) else {
+        return;
+    };
+
+    let operator = normalized_text_operator(operator);
+    let (clause, bind) = text_search_clause(expression, operator, &value);
+    parts.push(StructuredSearchPart {
+        clause,
+        binds: vec![SearchBind::Text(bind)],
+    });
+}
+
+fn push_filename_search_part(
+    parts: &mut Vec<StructuredSearchPart>,
+    value: Option<&str>,
+    operator: Option<&str>,
+) {
+    let Some(value) = trimmed_non_empty(value) else {
+        return;
+    };
+
+    let operator = normalized_text_operator(operator);
+    let exists_operator = if operator == "not_contains" {
+        "contains"
+    } else {
+        operator
+    };
+    let (text_clause, bind) = text_search_clause("a.filename", exists_operator, &value);
+    let clause = if operator == "not_contains" {
+        format!(
+            "NOT EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id AND {})",
+            text_clause
+        )
+    } else {
+        format!(
+            "EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id AND {})",
+            text_clause
+        )
+    };
+    parts.push(StructuredSearchPart {
+        clause,
+        binds: vec![SearchBind::Text(bind)],
+    });
+}
+
+fn push_bool_search_part(
+    parts: &mut Vec<StructuredSearchPart>,
+    column: &'static str,
+    value: Option<&str>,
+) {
+    let Some(value) = parse_search_bool(value) else {
+        return;
+    };
+    parts.push(StructuredSearchPart {
+        clause: format!("{column} = ?"),
+        binds: vec![SearchBind::Bool(value)],
+    });
+}
+
+fn push_date_search_part(
+    parts: &mut Vec<StructuredSearchPart>,
+    operator: &'static str,
+    value: Option<&str>,
+) {
+    let Some(value) = trimmed_non_empty(value) else {
+        return;
+    };
+    parts.push(StructuredSearchPart {
+        clause: format!("m.date IS NOT NULL AND substr(m.date, 1, 10) {operator} ?"),
+        binds: vec![SearchBind::Text(value)],
+    });
+}
+
+fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_search_bool(value: Option<&str>) -> Option<bool> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn normalized_text_operator(operator: Option<&str>) -> &'static str {
+    match operator.unwrap_or("contains") {
+        "not_contains" => "not_contains",
+        "equals" => "equals",
+        "starts_with" => "starts_with",
+        _ => "contains",
+    }
+}
+
+fn text_search_clause(
+    expression: &'static str,
+    operator: &'static str,
+    value: &str,
+) -> (String, String) {
+    match operator {
+        "not_contains" => (
+            format!("lower({expression}) NOT LIKE lower(?)"),
+            format!("%{value}%"),
+        ),
+        "equals" => (format!("lower({expression}) = lower(?)"), value.to_string()),
+        "starts_with" => (
+            format!("lower({expression}) LIKE lower(?)"),
+            format!("{value}%"),
+        ),
+        _ => (
+            format!("lower({expression}) LIKE lower(?)"),
+            format!("%{value}%"),
+        ),
+    }
+}
+
+async fn search_structured(
+    state: &AppState,
+    account_id: Option<&str>,
+    match_mode: &Option<String>,
+    parts: Vec<StructuredSearchPart>,
+) -> Result<Vec<MessageRow>> {
+    let joiner = if match_mode.as_deref() == Some("any") {
+        " OR "
+    } else {
+        " AND "
+    };
+    let structured_clause = parts
+        .iter()
+        .map(|part| format!("({})", part.clause))
+        .collect::<Vec<_>>()
+        .join(joiner);
+    let account_clause = if account_id.is_some() {
+        " AND m.account_id = ?"
+    } else {
+        ""
+    };
+    let sql = format!(
+        r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
+                  m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
+                  m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
+                  m.snoozed_until
+           FROM messages m
+           LEFT JOIN message_bodies mb ON mb.message_id = m.id
+           WHERE ({structured_clause}){account_clause}
+           GROUP BY m.id
+           ORDER BY m.date DESC
+           LIMIT 50"#
+    );
+
+    let mut query = sqlx::query_as::<_, MessageRow>(&sql);
+    for part in parts {
+        for bind in part.binds {
+            query = match bind {
+                SearchBind::Bool(value) => query.bind(value),
+                SearchBind::Text(value) => query.bind(value),
+            };
+        }
+    }
+    if let Some(account_id) = account_id {
+        query = query.bind(account_id);
+    }
+
+    query.fetch_all(&state.pool).await.map_err(Into::into)
 }
 
 async fn search_fts(
@@ -235,7 +504,7 @@ pub async fn suggest_messages(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<SuggestResponse>> {
-    let term = params.q.trim();
+    let term = params.q.as_deref().unwrap_or("").trim();
     if term.len() < 2 {
         return Ok(Json(SuggestResponse {
             messages: vec![],
@@ -503,6 +772,25 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_attachment(pool: &sqlx::SqlitePool, message_id: &str, filename: &str) {
+        sqlx::query(
+            "INSERT INTO attachments (id, message_id, filename, content_type, size_bytes) VALUES (?,?,?,?,?)",
+        )
+        .bind(format!("{message_id}-attachment"))
+        .bind(message_id)
+        .bind(filename)
+        .bind("text/plain")
+        .bind(12i64)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE messages SET has_attachments = 1 WHERE id = ?")
+            .bind(message_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
     async fn do_get(router: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
         let req = Request::builder()
             .method("GET")
@@ -711,6 +999,202 @@ mod tests {
         let arr = body["messages"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["id"], "lkb");
+    }
+
+    #[tokio::test]
+    async fn structured_search_filters_without_q() {
+        let state = make_state(false).await;
+        seed(
+            &state.pool,
+            "structured-attach",
+            "acc1",
+            "fld1",
+            "Attachment",
+            "files@example.com",
+            "Files",
+            "",
+        )
+        .await;
+        seed_attachment(&state.pool, "structured-attach", "invoice.pdf").await;
+        seed(
+            &state.pool,
+            "structured-plain",
+            "acc1",
+            "fld1",
+            "Plain",
+            "plain@example.com",
+            "Plain",
+            "",
+        )
+        .await;
+
+        let (status, body) = do_get(crate::api::router(state), "/search?has_attachment=true").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let arr = body["messages"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "structured-attach");
+        assert_eq!(body["events"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn structured_search_applies_match_all_and_text_operator() {
+        let state = make_state(false).await;
+        seed(
+            &state.pool,
+            "structured-bob-quarter",
+            "acc1",
+            "fld1",
+            "Quarter report",
+            "bob@example.com",
+            "Bob Builder",
+            "",
+        )
+        .await;
+        seed(
+            &state.pool,
+            "structured-alice-quarter",
+            "acc1",
+            "fld1",
+            "Quarter report",
+            "alice@example.com",
+            "Alice",
+            "",
+        )
+        .await;
+        seed(
+            &state.pool,
+            "structured-bob-daily",
+            "acc1",
+            "fld1",
+            "Daily note",
+            "bob@example.com",
+            "Bob Builder",
+            "",
+        )
+        .await;
+
+        let (status, body) = do_get(
+            crate::api::router(state),
+            "/search?match=all&from=bo&from_op=starts_with&subject=quarter",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let arr = body["messages"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "structured-bob-quarter");
+    }
+
+    #[tokio::test]
+    async fn structured_search_applies_match_any_booleans_and_dates() {
+        let state = make_state(false).await;
+        seed(
+            &state.pool,
+            "structured-flagged",
+            "acc1",
+            "fld1",
+            "Flagged",
+            "flag@example.com",
+            "Flag",
+            "",
+        )
+        .await;
+        sqlx::query("UPDATE messages SET is_flagged = 1, date = '2026-01-01T00:00:00Z' WHERE id = 'structured-flagged'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        seed(
+            &state.pool,
+            "structured-old",
+            "acc1",
+            "fld1",
+            "Old",
+            "old@example.com",
+            "Old",
+            "",
+        )
+        .await;
+        sqlx::query(
+            "UPDATE messages SET date = '2019-12-31T23:59:00Z' WHERE id = 'structured-old'",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        seed(
+            &state.pool,
+            "structured-neither",
+            "acc1",
+            "fld1",
+            "Neither",
+            "neither@example.com",
+            "Neither",
+            "",
+        )
+        .await;
+        sqlx::query(
+            "UPDATE messages SET date = '2026-01-01T00:00:00Z' WHERE id = 'structured-neither'",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let (status, body) = do_get(
+            crate::api::router(state),
+            "/search?match=any&is_flagged=true&date_before=2020-01-01",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let ids = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"structured-flagged"));
+        assert!(ids.contains(&"structured-old"));
+    }
+
+    #[tokio::test]
+    async fn structured_search_filters_filename_and_account() {
+        let state = make_state(false).await;
+        seed(
+            &state.pool,
+            "structured-acc1-attachment",
+            "acc1",
+            "fld1",
+            "Attachment",
+            "a@example.com",
+            "A",
+            "",
+        )
+        .await;
+        seed_attachment(&state.pool, "structured-acc1-attachment", "budget.xlsx").await;
+        seed(
+            &state.pool,
+            "structured-acc2-attachment",
+            "acc2",
+            "fld2",
+            "Attachment",
+            "b@example.com",
+            "B",
+            "",
+        )
+        .await;
+        seed_attachment(&state.pool, "structured-acc2-attachment", "budget.xlsx").await;
+
+        let (status, body) = do_get(
+            crate::api::router(state),
+            "/search?filename=budget&account_id=acc2",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let arr = body["messages"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "structured-acc2-attachment");
     }
 
     #[tokio::test]

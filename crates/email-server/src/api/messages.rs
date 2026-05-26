@@ -731,6 +731,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_messages_serializes_snoozed_until() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "snoozed-row", "acc1", "fld1").await;
+        sqlx::query(
+            "UPDATE messages SET snoozed_until = '2000-01-01T09:00:00Z' WHERE id = 'snoozed-row'",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let (status, body) = req(
+            crate::api::router(state),
+            "GET",
+            "/folders/fld1/messages",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["snoozedUntil"], "2000-01-01T09:00:00Z");
+    }
+
+    #[tokio::test]
     async fn list_messages_unread_filter() {
         let state = setup().await;
         seed_account(&state.pool, "acc1").await;

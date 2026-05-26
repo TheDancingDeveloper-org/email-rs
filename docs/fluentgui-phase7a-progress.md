@@ -23,9 +23,11 @@ Last updated: 2026-05-26
 - Calendar-event search/navigation from the palette is not implemented natively.
 - Additional message actions may still be needed if web parity expands beyond
   the current selected-message actions.
+- Advanced-search backend structured params and `snoozedUntil` row
+  serialization were verified in Phase 7b.
 - Larger parity remains open for Windows lifecycle/tray behavior, Calendar,
-  message-list and reading-pane polish, advanced-search backend structured
-  params, snoozed row serialization, and real-provider verification.
+  message-list and reading-pane polish, calendar-event palette navigation, and
+  real-provider verification.
 
 ## Verification
 

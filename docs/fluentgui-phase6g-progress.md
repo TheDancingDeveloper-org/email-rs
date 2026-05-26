@@ -33,9 +33,11 @@ Last updated: 2026-05-26
   walkthrough after the remaining modal work settles.
 - Command-palette navigation/actions moved forward in Phase 7a; remaining
   palette gaps are keyboard walkthrough and calendar-event search/navigation.
+- Advanced-search backend structured params and `snoozedUntil` row
+  serialization were verified in Phase 7b.
 - Larger parity remains open for Windows lifecycle/tray behavior, Calendar,
-  message-list and reading-pane polish, advanced-search backend structured
-  params, and snoozed row serialization.
+  message-list and reading-pane polish, calendar-event palette navigation, and
+  real-provider verification.
 
 ## Verification
 

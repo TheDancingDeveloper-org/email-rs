@@ -76,7 +76,7 @@ Status values:
 | Mark all read for regular folders. | Same. | Current audited; pending native. | Hidden for smart/label/search/advanced search. |
 | Empty/loading states. | Same. | Current audited; pending native. | Preserve `No folder selected`, `Loading...`, `No messages`. |
 | Thread grouping only in regular folder view. | Same. | Current audited; pending native. | Groups by `threadId` or message id; latest first. |
-| Rows show avatar/checkbox, sender, timestamp, subject, preview, unread dot, attachment, flag, snooze, thread count. | Same. | Product gap; pending native. | Backend does not currently serialize `snoozedUntil` in row DTO. |
+| Rows show avatar/checkbox, sender, timestamp, subject, preview, unread dot, attachment, flag, snooze, thread count. | Same. | Backend verified; pending native. | `snoozedUntil` row serialization is covered; remaining work is native row detail parity. |
 | Row context menu has open, reply, forward, archive, trash, read/unread, flag/unflag. | Same. | Current audited; pending native. | Reply/forward currently select the message. |
 | Keyboard j/k, Ctrl/Cmd+A, Escape, x, e, Delete/Backspace, u. | Same. | Current audited; pending native. | Blocking parity item. |
 
@@ -117,9 +117,9 @@ Status values:
 |---|---|---|---|
 | Basic search from sidebar searches messages and calendar, with suggestions. | Same. | Current audited; pending native. | Event suggestion navigates to calendar. |
 | Advanced search modal with condition builder. | Same. | Native implemented; automated tests. | Native modal uses the existing condition model. |
-| Match all/any. | Same. | Product gap; native UI wired. | Frontend and native emit `match`; backend currently ignores it. |
-| Text operators contains, not_contains, equals, starts_with. | Same. | Product gap; native UI wired. | Frontend and native emit operator params; backend currently ignores them. |
-| Boolean/date controls. | Same. | Product gap; native UI wired. | Backend support still needs implementation or decision. |
+| Match all/any. | Same. | Backend implemented; native UI wired. | Search backend parses `match=all/any` for structured message filters. |
+| Text operators contains, not_contains, equals, starts_with. | Same. | Backend implemented; native UI wired. | Search backend parses field operator params for message filters. |
+| Boolean/date controls. | Same. | Backend implemented; native UI wired. | Search backend parses boolean/date params for message filters. |
 | Clear, Cancel, Search, Enter/Escape behavior. | Same. | Native implemented; pending keyboard polish. | Search disabled when no active values. |
 
 ## Settings
@@ -176,7 +176,7 @@ Status values:
 | Labels list, show message labels, add/remove labels, label messages. | Same. | Current audited; pending native. | Full label CRUD is not current UI parity. |
 | Snooze/unsnooze. | Same for snooze. | Current audited; pending native. | Unsnooze UI not currently exposed. |
 | Rules engine. | Same. | Current audited; pending native. | Fixture includes active and inactive rules. |
-| Search and suggestions. | Same. | Product gap; pending native. | Structured advanced-search params not parsed. |
+| Search and suggestions. | Same. | Backend implemented; pending remaining native polish. | Structured message params are parsed; calendar-event palette navigation remains separate. |
 | Webhooks. | Same. | Current audited; pending native. | Fixture includes signed/enabled and disabled rows. |
 | SSE sync events. | Same. | Current audited; pending native. | Preserve sidebar progress. |
 | OAuth callbacks. | Same. | Manual required. | Requires real provider credentials. |
