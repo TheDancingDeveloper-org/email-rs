@@ -63,6 +63,39 @@ const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const NATIVE_SETTINGS_ENV: &str = "EMAIL_RS_FLUENT_SETTINGS_PATH";
 const NATIVE_SETTINGS_FILE: &str = "fluentgui-settings.conf";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeKeyAction {
+    TogglePalette,
+    ApplyLightTheme,
+    ApplyDarkTheme,
+    IncreaseDensity,
+    DecreaseDensity,
+}
+
+fn native_key_binding_specs() -> &'static [(&'static str, NativeKeyAction)] {
+    &[
+        ("ctrl-k", NativeKeyAction::TogglePalette),
+        ("cmd-k", NativeKeyAction::TogglePalette),
+        ("ctrl-shift-l", NativeKeyAction::ApplyLightTheme),
+        ("ctrl-shift-d", NativeKeyAction::ApplyDarkTheme),
+        ("ctrl-plus", NativeKeyAction::IncreaseDensity),
+        ("ctrl-minus", NativeKeyAction::DecreaseDensity),
+    ]
+}
+
+fn native_key_bindings() -> Vec<KeyBinding> {
+    native_key_binding_specs()
+        .iter()
+        .map(|(keystroke, action)| match action {
+            NativeKeyAction::TogglePalette => KeyBinding::new(keystroke, TogglePalette, None),
+            NativeKeyAction::ApplyLightTheme => KeyBinding::new(keystroke, ApplyLightTheme, None),
+            NativeKeyAction::ApplyDarkTheme => KeyBinding::new(keystroke, ApplyDarkTheme, None),
+            NativeKeyAction::IncreaseDensity => KeyBinding::new(keystroke, IncreaseDensity, None),
+            NativeKeyAction::DecreaseDensity => KeyBinding::new(keystroke, DecreaseDensity, None),
+        })
+        .collect()
+}
+
 fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     init_tracing();
@@ -95,13 +128,7 @@ fn main() -> Result<()> {
     };
 
     fluent_app.run(move |cx| {
-        cx.bind_keys([
-            KeyBinding::new("ctrl-k", TogglePalette, None),
-            KeyBinding::new("ctrl-shift-l", ApplyLightTheme, None),
-            KeyBinding::new("ctrl-shift-d", ApplyDarkTheme, None),
-            KeyBinding::new("ctrl-plus", IncreaseDensity, None),
-            KeyBinding::new("ctrl-minus", DecreaseDensity, None),
-        ]);
+        cx.bind_keys(native_key_bindings());
 
         let state_entity = cx.new(|_| initial_state.clone());
 
@@ -9548,6 +9575,15 @@ mod tests {
 
         assert_eq!(native_window_title(&state), "email-rs FluentGUI");
         assert_eq!(native_window_status(&state), "No unread messages");
+    }
+
+    #[test]
+    fn native_key_bindings_include_ctrl_and_cmd_palette_shortcuts() {
+        let specs = native_key_binding_specs();
+
+        assert!(specs.contains(&("ctrl-k", NativeKeyAction::TogglePalette)));
+        assert!(specs.contains(&("cmd-k", NativeKeyAction::TogglePalette)));
+        assert_eq!(native_key_bindings().len(), specs.len());
     }
 
     #[test]

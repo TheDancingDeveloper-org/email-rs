@@ -144,13 +144,13 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Ctrl/Cmd+K opens/closes palette. | Same. | Current audited; pending native. | Bind through native actions. |
-| Groups: Actions, Navigate, Labels, Folders, Message. | Same. | Current audited; pending native. | Requires enhanced generic palette. |
-| Fuzzy matching with label/keyword scoring. | Same or better. | Current audited; pending native. | Preserve predictable ordering. |
+| Ctrl/Cmd+K opens/closes palette. | Same. | Native implemented; automated tests. | Native app binds both Ctrl+K and Cmd+K to the palette action. |
+| Groups: Actions, Navigate, Labels, Folders, Message. | Same. | Native implemented; FluentGUI tests. | Shared palette renders group headers; native entries populate action, navigate, label, folder, account, and message groups. |
+| Fuzzy matching with label/keyword scoring. | Same or better. | Native implemented; FluentGUI tests. | Shared palette scores label, subtitle, group, and keywords with stable ordering. |
 | Actions: New Message, Add Account, Advanced Search, Settings, theme, density. | Same. | Native implemented; cargo check. | New Message, Add Account, Advanced Search, Settings, theme, and density wired. |
 | Navigation: Mail, Calendar, smart folders, labels, folders. | Same. | Native implemented; automated tests. | Smart folders, labels, folders, and account inbox entries call native navigation. |
 | Message actions: reply, forward, archive, delete, read/unread, flag/unflag. | Same. | Native implemented; automated tests. | Only for selected message; actions reuse native message mutation refresh. |
-| Keyboard Up/Down, Enter, Escape. | Same. | Current audited; pending native. | Mouse hover/select too. |
+| Keyboard Up/Down, Enter, Escape. | Same. | Native implemented; manual required. | Shared palette handles keys and mouse selection; running-app walkthrough still pending. |
 
 ## Calendar
 
