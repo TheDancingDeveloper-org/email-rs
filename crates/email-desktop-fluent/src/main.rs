@@ -7,14 +7,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context as _, Result};
-use chrono::{Datelike as _, Duration as ChronoDuration, Local, TimeZone as _, Utc};
+use chrono::{
+    Datelike as _, Duration as ChronoDuration, Local, NaiveDate, TimeZone as _, Timelike as _, Utc,
+};
 use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
-    Account, AccountSettings, ActionInput, BulkAction, BulkRequest, Condition, ConditionField,
-    ConditionGroup, ConditionInput, ConditionOperator, CreateAccount, CreateWebhook, Folder,
-    FullMessage, Label, MatchMode, Message, PatchFolder, PatchMessageRequest, RuleDto, SendRequest,
-    SnoozeRequest, SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
+    Account, AccountSettings, ActionInput, BulkAction, BulkRequest, CalendarEvent, Condition,
+    ConditionField, ConditionGroup, ConditionInput, ConditionOperator, CreateAccount,
+    CreateWebhook, Folder, FullMessage, Label, MatchMode, Message, PatchFolder,
+    PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount,
+    UpdateRuleBody, UpdateWebhook, Webhook,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -120,6 +123,10 @@ fn main() -> Result<()> {
             let state = state_entity.clone();
             move |cx| ReadingPanePlaceholder::new(cx, state.clone())
         });
+        let calendar = cx.new({
+            let state = state_entity.clone();
+            move |cx| CalendarPlaceholder::new(cx, state.clone())
+        });
         let mail_split = cx.new(|_| {
             PaneGroup::horizontal()
                 .first(message_list.clone().into())
@@ -132,9 +139,15 @@ fn main() -> Result<()> {
                         .first_max(Some(640.0)),
                 )
         });
+        let main_content = cx.new({
+            let state = state_entity.clone();
+            move |cx| {
+                MainContentPlaceholder::new(cx, state.clone(), mail_split.clone(), calendar.clone())
+            }
+        });
         let pane = cx.new(|cx| Pane::new(cx));
         pane.update(cx, |pane, cx| {
-            pane.set_content(mail_split.clone().into(), cx);
+            pane.set_content(main_content.clone().into(), cx);
         });
 
         let status_bar = cx.new({
@@ -716,6 +729,9 @@ struct NativeAppState {
     selected_message_labels: Vec<Label>,
     selected_message_labels_resource: AsyncResource<Vec<Label>, String>,
     selected_event: Option<String>,
+    calendar_week_start: NaiveDate,
+    calendar_events: Vec<CalendarEvent>,
+    calendar_events_resource: AsyncResource<Vec<CalendarEvent>, String>,
     search: SearchState,
     messages: Vec<Message>,
     messages_resource: AsyncResource<Vec<Message>, String>,
@@ -746,6 +762,9 @@ impl Default for NativeAppState {
             selected_message_labels: Vec::new(),
             selected_message_labels_resource: AsyncResource::new(),
             selected_event: None,
+            calendar_week_start: current_calendar_week_start(),
+            calendar_events: Vec::new(),
+            calendar_events_resource: AsyncResource::new(),
             search: SearchState::default(),
             messages: Vec::new(),
             messages_resource: AsyncResource::new(),
@@ -949,10 +968,7 @@ impl Render for EmailDesktopApp {
             )
             .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &SelectCalendarView, _, cx| {
-                    app.state.update(cx, |state, cx| {
-                        state.selected_view = SelectedView::Calendar;
-                        cx.notify();
-                    });
+                    start_calendar_view(&app.state, cx);
                     cx.notify();
                 }),
             )
@@ -1257,6 +1273,39 @@ impl Render for SidebarPlaceholder {
         }
 
         sidebar
+    }
+}
+
+#[derive(Clone)]
+struct MainContentPlaceholder {
+    state: Entity<NativeAppState>,
+    mail_split: Entity<PaneGroup>,
+    calendar: Entity<CalendarPlaceholder>,
+}
+
+impl MainContentPlaceholder {
+    fn new(
+        cx: &mut Context<Self>,
+        state: Entity<NativeAppState>,
+        mail_split: Entity<PaneGroup>,
+        calendar: Entity<CalendarPlaceholder>,
+    ) -> Self {
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        Self {
+            state,
+            mail_split,
+            calendar,
+        }
+    }
+}
+
+impl Render for MainContentPlaceholder {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.state.read(cx).selected_view == SelectedView::Calendar {
+            self.calendar.clone().into_any_element()
+        } else {
+            self.mail_split.clone().into_any_element()
+        }
     }
 }
 
@@ -1678,6 +1727,26 @@ impl ReadingPanePlaceholder {
             input.set_value(state.compose.body.clone(), cx);
         });
         self.synced_compose_revision = state.compose.revision;
+    }
+}
+
+#[derive(Clone)]
+struct CalendarPlaceholder {
+    state: Entity<NativeAppState>,
+}
+
+impl CalendarPlaceholder {
+    fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        Self { state }
+    }
+}
+
+impl Render for CalendarPlaceholder {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx).clone();
+        calendar_placeholder(&self.state, &state, cx)
     }
 }
 
@@ -6478,6 +6547,9 @@ fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeApp
     let selected_message_labels = state.selected_message_labels.clone();
     let selected_message_labels_resource = state.selected_message_labels_resource.clone();
     let selected_event = state.selected_event.clone();
+    let calendar_week_start = state.calendar_week_start;
+    let calendar_events = state.calendar_events.clone();
+    let calendar_events_resource = state.calendar_events_resource.clone();
     let search = state.search.clone();
     let messages = state.messages.clone();
     let messages_resource = state.messages_resource.clone();
@@ -6498,6 +6570,9 @@ fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeApp
         loaded.selected_message_labels = selected_message_labels;
         loaded.selected_message_labels_resource = selected_message_labels_resource;
         loaded.selected_event = selected_event;
+        loaded.calendar_week_start = calendar_week_start;
+        loaded.calendar_events = calendar_events;
+        loaded.calendar_events_resource = calendar_events_resource;
         loaded.search = search;
         loaded.messages = messages;
         loaded.messages_resource = messages_resource;
@@ -6525,6 +6600,9 @@ fn apply_account_delete_reload(
     let density = state.density.clone();
     let selected_view = state.selected_view.clone();
     let selected_event = state.selected_event.clone();
+    let calendar_week_start = state.calendar_week_start;
+    let calendar_events = state.calendar_events.clone();
+    let calendar_events_resource = state.calendar_events_resource.clone();
     let palette = state.palette.clone();
     let sync = state.sync.clone();
     let account_setup_open = state.modals.account_setup_open;
@@ -6541,6 +6619,9 @@ fn apply_account_delete_reload(
     loaded.density = density;
     loaded.selected_view = selected_view;
     loaded.selected_event = selected_event;
+    loaded.calendar_week_start = calendar_week_start;
+    loaded.calendar_events = calendar_events;
+    loaded.calendar_events_resource = calendar_events_resource;
     loaded.palette = palette;
     loaded.sync = sync;
     loaded.compose = compose;
@@ -7321,6 +7402,62 @@ impl NativeLabelMutation {
             Self::Add { message_id, .. } | Self::Remove { message_id, .. } => message_id,
         }
     }
+}
+
+fn load_calendar_events(
+    base_url: String,
+    from: chrono::DateTime<Utc>,
+    to: chrono::DateTime<Utc>,
+) -> Result<Vec<CalendarEvent>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .list_events(None, Some(from), Some(to))
+            .await
+            .context("list calendar events")
+    })
+}
+
+fn apply_loaded_calendar_events(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    events: Vec<CalendarEvent>,
+) -> bool {
+    if !state
+        .calendar_events_resource
+        .resolve(request, events.clone())
+    {
+        return false;
+    }
+
+    if let Some(selected_event) = state.selected_event.as_deref() {
+        if !events.iter().any(|event| event.id == selected_event) {
+            state.selected_event = None;
+        }
+    }
+    state.calendar_events = events;
+    state.last_error = None;
+    true
+}
+
+fn reject_calendar_events_load(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    err: anyhow::Error,
+) -> bool {
+    let message = err.to_string();
+    if !state
+        .calendar_events_resource
+        .reject(request, message.clone())
+    {
+        return false;
+    }
+
+    state.calendar_events.clear();
+    state.selected_event = None;
+    state.last_error = Some(message);
+    true
 }
 
 fn start_message_collection_load(
@@ -9084,6 +9221,29 @@ mod tests {
         }
     }
 
+    fn calendar_event(id: &str, day: u32) -> CalendarEvent {
+        CalendarEvent {
+            id: id.to_string(),
+            calendar_id: "primary".to_string(),
+            provider_event_id: None,
+            title: "Planning".to_string(),
+            description: None,
+            start_at: Utc
+                .with_ymd_and_hms(2026, 5, day, 14, 0, 0)
+                .single()
+                .expect("valid start"),
+            end_at: Utc
+                .with_ymd_and_hms(2026, 5, day, 15, 0, 0)
+                .single()
+                .expect("valid end"),
+            location: None,
+            is_all_day: false,
+            recurrence_rule: None,
+            attendees: Vec::new(),
+            meet_link: None,
+        }
+    }
+
     #[test]
     fn native_window_title_uses_folder_unread_counts() {
         let mut state = NativeAppState::default();
@@ -9444,6 +9604,52 @@ mod tests {
         assert_eq!(sender_initials("Ada Lovelace"), "AL");
         assert_eq!(sender_initials("alerts@example.test"), "A");
         assert_eq!(sender_initials(""), "U");
+    }
+
+    #[test]
+    fn calendar_week_helpers_use_monday_start_and_week_range() {
+        let sunday = NaiveDate::from_ymd_opt(2026, 5, 31).expect("date");
+        let monday = NaiveDate::from_ymd_opt(2026, 5, 25).expect("date");
+        assert_eq!(monday_of_date(sunday), monday);
+        assert_eq!(calendar_week_days(monday).len(), 7);
+        assert_eq!(calendar_week_range_text(monday), "May 25 - 31, 2026");
+
+        let year_end = NaiveDate::from_ymd_opt(2026, 12, 28).expect("date");
+        assert_eq!(
+            calendar_week_range_text(year_end),
+            "Dec 28, 2026 - Jan 3, 2027"
+        );
+    }
+
+    #[test]
+    fn applying_calendar_events_tracks_selection_and_stale_requests() {
+        let mut state = NativeAppState {
+            selected_event: Some("keep".to_string()),
+            ..NativeAppState::default()
+        };
+        let stale = state.calendar_events_resource.begin_load();
+        let current = state.calendar_events_resource.begin_load();
+
+        assert!(!apply_loaded_calendar_events(
+            &mut state,
+            stale,
+            vec![calendar_event("stale", 26)]
+        ));
+        assert!(apply_loaded_calendar_events(
+            &mut state,
+            current,
+            vec![calendar_event("keep", 26)]
+        ));
+        assert_eq!(state.selected_event.as_deref(), Some("keep"));
+        assert_eq!(state.calendar_events.len(), 1);
+
+        let request = state.calendar_events_resource.begin_load();
+        assert!(apply_loaded_calendar_events(
+            &mut state,
+            request,
+            vec![calendar_event("other", 27)]
+        ));
+        assert_eq!(state.selected_event, None);
     }
 
     #[test]
@@ -10895,6 +11101,78 @@ fn start_advanced_search(
     );
 }
 
+fn start_calendar_view(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let should_load = state_entity.update(app_cx, |state, cx| {
+        state.selected_view = SelectedView::Calendar;
+        state.selected_message_ids.clear();
+        let should_load = state.calendar_events_resource.is_idle()
+            || state.calendar_events_resource.is_error()
+            || state.calendar_events.is_empty();
+        cx.notify();
+        should_load
+    });
+
+    if should_load {
+        start_calendar_events_load(state_entity, app_cx);
+    }
+}
+
+fn shift_calendar_week(state_entity: &Entity<NativeAppState>, weeks: i64, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.calendar_week_start += ChronoDuration::days(weeks.saturating_mul(7));
+        state.selected_view = SelectedView::Calendar;
+        state.selected_event = None;
+        cx.notify();
+    });
+    start_calendar_events_load(state_entity, app_cx);
+}
+
+fn reset_calendar_week(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.calendar_week_start = current_calendar_week_start();
+        state.selected_view = SelectedView::Calendar;
+        state.selected_event = None;
+        cx.notify();
+    });
+    start_calendar_events_load(state_entity, app_cx);
+}
+
+fn start_calendar_events_load(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let (base_url, request, from, to) = state_entity.update(app_cx, |state, cx| {
+        let request = state.calendar_events_resource.begin_load();
+        let (from, to) = calendar_week_bounds_utc(state.calendar_week_start);
+        state.last_error = None;
+        cx.notify();
+        (state.api_base_url.clone(), request, from, to)
+    });
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_calendar_events(base_url, from, to) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(events) => {
+                            apply_loaded_calendar_events(state, request, events);
+                        }
+                        Err(err) => {
+                            reject_calendar_events_load(state, request, err);
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native calendar events load: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
 fn sync_status_strip(status: &NativeSyncStatus, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
     let theme = cx.theme();
     let colors = theme.colors.clone();
@@ -11018,10 +11296,7 @@ fn sidebar_footer(
                     .on_click({
                         let state_entity = state_entity.clone();
                         move |_, _, app_cx| {
-                            state_entity.update(app_cx, |state, cx| {
-                                state.selected_view = SelectedView::Calendar;
-                                cx.notify();
-                            });
+                            start_calendar_view(&state_entity, app_cx);
                         }
                     }),
                 ),
@@ -13139,6 +13414,713 @@ fn reading_placeholder(
                     )
                 }),
         )
+}
+
+fn calendar_placeholder(
+    state_entity: &Entity<NativeAppState>,
+    state: &NativeAppState,
+    cx: &mut Context<CalendarPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let days = calendar_week_days(state.calendar_week_start);
+    let events = state.calendar_events.clone();
+    let selected_event = state
+        .selected_event
+        .as_deref()
+        .and_then(|event_id| events.iter().find(|event| event.id == event_id))
+        .cloned();
+    let status = calendar_status_text(state);
+
+    let mut header = div()
+        .px(px(20.0))
+        .py(px(12.0))
+        .border_b_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .child(
+            div()
+                .text_size(px(typography.subtitle.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.on_neutral)
+                .child("Calendar"),
+        )
+        .child(div().flex_1())
+        .child(
+            Button::new("calendar-prev-week")
+                .label("Previous")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    move |_, _, app_cx| shift_calendar_week(&state_entity, -1, app_cx)
+                }),
+        )
+        .child(
+            Button::new("calendar-today")
+                .label("Today")
+                .appearance(ButtonAppearance::Neutral)
+                .size(ButtonSize::Compact)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    move |_, _, app_cx| reset_calendar_week(&state_entity, app_cx)
+                }),
+        )
+        .child(
+            Button::new("calendar-next-week")
+                .label("Next")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    move |_, _, app_cx| shift_calendar_week(&state_entity, 1, app_cx)
+                }),
+        )
+        .child(
+            div()
+                .min_w(px(160.0))
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child(calendar_week_range_text(state.calendar_week_start)),
+        );
+
+    if let Some((message, is_error)) = status {
+        header = header.child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(if is_error {
+                    colors.status_error
+                } else {
+                    colors.on_subtle
+                })
+                .child(message),
+        );
+    }
+
+    let mut content = div().flex_1().min_h_0().flex().bg(colors.surface).child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(calendar_day_header_row(&days, cx))
+            .child(calendar_all_day_row(
+                state_entity,
+                &events,
+                &days,
+                state,
+                cx,
+            ))
+            .child(calendar_time_grid(state_entity, &events, &days, state, cx)),
+    );
+
+    if let Some(event) = selected_event {
+        content = content.child(calendar_event_detail(state_entity, &event, cx));
+    }
+
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .bg(colors.surface)
+        .child(header)
+        .child(content)
+}
+
+fn calendar_day_header_row(days: &[NaiveDate], cx: &mut Context<CalendarPlaceholder>) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let mut row = div()
+        .h(px(52.0))
+        .flex()
+        .border_b_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .bg(colors.surface)
+        .child(div().w(px(72.0)).flex_none());
+
+    for day in days {
+        let today = *day == Local::now().date_naive();
+        row = row.child(
+            div()
+                .flex_1()
+                .min_w(px(88.0))
+                .h_full()
+                .px(px(8.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(2.0))
+                .border_l_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .child(
+                    div()
+                        .text_size(px(typography.caption.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_subtle)
+                        .child(day.format("%a").to_string()),
+                )
+                .child(
+                    div()
+                        .size(px(24.0))
+                        .rounded(px(999.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(if today { colors.accent } else { colors.surface })
+                        .text_size(px(typography.body.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(if today {
+                            colors.on_accent
+                        } else {
+                            colors.on_neutral
+                        })
+                        .child(day.day().to_string()),
+                ),
+        );
+    }
+
+    row
+}
+
+fn calendar_all_day_row(
+    state_entity: &Entity<NativeAppState>,
+    events: &[CalendarEvent],
+    days: &[NaiveDate],
+    state: &NativeAppState,
+    cx: &mut Context<CalendarPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let has_all_day = events.iter().any(|event| event.is_all_day);
+    let mut row = div()
+        .min_h(px(if has_all_day { 44.0 } else { 0.0 }))
+        .flex()
+        .border_b_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .when(has_all_day, |row| {
+            row.child(
+                div()
+                    .w(px(72.0))
+                    .flex_none()
+                    .px(px(8.0))
+                    .py(px(8.0))
+                    .text_size(px(typography.caption.size))
+                    .text_color(colors.on_subtle)
+                    .child("all day"),
+            )
+        });
+
+    if !has_all_day {
+        return row;
+    }
+
+    for day in days {
+        let day_events = events
+            .iter()
+            .filter(|event| event.is_all_day && calendar_event_matches_day(event, *day))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut cell = div()
+            .flex_1()
+            .min_w(px(88.0))
+            .px(px(6.0))
+            .py(px(6.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .border_l_1()
+            .border_color(colors.stroke_neutral_subtle);
+
+        for event in day_events {
+            cell = cell.child(calendar_event_chip(
+                state_entity,
+                event,
+                state.selected_event.as_deref(),
+                true,
+                cx,
+            ));
+        }
+        row = row.child(cell);
+    }
+
+    row
+}
+
+fn calendar_time_grid(
+    state_entity: &Entity<NativeAppState>,
+    events: &[CalendarEvent],
+    days: &[NaiveDate],
+    state: &NativeAppState,
+    cx: &mut Context<CalendarPlaceholder>,
+) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let mut grid = div()
+        .id("calendar-time-grid")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .flex()
+        .flex_col();
+
+    if events.is_empty() && !state.calendar_events_resource.is_loading() {
+        grid = grid.child(
+            div()
+                .h(px(46.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("No events this week."),
+        );
+    }
+
+    for hour in 0..24 {
+        let mut row = div()
+            .min_h(px(48.0))
+            .flex()
+            .border_b_1()
+            .border_color(colors.stroke_neutral_subtle)
+            .child(
+                div()
+                    .w(px(72.0))
+                    .flex_none()
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .text_size(px(typography.caption.size))
+                    .text_color(colors.on_subtle)
+                    .child(calendar_hour_label(hour)),
+            );
+
+        for day in days {
+            let hour_events = events
+                .iter()
+                .filter(|event| {
+                    !event.is_all_day
+                        && calendar_event_matches_day(event, *day)
+                        && calendar_event_local_hour(event) == hour
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut cell = div()
+                .flex_1()
+                .min_w(px(88.0))
+                .min_h(px(48.0))
+                .px(px(5.0))
+                .py(px(5.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .border_l_1()
+                .border_color(colors.stroke_neutral_subtle);
+
+            for event in hour_events {
+                cell = cell.child(calendar_event_chip(
+                    state_entity,
+                    event,
+                    state.selected_event.as_deref(),
+                    false,
+                    cx,
+                ));
+            }
+            row = row.child(cell);
+        }
+
+        grid = grid.child(row);
+    }
+
+    grid.into_any_element()
+}
+
+fn calendar_event_chip(
+    state_entity: &Entity<NativeAppState>,
+    event: CalendarEvent,
+    selected_event_id: Option<&str>,
+    compact: bool,
+    cx: &mut Context<CalendarPlaceholder>,
+) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let selected = selected_event_id == Some(event.id.as_str());
+    let event_id = event.id.clone();
+    let title = event.title.clone();
+    let time_label = calendar_event_time_label(&event);
+    div()
+        .id(SharedString::from(format!(
+            "calendar-event-chip-{event_id}"
+        )))
+        .min_h(px(if compact { 24.0 } else { 36.0 }))
+        .px(px(7.0))
+        .py(px(4.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(if selected {
+            colors.stroke_accent
+        } else {
+            colors.stroke_neutral_subtle
+        })
+        .bg(if selected {
+            colors.accent
+        } else {
+            colors.neutral
+        })
+        .text_color(if selected {
+            colors.on_accent
+        } else {
+            colors.on_neutral
+        })
+        .cursor_pointer()
+        .on_click({
+            let state_entity = state_entity.clone();
+            move |_, _, app_cx| {
+                toggle_calendar_event_selection(&state_entity, event_id.clone(), app_cx)
+            }
+        })
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(theme.typography.caption.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title),
+        )
+        .when(!compact, |chip| {
+            chip.child(
+                div()
+                    .pt(px(2.0))
+                    .text_size(px(10.0))
+                    .text_color(if selected {
+                        colors.on_accent
+                    } else {
+                        colors.on_subtle
+                    })
+                    .child(time_label),
+            )
+        })
+        .into_any_element()
+}
+
+fn calendar_event_detail(
+    state_entity: &Entity<NativeAppState>,
+    event: &CalendarEvent,
+    cx: &mut Context<CalendarPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let mut panel = div()
+        .w(px(340.0))
+        .flex_none()
+        .min_h_0()
+        .border_l_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .bg(colors.surface)
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(16.0))
+                .py(px(12.0))
+                .border_b_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(typography.subtitle.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_neutral)
+                        .child(event.title.clone()),
+                )
+                .child(
+                    Button::new("calendar-detail-close")
+                        .label("Close")
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| {
+                                state_entity.update(app_cx, |state, cx| {
+                                    state.selected_event = None;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .id("calendar-detail-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(calendar_detail_row(
+                    "Time",
+                    calendar_event_detail_time(event),
+                    cx,
+                ))
+                .when_some(event.location.clone(), |body, location| {
+                    body.child(calendar_detail_row("Location", location, cx))
+                })
+                .when_some(event.meet_link.clone(), |body, meet_link| {
+                    body.child(
+                        Button::new("calendar-join-meeting")
+                            .label("Join meeting")
+                            .appearance(ButtonAppearance::Accent)
+                            .size(ButtonSize::Compact)
+                            .on_click({
+                                let state_entity = state_entity.clone();
+                                move |_, _, app_cx| {
+                                    open_event_meet_link(&state_entity, meet_link.clone(), app_cx);
+                                }
+                            }),
+                    )
+                })
+                .when_some(event.description.clone(), |body, description| {
+                    body.child(calendar_detail_row("Description", description, cx))
+                }),
+        );
+
+    if !event.attendees.is_empty() {
+        let mut attendees = div().flex().flex_col().gap(px(4.0)).child(
+            div()
+                .text_size(px(typography.caption.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.on_subtle)
+                .child("Attendees"),
+        );
+        for attendee in &event.attendees {
+            attendees = attendees.child(
+                div()
+                    .text_size(px(typography.body.size))
+                    .text_color(colors.on_neutral)
+                    .child(calendar_attendee_label(attendee)),
+            );
+        }
+        panel = panel.child(
+            div()
+                .px(px(16.0))
+                .pb(px(16.0))
+                .border_t_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .child(attendees),
+        );
+    }
+
+    panel
+}
+
+fn calendar_detail_row(
+    label: &'static str,
+    value: String,
+    cx: &mut Context<CalendarPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_size(px(typography.caption.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.on_subtle)
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(px(typography.body.size))
+                .line_height(px(typography.body.line_height))
+                .text_color(colors.on_neutral)
+                .child(value),
+        )
+}
+
+fn current_calendar_week_start() -> NaiveDate {
+    monday_of_date(Local::now().date_naive())
+}
+
+fn monday_of_date(date: NaiveDate) -> NaiveDate {
+    date - ChronoDuration::days(date.weekday().num_days_from_monday() as i64)
+}
+
+fn calendar_week_days(week_start: NaiveDate) -> Vec<NaiveDate> {
+    (0..7)
+        .map(|offset| week_start + ChronoDuration::days(offset))
+        .collect()
+}
+
+fn calendar_week_bounds_utc(
+    week_start: NaiveDate,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    let start = Local
+        .with_ymd_and_hms(
+            week_start.year(),
+            week_start.month(),
+            week_start.day(),
+            0,
+            0,
+            0,
+        )
+        .single()
+        .unwrap_or_else(Local::now);
+    let end = start + ChronoDuration::days(7);
+    (start.with_timezone(&Utc), end.with_timezone(&Utc))
+}
+
+fn calendar_week_range_text(week_start: NaiveDate) -> String {
+    let end = week_start + ChronoDuration::days(6);
+    let start_text = format!("{} {}", week_start.format("%b"), week_start.day());
+    if week_start.year() == end.year() {
+        let end_text = if week_start.month() == end.month() {
+            end.day().to_string()
+        } else {
+            format!("{} {}", end.format("%b"), end.day())
+        };
+        format!("{start_text} - {end_text}, {}", end.year())
+    } else {
+        format!(
+            "{start_text}, {} - {} {}, {}",
+            week_start.year(),
+            end.format("%b"),
+            end.day(),
+            end.year()
+        )
+    }
+}
+
+fn calendar_status_text(state: &NativeAppState) -> Option<(String, bool)> {
+    if state.calendar_events_resource.is_loading() {
+        return Some(("Loading events...".to_string(), false));
+    }
+    state
+        .calendar_events_resource
+        .error()
+        .map(|error| (format!("Events failed to load: {error}"), true))
+}
+
+fn calendar_event_matches_day(event: &CalendarEvent, day: NaiveDate) -> bool {
+    event.start_at.with_timezone(&Local).date_naive() == day
+}
+
+fn calendar_event_local_hour(event: &CalendarEvent) -> u32 {
+    event.start_at.with_timezone(&Local).hour()
+}
+
+fn calendar_hour_label(hour: u32) -> String {
+    match hour {
+        0 => "12 AM".to_string(),
+        1..=11 => format!("{hour} AM"),
+        12 => "12 PM".to_string(),
+        _ => format!("{} PM", hour - 12),
+    }
+}
+
+fn calendar_time_label(value: &chrono::DateTime<Utc>) -> String {
+    value.with_timezone(&Local).format("%-I:%M %p").to_string()
+}
+
+fn calendar_event_time_label(event: &CalendarEvent) -> String {
+    if event.is_all_day {
+        "All day".to_string()
+    } else {
+        format!(
+            "{} - {}",
+            calendar_time_label(&event.start_at),
+            calendar_time_label(&event.end_at)
+        )
+    }
+}
+
+fn calendar_event_detail_time(event: &CalendarEvent) -> String {
+    if event.is_all_day {
+        return event
+            .start_at
+            .with_timezone(&Local)
+            .format("%A, %B %-d, %Y")
+            .to_string();
+    }
+
+    let start = event.start_at.with_timezone(&Local);
+    let end = event.end_at.with_timezone(&Local);
+    if start.date_naive() == end.date_naive() {
+        format!(
+            "{} - {}",
+            start.format("%a, %b %-d, %-I:%M %p"),
+            end.format("%-I:%M %p")
+        )
+    } else {
+        format!(
+            "{} - {}",
+            start.format("%a, %b %-d, %-I:%M %p"),
+            end.format("%a, %b %-d, %-I:%M %p")
+        )
+    }
+}
+
+fn calendar_attendee_label(attendee: &email_types::Attendee) -> String {
+    let name = attendee
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(attendee.email.as_str());
+    let status = attendee
+        .response_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .unwrap_or("needs action");
+    if name == attendee.email {
+        format!("{name} - {status}")
+    } else {
+        format!("{name} <{}> - {status}", attendee.email)
+    }
+}
+
+fn toggle_calendar_event_selection(
+    state_entity: &Entity<NativeAppState>,
+    event_id: String,
+    app_cx: &mut App,
+) {
+    state_entity.update(app_cx, |state, cx| {
+        state.selected_event = if state.selected_event.as_deref() == Some(event_id.as_str()) {
+            None
+        } else {
+            Some(event_id)
+        };
+        cx.notify();
+    });
+}
+
+fn open_event_meet_link(state_entity: &Entity<NativeAppState>, url: String, app_cx: &mut App) {
+    let result = open_url_in_browser(&url);
+    state_entity.update(app_cx, |state, cx| {
+        match result {
+            Ok(_) => state.last_error = None,
+            Err(err) => state.last_error = Some(err.to_string()),
+        }
+        cx.notify();
+    });
 }
 
 fn selected_document(state: &NativeAppState) -> RichDocument {

@@ -39,7 +39,7 @@ Status values:
 | Current | Native | Verified | Notes |
 |---|---|---|---|
 | 3-pane mail layout: sidebar, message list, reading pane. | FluentGUI workspace with resizable sidebar and message-list split. | Current audited; pending native. | Requires generic split panels. |
-| Calendar replaces message list plus reading pane while sidebar remains. | Same view switch. | Current audited; pending native. | Preserve selected event state. |
+| Calendar replaces message list plus reading pane while sidebar remains. | Same view switch. | Native implemented; cargo check. | Calendar route owns the main content while sidebar remains mounted. |
 | Persist theme and density. | Persist native theme and density. | Current audited; pending native. | Current store persists only these keys. |
 | Sidebar width and message-list width persist in localStorage. | Persist in native settings. | Current audited; pending native. | Current keys are `email_sidebar_w` and `email_msglist_w`. |
 | Density controls from sidebar footer and settings. | Same. | Current audited; pending native. | Levels `0..8`. |
@@ -55,7 +55,7 @@ Status values:
 | Search suggestion keyboard Up/Down/Enter/Escape. | Same. | Current audited; pending native. | Enter without active suggestion keeps full search. |
 | Advanced search filter button state. | Same. | Native implemented; automated tests. | Opens native modal; active state follows advanced search state. |
 | Smart folders All Inboxes, Unread, Flagged, Snoozed. | Same. | Current audited; pending native. | API IDs are `all`, `unread`, `flagged`, `snoozed`. |
-| Calendar nav item. | Same. | Current audited; pending native. | Switches to calendar. |
+| Calendar nav item. | Same. | Native implemented; cargo check. | Switches to calendar and loads the active week. |
 | Labels section with color dots. | Same. | Current audited; pending native. | Labels currently fetched only for first account. |
 | Per-account collapsible sections. | Same. | Current audited; pending native. | Preserve account unread badge. |
 | Special folders ordered inbox, sent, drafts, archive, trash, spam. | Same. | Current audited; pending native. | Backend list orders by `special_use`. |
@@ -156,13 +156,13 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Week view Monday to Sunday. | Same. | Current audited; pending native. | Preserve `mondayOf` behavior. |
-| Toolbar title, previous week, Today, next week, week range. | Same. | Current audited; pending native. | Preserve formatting. |
+| Week view Monday to Sunday. | Same. | Native implemented; automated tests. | Native week helpers preserve Monday start. |
+| Toolbar title, previous week, Today, next week, week range. | Same. | Native implemented; automated tests. | Native week range formatting covered. |
 | Scrolls to around 8am on mount. | Same. | Current audited; pending native. | Needs native scroll support. |
-| All-day event row when all-day events exist. | Same. | Current audited; pending native. | Fixtures include all-day event. |
-| Timed grid with 24 hours and event chips. | Same. | Current audited; pending native. | Fixtures include timed event. |
-| Event selection toggles detail panel. | Same. | Current audited; pending native. | Search-selected event must open detail. |
-| Detail shows title, time, location, meet link, description, attendees, linked emails. | Same. | Current audited; pending native. | Join meeting opens external URL. |
+| All-day event row when all-day events exist. | Same. | Native implemented; cargo check. | Native row renders per-day all-day chips. |
+| Timed grid with 24 hours and event chips. | Same. | Native implemented; cargo check. | Native grid groups chips by local day and start hour. |
+| Event selection toggles detail panel. | Same. | Native implemented; cargo check. | Search-selected event navigation remains pending. |
+| Detail shows title, time, location, meet link, description, attendees, linked emails. | Same. | Native partial; cargo check. | Title/time/location/meet link/description/attendees implemented; linked emails pending. |
 | Linked emails can navigate to message and unlink. | Same. | Current audited; pending native. | Current UI has no add-link control. |
 | Calendar events appear in search suggestions/results. | Same. | Current audited; pending native. | Covered by fixture titles. |
 
