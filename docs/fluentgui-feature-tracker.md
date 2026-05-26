@@ -104,7 +104,7 @@ Status values:
 | Compose replaces reading pane when open. | Same. | Native implemented; cargo check. | No detached window currently. |
 | Modes: new, reply, forward. | Same. | Native implemented; automated tests. | Mode tag displayed; reply/forward payload behavior covered. |
 | Fields: To, optional Cc/Bcc, Subject, body. | Same. | Native implemented; cargo check. | Recipient token inputs and multiline body editor are wired. |
-| Recipient autocomplete from message/contact history. | Same. | Native partial; cargo check. | Native suggestions come from visible message senders; server-backed contact suggestions remain pending. |
+| Recipient autocomplete from message/contact history. | Same. | Native implemented; automated tests. | Native suggestions merge server-backed contact suggestions with visible message senders and reject stale responses. |
 | Account signature appended on send and previewed in editor. | Same. | Native implemented; automated tests. | Preserves `--` separator and waits for signature load. |
 | Reply includes quoted block on send and quote preview. | Same. | Native implemented; automated tests. | Quote source is text body. |
 | Forward pre-fills forwarded message body. | Same. | Native implemented; automated tests. | Forward omits `In-Reply-To` and preserves forwarded body seed. |

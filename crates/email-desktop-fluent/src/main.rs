@@ -15,7 +15,7 @@ use email_server::{run_server, Config};
 use email_types::{
     Account, AccountSettings, ActionInput, BulkAction, BulkRequest, CalendarEvent,
     CalendarSearchResult, CalendarSuggestion, Condition, ConditionField, ConditionGroup,
-    ConditionInput, ConditionOperator, CreateAccount, CreateWebhook, EventLink, Folder,
+    ConditionInput, ConditionOperator, Contact, CreateAccount, CreateWebhook, EventLink, Folder,
     FullMessage, Label, MatchMode, Message, MessageSuggestion, PatchFolder, PatchMessageRequest,
     RuleDto, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook,
     Webhook,
@@ -692,6 +692,9 @@ struct ComposeState {
     signature_loading: bool,
     show_cc: bool,
     show_bcc: bool,
+    recipient_suggestions_query: Option<String>,
+    recipient_suggestions: Vec<Contact>,
+    recipient_suggestions_resource: AsyncResource<Vec<Contact>, String>,
     revision: u64,
     sending: bool,
     error: Option<String>,
@@ -1619,6 +1622,7 @@ struct ReadingPanePlaceholder {
     compose_body_input: Entity<Textarea>,
     snooze_picker: Entity<DateTimePicker>,
     synced_compose_revision: u64,
+    synced_recipient_suggestions: Vec<TokenInputSuggestion>,
 }
 
 impl ReadingPanePlaceholder {
@@ -1627,11 +1631,18 @@ impl ReadingPanePlaceholder {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         let suggestions = recipient_suggestions(state.read(cx));
         let compose_suggestions = suggestions.clone();
+        let recipient_state = state.clone();
         let recipient_input = cx.new(move |_| {
             TokenInput::new()
                 .placeholder("Add recipient")
                 .suggestions(suggestions.clone())
                 .allow_freeform(true)
+                .on_query_change({
+                    let state = recipient_state.clone();
+                    move |query, app_cx| {
+                        start_recipient_suggestions_load(&state, query.to_string(), app_cx);
+                    }
+                })
         });
         let quick_reply_input = cx.new(|_| TextInput::new().placeholder("Write a quick reply"));
         let compose_to_input = cx.new({
@@ -1642,6 +1653,12 @@ impl ReadingPanePlaceholder {
                     .placeholder("recipient@example.com")
                     .suggestions(suggestions.clone())
                     .allow_freeform(true)
+                    .on_query_change({
+                        let state = state.clone();
+                        move |query, app_cx| {
+                            start_recipient_suggestions_load(&state, query.to_string(), app_cx);
+                        }
+                    })
                     .on_change({
                         let state = state.clone();
                         move |tokens, app_cx| {
@@ -1663,6 +1680,12 @@ impl ReadingPanePlaceholder {
                     .placeholder("cc@example.com")
                     .suggestions(suggestions.clone())
                     .allow_freeform(true)
+                    .on_query_change({
+                        let state = state.clone();
+                        move |query, app_cx| {
+                            start_recipient_suggestions_load(&state, query.to_string(), app_cx);
+                        }
+                    })
                     .on_change({
                         let state = state.clone();
                         move |tokens, app_cx| {
@@ -1678,11 +1701,18 @@ impl ReadingPanePlaceholder {
         });
         let compose_bcc_input = cx.new({
             let state = state.clone();
+            let suggestions = compose_suggestions.clone();
             move |_| {
                 TokenInput::new()
                     .placeholder("bcc@example.com")
-                    .suggestions(compose_suggestions.clone())
+                    .suggestions(suggestions.clone())
                     .allow_freeform(true)
+                    .on_query_change({
+                        let state = state.clone();
+                        move |query, app_cx| {
+                            start_recipient_suggestions_load(&state, query.to_string(), app_cx);
+                        }
+                    })
                     .on_change({
                         let state = state.clone();
                         move |tokens, app_cx| {
@@ -1739,6 +1769,7 @@ impl ReadingPanePlaceholder {
             compose_body_input,
             snooze_picker,
             synced_compose_revision: 0,
+            synced_recipient_suggestions: compose_suggestions,
         }
     }
 }
@@ -1746,6 +1777,7 @@ impl ReadingPanePlaceholder {
 impl Render for ReadingPanePlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx).clone();
+        self.sync_recipient_suggestions(&state, cx);
         self.sync_compose_inputs(&state, cx);
         if state.compose.open {
             return compose_placeholder(
@@ -1780,6 +1812,26 @@ impl Render for ReadingPanePlaceholder {
 }
 
 impl ReadingPanePlaceholder {
+    fn sync_recipient_suggestions(&mut self, state: &NativeAppState, cx: &mut Context<Self>) {
+        let suggestions = recipient_suggestions(state);
+        if suggestions == self.synced_recipient_suggestions {
+            return;
+        }
+
+        for input in [
+            self.recipient_input.clone(),
+            self.compose_to_input.clone(),
+            self.compose_cc_input.clone(),
+            self.compose_bcc_input.clone(),
+        ] {
+            let suggestions = suggestions.clone();
+            input.update(cx, |input, cx| {
+                input.set_suggestions(suggestions, cx);
+            });
+        }
+        self.synced_recipient_suggestions = suggestions;
+    }
+
     fn sync_compose_inputs(&mut self, state: &NativeAppState, cx: &mut Context<Self>) {
         if state.compose.revision == self.synced_compose_revision {
             return;
@@ -8860,6 +8912,124 @@ fn load_account_signature(base_url: String, account_id: String) -> Result<Accoun
     })
 }
 
+fn start_recipient_suggestions_load(
+    state_entity: &Entity<NativeAppState>,
+    query: String,
+    app_cx: &mut App,
+) {
+    let query = query.trim().to_string();
+    let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
+        if query.len() < 2 {
+            clear_recipient_suggestions(&mut state.compose);
+            cx.notify();
+            return None;
+        }
+
+        if state.compose.recipient_suggestions_query.as_deref() == Some(query.as_str())
+            && (state.compose.recipient_suggestions_resource.is_loading()
+                || state.compose.recipient_suggestions_resource.is_ready())
+        {
+            return None;
+        }
+
+        state.compose.recipient_suggestions_query = Some(query.clone());
+        state.compose.recipient_suggestions.clear();
+        let request = state.compose.recipient_suggestions_resource.begin_load();
+        cx.notify();
+        Some((state.api_base_url.clone(), request))
+    }) else {
+        return;
+    };
+
+    let task_query = query.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_recipient_suggestions(base_url, task_query) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(contacts) => {
+                            apply_loaded_recipient_suggestions(state, request, &query, contacts);
+                        }
+                        Err(err) => {
+                            reject_recipient_suggestions_load(state, request, &query, err);
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native recipient suggestions: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn load_recipient_suggestions(base_url: String, query: String) -> Result<Vec<Contact>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .suggest_contacts(&query)
+            .await
+            .with_context(|| format!("suggest contacts for {query}"))
+    })
+}
+
+fn apply_loaded_recipient_suggestions(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    query: &str,
+    contacts: Vec<Contact>,
+) -> bool {
+    if state.compose.recipient_suggestions_query.as_deref() != Some(query) {
+        return false;
+    }
+    if !state
+        .compose
+        .recipient_suggestions_resource
+        .resolve(request, contacts.clone())
+    {
+        return false;
+    }
+
+    state.compose.recipient_suggestions = contacts;
+    true
+}
+
+fn reject_recipient_suggestions_load(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    query: &str,
+    err: anyhow::Error,
+) -> bool {
+    if state.compose.recipient_suggestions_query.as_deref() != Some(query) {
+        return false;
+    }
+
+    let message = err.to_string();
+    if !state
+        .compose
+        .recipient_suggestions_resource
+        .reject(request, message)
+    {
+        return false;
+    }
+
+    state.compose.recipient_suggestions.clear();
+    true
+}
+
+fn clear_recipient_suggestions(compose: &mut ComposeState) {
+    compose.recipient_suggestions_query = None;
+    compose.recipient_suggestions.clear();
+    compose.recipient_suggestions_resource.reset();
+}
+
 fn update_compose_recipients(
     state_entity: &Entity<NativeAppState>,
     field: ComposeRecipientField,
@@ -9544,6 +9714,13 @@ mod tests {
         }
     }
 
+    fn contact(name: Option<&str>, email: &str) -> Contact {
+        Contact {
+            name: name.map(str::to_string),
+            email: email.to_string(),
+        }
+    }
+
     fn calendar_suggestion(id: &str, start_at: &str) -> CalendarSuggestion {
         CalendarSuggestion {
             id: id.to_string(),
@@ -10122,6 +10299,85 @@ mod tests {
         assert_eq!(sender_initials("Ada Lovelace"), "AL");
         assert_eq!(sender_initials("alerts@example.test"), "A");
         assert_eq!(sender_initials(""), "U");
+    }
+
+    #[test]
+    fn recipient_suggestions_prefer_contacts_and_dedupe_visible_senders() {
+        let mut ada_message = message("ada-message", "inbox", true);
+        ada_message.from_name = Some("Visible Ada".to_string());
+        ada_message.from_email = Some("ada@example.test".to_string());
+        let mut bob_message = message("bob-message", "inbox", true);
+        bob_message.from_name = Some("Bob Sender".to_string());
+        bob_message.from_email = Some("bob@example.test".to_string());
+        let state = NativeAppState {
+            messages: vec![ada_message, bob_message],
+            compose: ComposeState {
+                recipient_suggestions: vec![
+                    contact(Some("Ada Contact"), "ada@example.test"),
+                    contact(None, "ops@example.test"),
+                ],
+                ..ComposeState::default()
+            },
+            ..NativeAppState::default()
+        };
+
+        let suggestions = recipient_suggestions(&state);
+        let values = suggestions
+            .iter()
+            .map(|suggestion| suggestion.value.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec!["ada@example.test", "ops@example.test", "bob@example.test"]
+        );
+        assert_eq!(suggestions[0].label.to_string(), "Ada Contact");
+        assert_eq!(
+            suggestions[0].detail.as_ref().map(ToString::to_string),
+            Some("ada@example.test".to_string())
+        );
+        assert_eq!(suggestions[1].label.to_string(), "ops@example.test");
+    }
+
+    #[test]
+    fn applying_recipient_suggestions_rejects_stale_queries() {
+        let mut state = NativeAppState::default();
+        state.compose.recipient_suggestions_query = Some("ada".to_string());
+        let stale = state.compose.recipient_suggestions_resource.begin_load();
+        let current = state.compose.recipient_suggestions_resource.begin_load();
+
+        assert!(!apply_loaded_recipient_suggestions(
+            &mut state,
+            stale,
+            "ada",
+            vec![contact(Some("Old Ada"), "old@example.test")]
+        ));
+        assert!(state.compose.recipient_suggestions.is_empty());
+
+        assert!(apply_loaded_recipient_suggestions(
+            &mut state,
+            current,
+            "ada",
+            vec![contact(Some("Ada"), "ada@example.test")]
+        ));
+        assert_eq!(state.compose.recipient_suggestions.len(), 1);
+
+        let request = state.compose.recipient_suggestions_resource.begin_load();
+        state.compose.recipient_suggestions_query = Some("bob".to_string());
+        assert!(!reject_recipient_suggestions_load(
+            &mut state,
+            request,
+            "ada",
+            anyhow!("late failure")
+        ));
+        assert_eq!(
+            state.compose.recipient_suggestions[0].email,
+            "ada@example.test"
+        );
+
+        clear_recipient_suggestions(&mut state.compose);
+        assert!(state.compose.recipient_suggestions_query.is_none());
+        assert!(state.compose.recipient_suggestions.is_empty());
+        assert!(state.compose.recipient_suggestions_resource.is_idle());
     }
 
     #[test]
@@ -16002,28 +16258,50 @@ fn recipient_suggestions(state: &NativeAppState) -> Vec<TokenInputSuggestion> {
     let mut seen = BTreeSet::new();
     let mut suggestions = Vec::new();
 
+    for contact in &state.compose.recipient_suggestions {
+        push_recipient_suggestion(
+            &mut suggestions,
+            &mut seen,
+            contact.email.as_str(),
+            contact.name.as_deref(),
+        );
+    }
+
     for message in &state.messages {
         let Some(email) = message.from_email.as_deref().map(str::trim) else {
             continue;
         };
-        if email.is_empty() || !seen.insert(email.to_lowercase()) {
-            continue;
-        }
-
-        let label = message
-            .from_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .unwrap_or(email)
-            .to_string();
-
-        let mut suggestion = TokenInputSuggestion::new(email.to_string(), label.clone());
-        if label != email {
-            suggestion = suggestion.detail(email.to_string());
-        }
-        suggestions.push(suggestion);
+        push_recipient_suggestion(
+            &mut suggestions,
+            &mut seen,
+            email,
+            message.from_name.as_deref(),
+        );
     }
 
     suggestions
+}
+
+fn push_recipient_suggestion(
+    suggestions: &mut Vec<TokenInputSuggestion>,
+    seen: &mut BTreeSet<String>,
+    email: &str,
+    name: Option<&str>,
+) {
+    let email = email.trim();
+    if email.is_empty() || !seen.insert(email.to_lowercase()) {
+        return;
+    }
+
+    let label = name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(email)
+        .to_string();
+
+    let mut suggestion = TokenInputSuggestion::new(email.to_string(), label.clone());
+    if label != email {
+        suggestion = suggestion.detail(email.to_string());
+    }
+    suggestions.push(suggestion);
 }
