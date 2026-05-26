@@ -162,8 +162,8 @@ Status values:
 | All-day event row when all-day events exist. | Same. | Native implemented; cargo check. | Native row renders per-day all-day chips. |
 | Timed grid with 24 hours and event chips. | Same. | Native implemented; cargo check. | Native grid groups chips by local day and start hour. |
 | Event selection toggles detail panel. | Same. | Native implemented; cargo check. | Search-selected event navigation remains pending. |
-| Detail shows title, time, location, meet link, description, attendees, linked emails. | Same. | Native partial; cargo check. | Title/time/location/meet link/description/attendees implemented; linked emails pending. |
-| Linked emails can navigate to message and unlink. | Same. | Current audited; pending native. | Current UI has no add-link control. |
+| Detail shows title, time, location, meet link, description, attendees, linked emails. | Same. | Native implemented; cargo check. | Linked emails load for the selected event and stay scoped to current selection. |
+| Linked emails can navigate to message and unlink. | Same. | Native implemented; automated tests. | Current UI has no add-link control; native supports open-message and unlink flows. |
 | Calendar events appear in search suggestions/results. | Same. | Current audited; pending native. | Covered by fixture titles. |
 
 ## Backend And Data Features

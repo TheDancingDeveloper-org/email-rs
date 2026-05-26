@@ -15,7 +15,7 @@ use email_server::{run_server, Config};
 use email_types::{
     Account, AccountSettings, ActionInput, BulkAction, BulkRequest, CalendarEvent, Condition,
     ConditionField, ConditionGroup, ConditionInput, ConditionOperator, CreateAccount,
-    CreateWebhook, Folder, FullMessage, Label, MatchMode, Message, PatchFolder,
+    CreateWebhook, EventLink, Folder, FullMessage, Label, MatchMode, Message, PatchFolder,
     PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount,
     UpdateRuleBody, UpdateWebhook, Webhook,
 };
@@ -732,6 +732,9 @@ struct NativeAppState {
     calendar_week_start: NaiveDate,
     calendar_events: Vec<CalendarEvent>,
     calendar_events_resource: AsyncResource<Vec<CalendarEvent>, String>,
+    calendar_event_links_event: Option<String>,
+    calendar_event_links: Vec<EventLink>,
+    calendar_event_links_resource: AsyncResource<Vec<EventLink>, String>,
     search: SearchState,
     messages: Vec<Message>,
     messages_resource: AsyncResource<Vec<Message>, String>,
@@ -765,6 +768,9 @@ impl Default for NativeAppState {
             calendar_week_start: current_calendar_week_start(),
             calendar_events: Vec::new(),
             calendar_events_resource: AsyncResource::new(),
+            calendar_event_links_event: None,
+            calendar_event_links: Vec::new(),
+            calendar_event_links_resource: AsyncResource::new(),
             search: SearchState::default(),
             messages: Vec::new(),
             messages_resource: AsyncResource::new(),
@@ -6550,6 +6556,9 @@ fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeApp
     let calendar_week_start = state.calendar_week_start;
     let calendar_events = state.calendar_events.clone();
     let calendar_events_resource = state.calendar_events_resource.clone();
+    let calendar_event_links_event = state.calendar_event_links_event.clone();
+    let calendar_event_links = state.calendar_event_links.clone();
+    let calendar_event_links_resource = state.calendar_event_links_resource.clone();
     let search = state.search.clone();
     let messages = state.messages.clone();
     let messages_resource = state.messages_resource.clone();
@@ -6573,6 +6582,9 @@ fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeApp
         loaded.calendar_week_start = calendar_week_start;
         loaded.calendar_events = calendar_events;
         loaded.calendar_events_resource = calendar_events_resource;
+        loaded.calendar_event_links_event = calendar_event_links_event;
+        loaded.calendar_event_links = calendar_event_links;
+        loaded.calendar_event_links_resource = calendar_event_links_resource;
         loaded.search = search;
         loaded.messages = messages;
         loaded.messages_resource = messages_resource;
@@ -6603,6 +6615,9 @@ fn apply_account_delete_reload(
     let calendar_week_start = state.calendar_week_start;
     let calendar_events = state.calendar_events.clone();
     let calendar_events_resource = state.calendar_events_resource.clone();
+    let calendar_event_links_event = state.calendar_event_links_event.clone();
+    let calendar_event_links = state.calendar_event_links.clone();
+    let calendar_event_links_resource = state.calendar_event_links_resource.clone();
     let palette = state.palette.clone();
     let sync = state.sync.clone();
     let account_setup_open = state.modals.account_setup_open;
@@ -6622,6 +6637,9 @@ fn apply_account_delete_reload(
     loaded.calendar_week_start = calendar_week_start;
     loaded.calendar_events = calendar_events;
     loaded.calendar_events_resource = calendar_events_resource;
+    loaded.calendar_event_links_event = calendar_event_links_event;
+    loaded.calendar_event_links = calendar_event_links;
+    loaded.calendar_event_links_resource = calendar_event_links_resource;
     loaded.palette = palette;
     loaded.sync = sync;
     loaded.compose = compose;
@@ -7419,6 +7437,38 @@ fn load_calendar_events(
     })
 }
 
+fn load_calendar_event_links(base_url: String, event_id: String) -> Result<Vec<EventLink>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .list_event_links(&event_id)
+            .await
+            .with_context(|| format!("list linked emails for calendar event {event_id}"))
+    })
+}
+
+fn remove_calendar_event_link(
+    base_url: String,
+    event_id: String,
+    message_id: String,
+) -> Result<Vec<EventLink>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .remove_event_link(&event_id, &message_id)
+            .await
+            .with_context(|| {
+                format!("unlink message {message_id} from calendar event {event_id}")
+            })?;
+        client
+            .list_event_links(&event_id)
+            .await
+            .with_context(|| format!("reload linked emails for calendar event {event_id}"))
+    })
+}
+
 fn apply_loaded_calendar_events(
     state: &mut NativeAppState,
     request: ResourceRequest,
@@ -7434,6 +7484,7 @@ fn apply_loaded_calendar_events(
     if let Some(selected_event) = state.selected_event.as_deref() {
         if !events.iter().any(|event| event.id == selected_event) {
             state.selected_event = None;
+            clear_calendar_event_links(state);
         }
     }
     state.calendar_events = events;
@@ -7456,6 +7507,54 @@ fn reject_calendar_events_load(
 
     state.calendar_events.clear();
     state.selected_event = None;
+    clear_calendar_event_links(state);
+    state.last_error = Some(message);
+    true
+}
+
+fn apply_loaded_calendar_event_links(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    event_id: &str,
+    links: Vec<EventLink>,
+) -> bool {
+    if state.selected_event.as_deref() != Some(event_id)
+        || state.calendar_event_links_event.as_deref() != Some(event_id)
+    {
+        return false;
+    }
+    if !state
+        .calendar_event_links_resource
+        .resolve(request, links.clone())
+    {
+        return false;
+    }
+
+    state.calendar_event_links = links;
+    state.last_error = None;
+    true
+}
+
+fn reject_calendar_event_links_load(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    event_id: &str,
+    err: anyhow::Error,
+) -> bool {
+    if state.selected_event.as_deref() != Some(event_id)
+        || state.calendar_event_links_event.as_deref() != Some(event_id)
+    {
+        return false;
+    }
+
+    let message = err.to_string();
+    if !state
+        .calendar_event_links_resource
+        .reject(request, message.clone())
+    {
+        return false;
+    }
+
     state.last_error = Some(message);
     true
 }
@@ -7463,6 +7562,15 @@ fn reject_calendar_events_load(
 fn start_message_collection_load(
     state_entity: &Entity<NativeAppState>,
     source: NativeMessageSource,
+    app_cx: &mut App,
+) {
+    start_message_collection_load_with_preferred(state_entity, source, None, app_cx);
+}
+
+fn start_message_collection_load_with_preferred(
+    state_entity: &Entity<NativeAppState>,
+    source: NativeMessageSource,
+    preferred_message_id: Option<String>,
     app_cx: &mut App,
 ) {
     let load_source = source.clone();
@@ -7475,7 +7583,7 @@ fn start_message_collection_load(
 
     let task = app_cx
         .background_executor()
-        .spawn(async move { load_message_collection(base_url, load_source, None) });
+        .spawn(async move { load_message_collection(base_url, load_source, preferred_message_id) });
     let state_entity = state_entity.clone();
     app_cx
         .spawn(move |async_cx: &mut gpui::AsyncApp| {
@@ -9244,6 +9352,20 @@ mod tests {
         }
     }
 
+    fn event_link(id: &str, event_id: &str, message_id: &str) -> EventLink {
+        EventLink {
+            id: id.to_string(),
+            event_id: event_id.to_string(),
+            message_id: message_id.to_string(),
+            folder_id: "inbox".to_string(),
+            subject: Some("Planning notes".to_string()),
+            from_name: Some("Ada".to_string()),
+            from_email: Some("ada@example.test".to_string()),
+            date: Some("2026-05-26T12:00:00Z".to_string()),
+            linked_at: "2026-05-26T13:00:00Z".to_string(),
+        }
+    }
+
     #[test]
     fn native_window_title_uses_folder_unread_counts() {
         let mut state = NativeAppState::default();
@@ -9650,6 +9772,64 @@ mod tests {
             vec![calendar_event("other", 27)]
         ));
         assert_eq!(state.selected_event, None);
+        assert!(state.calendar_event_links.is_empty());
+        assert!(state.calendar_event_links_resource.is_idle());
+    }
+
+    #[test]
+    fn applying_calendar_event_links_tracks_selected_event_and_stale_requests() {
+        let mut state = NativeAppState {
+            selected_event: Some("event-a".to_string()),
+            calendar_event_links_event: Some("event-a".to_string()),
+            ..NativeAppState::default()
+        };
+        let stale = state.calendar_event_links_resource.begin_load();
+        let current = state.calendar_event_links_resource.begin_load();
+
+        assert!(!apply_loaded_calendar_event_links(
+            &mut state,
+            stale,
+            "event-a",
+            vec![event_link("stale", "event-a", "old-message")]
+        ));
+        assert!(apply_loaded_calendar_event_links(
+            &mut state,
+            current,
+            "event-a",
+            vec![event_link("link-a", "event-a", "message-a")]
+        ));
+        assert_eq!(state.calendar_event_links.len(), 1);
+        assert_eq!(state.calendar_event_links[0].message_id, "message-a");
+
+        let request = state.calendar_event_links_resource.begin_load();
+        state.selected_event = Some("event-b".to_string());
+        state.calendar_event_links_event = Some("event-b".to_string());
+        assert!(!apply_loaded_calendar_event_links(
+            &mut state,
+            request,
+            "event-a",
+            vec![event_link("link-b", "event-a", "message-b")]
+        ));
+        assert_eq!(state.calendar_event_links[0].message_id, "message-a");
+    }
+
+    #[test]
+    fn calendar_link_labels_use_subject_sender_and_date_fallbacks() {
+        let mut link = event_link("link", "event", "message");
+        assert_eq!(calendar_link_subject(&link), "Planning notes");
+        assert_eq!(calendar_link_sender(&link), "Ada");
+        assert_eq!(calendar_link_meta(&link), "Ada - May 26, 2026");
+
+        link.subject = Some("   ".to_string());
+        link.from_name = Some("   ".to_string());
+        link.from_email = Some("fallback@example.test".to_string());
+        link.date = Some("not-a-date".to_string());
+        assert_eq!(calendar_link_subject(&link), "(no subject)");
+        assert_eq!(calendar_link_sender(&link), "fallback@example.test");
+        assert_eq!(
+            calendar_link_meta(&link),
+            "fallback@example.test - not-a-date"
+        );
     }
 
     #[test]
@@ -11122,6 +11302,7 @@ fn shift_calendar_week(state_entity: &Entity<NativeAppState>, weeks: i64, app_cx
         state.calendar_week_start += ChronoDuration::days(weeks.saturating_mul(7));
         state.selected_view = SelectedView::Calendar;
         state.selected_event = None;
+        clear_calendar_event_links(state);
         cx.notify();
     });
     start_calendar_events_load(state_entity, app_cx);
@@ -11132,6 +11313,7 @@ fn reset_calendar_week(state_entity: &Entity<NativeAppState>, app_cx: &mut App) 
         state.calendar_week_start = current_calendar_week_start();
         state.selected_view = SelectedView::Calendar;
         state.selected_event = None;
+        clear_calendar_event_links(state);
         cx.notify();
     });
     start_calendar_events_load(state_entity, app_cx);
@@ -11171,6 +11353,106 @@ fn start_calendar_events_load(state_entity: &Entity<NativeAppState>, app_cx: &mu
             }
         })
         .detach();
+}
+
+fn start_calendar_event_links_load(
+    state_entity: &Entity<NativeAppState>,
+    event_id: String,
+    app_cx: &mut App,
+) {
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        state.calendar_event_links.clear();
+        state.calendar_event_links_resource.reset();
+        state.calendar_event_links_event = Some(event_id.clone());
+        let request = state.calendar_event_links_resource.begin_load();
+        state.last_error = None;
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let load_event_id = event_id.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_calendar_event_links(base_url, load_event_id) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(links) => {
+                            apply_loaded_calendar_event_links(state, request, &event_id, links);
+                        }
+                        Err(err) => {
+                            reject_calendar_event_links_load(state, request, &event_id, err);
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native calendar event links load: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn start_calendar_event_unlink(
+    state_entity: &Entity<NativeAppState>,
+    event_id: String,
+    message_id: String,
+    app_cx: &mut App,
+) {
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        state.calendar_event_links_event = Some(event_id.clone());
+        let request = state.calendar_event_links_resource.begin_load();
+        state.last_error = None;
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let task_event_id = event_id.clone();
+    let task_message_id = message_id.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { remove_calendar_event_link(base_url, task_event_id, task_message_id) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(links) => {
+                            apply_loaded_calendar_event_links(state, request, &event_id, links);
+                        }
+                        Err(err) => {
+                            reject_calendar_event_links_load(state, request, &event_id, err);
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native calendar event unlink: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn open_calendar_link_message(
+    state_entity: &Entity<NativeAppState>,
+    folder_id: String,
+    message_id: String,
+    app_cx: &mut App,
+) {
+    start_message_collection_load_with_preferred(
+        state_entity,
+        NativeMessageSource::Folder(folder_id),
+        Some(message_id),
+        app_cx,
+    );
 }
 
 fn sync_status_strip(status: &NativeSyncStatus, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
@@ -13519,7 +13801,7 @@ fn calendar_placeholder(
     );
 
     if let Some(event) = selected_event {
-        content = content.child(calendar_event_detail(state_entity, &event, cx));
+        content = content.child(calendar_event_detail(state_entity, &event, state, cx));
     }
 
     div()
@@ -13813,6 +14095,7 @@ fn calendar_event_chip(
 fn calendar_event_detail(
     state_entity: &Entity<NativeAppState>,
     event: &CalendarEvent,
+    state: &NativeAppState,
     cx: &mut Context<CalendarPlaceholder>,
 ) -> gpui::Div {
     let theme = cx.theme();
@@ -13855,6 +14138,7 @@ fn calendar_event_detail(
                             move |_, _, app_cx| {
                                 state_entity.update(app_cx, |state, cx| {
                                     state.selected_event = None;
+                                    clear_calendar_event_links(state);
                                     cx.notify();
                                 });
                             }
@@ -13895,7 +14179,8 @@ fn calendar_event_detail(
                 })
                 .when_some(event.description.clone(), |body, description| {
                     body.child(calendar_detail_row("Description", description, cx))
-                }),
+                })
+                .child(calendar_event_links_section(state_entity, event, state, cx)),
         );
 
     if !event.attendees.is_empty() {
@@ -13925,6 +14210,154 @@ fn calendar_event_detail(
     }
 
     panel
+}
+
+fn calendar_event_links_section(
+    state_entity: &Entity<NativeAppState>,
+    event: &CalendarEvent,
+    state: &NativeAppState,
+    cx: &mut Context<CalendarPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let event_id = event.id.clone();
+    let links_match = state.calendar_event_links_event.as_deref() == Some(event.id.as_str());
+    let loading = links_match && state.calendar_event_links_resource.is_loading();
+    let error = links_match
+        .then(|| state.calendar_event_links_resource.error().cloned())
+        .flatten();
+    let links = if links_match {
+        state.calendar_event_links.clone()
+    } else {
+        Vec::new()
+    };
+
+    let mut section = div().flex().flex_col().gap(px(7.0)).child(
+        div()
+            .text_size(px(typography.caption.size))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(colors.on_subtle)
+            .child("Linked emails"),
+    );
+
+    if links.is_empty() {
+        let text = if loading {
+            "Loading..."
+        } else if error.is_some() {
+            "Linked emails failed to load."
+        } else {
+            "No linked emails"
+        };
+        return section.child(
+            div()
+                .text_size(px(typography.body.size))
+                .text_color(if error.is_some() {
+                    colors.status_error
+                } else {
+                    colors.on_subtle
+                })
+                .child(text),
+        );
+    }
+
+    for link in links {
+        let link_id = link.id.clone();
+        let message_id = link.message_id.clone();
+        let unlink_message_id = link.message_id.clone();
+        let folder_id = link.folder_id.clone();
+        let subject = calendar_link_subject(&link);
+        let meta = calendar_link_meta(&link);
+        section = section.child(
+            div()
+                .id(SharedString::from(format!("calendar-link-row-{link_id}")))
+                .px(px(8.0))
+                .py(px(7.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("calendar-link-open-{link_id}")))
+                        .flex_1()
+                        .min_w_0()
+                        .cursor_pointer()
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| {
+                                open_calendar_link_message(
+                                    &state_entity,
+                                    folder_id.clone(),
+                                    message_id.clone(),
+                                    app_cx,
+                                );
+                            }
+                        })
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(typography.body.size))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.on_neutral)
+                                .child(subject),
+                        )
+                        .child(
+                            div()
+                                .pt(px(2.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(typography.caption.size))
+                                .text_color(colors.on_subtle)
+                                .child(meta),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!(
+                        "calendar-link-unlink-{link_id}"
+                    )))
+                    .label("Unlink")
+                    .appearance(ButtonAppearance::Subtle)
+                    .size(ButtonSize::Compact)
+                    .disabled(loading)
+                    .on_click({
+                        let state_entity = state_entity.clone();
+                        let event_id = event_id.clone();
+                        move |_, _, app_cx| {
+                            start_calendar_event_unlink(
+                                &state_entity,
+                                event_id.clone(),
+                                unlink_message_id.clone(),
+                                app_cx,
+                            );
+                        }
+                    }),
+                ),
+        );
+    }
+
+    if loading {
+        section = section.child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(colors.on_subtle)
+                .child("Updating linked emails..."),
+        );
+    } else if let Some(error) = error {
+        section = section.child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(colors.status_error)
+                .child(format!("Linked emails failed to update: {error}")),
+        );
+    }
+
+    section
 }
 
 fn calendar_detail_row(
@@ -14102,14 +14535,73 @@ fn toggle_calendar_event_selection(
     event_id: String,
     app_cx: &mut App,
 ) {
-    state_entity.update(app_cx, |state, cx| {
-        state.selected_event = if state.selected_event.as_deref() == Some(event_id.as_str()) {
+    let selected_event = state_entity.update(app_cx, |state, cx| {
+        let selected_event = if state.selected_event.as_deref() == Some(event_id.as_str()) {
             None
         } else {
-            Some(event_id)
+            Some(event_id.clone())
         };
+        state.selected_event = selected_event.clone();
+        clear_calendar_event_links(state);
         cx.notify();
+        selected_event
     });
+
+    if let Some(event_id) = selected_event {
+        start_calendar_event_links_load(state_entity, event_id, app_cx);
+    }
+}
+
+fn clear_calendar_event_links(state: &mut NativeAppState) {
+    state.calendar_event_links_event = None;
+    state.calendar_event_links.clear();
+    state.calendar_event_links_resource.reset();
+}
+
+fn calendar_link_sender(link: &EventLink) -> String {
+    link.from_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            link.from_email
+                .as_deref()
+                .map(str::trim)
+                .filter(|email| !email.is_empty())
+        })
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
+fn calendar_link_date_label(date: Option<&str>) -> Option<String> {
+    let date = date.map(str::trim).filter(|date| !date.is_empty())?;
+    chrono::DateTime::parse_from_rfc3339(date)
+        .map(|parsed| {
+            parsed
+                .with_timezone(&Local)
+                .format("%b %-d, %Y")
+                .to_string()
+        })
+        .ok()
+        .or_else(|| Some(date.to_string()))
+}
+
+fn calendar_link_meta(link: &EventLink) -> String {
+    let sender = calendar_link_sender(link);
+    if let Some(date) = calendar_link_date_label(link.date.as_deref()) {
+        format!("{sender} - {date}")
+    } else {
+        sender
+    }
+}
+
+fn calendar_link_subject(link: &EventLink) -> String {
+    link.subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+        .unwrap_or("(no subject)")
+        .to_string()
 }
 
 fn open_event_meet_link(state_entity: &Entity<NativeAppState>, url: String, app_cx: &mut App) {
