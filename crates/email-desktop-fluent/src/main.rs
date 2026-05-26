@@ -12,8 +12,8 @@ use email_server::{run_server, Config};
 use email_types::{
     Account, AccountSettings, BulkAction, BulkRequest, Condition, ConditionField, ConditionGroup,
     ConditionOperator, CreateWebhook, Folder, FullMessage, Label, MatchMode, Message, PatchFolder,
-    PatchMessageRequest, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount, UpdateWebhook,
-    Webhook,
+    PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount,
+    UpdateWebhook, Webhook,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -2306,8 +2306,14 @@ fn parse_condition_operator(value: &str) -> Option<ConditionOperator> {
 enum SettingsTab {
     General,
     Account(String),
-    Rules,
+    Rules(String),
     Webhooks,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SettingsRuleMutation {
+    Toggle { rule_id: String },
+    Delete { rule_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2331,6 +2337,10 @@ struct SettingsModal {
     webhooks_loading: bool,
     webhook_busy_ids: BTreeSet<String>,
     adding_webhook: bool,
+    rules_account_id: Option<String>,
+    rules: Vec<RuleDto>,
+    rules_loading: bool,
+    rule_busy_ids: BTreeSet<String>,
     loading_account: bool,
     saving_account: bool,
     deleting_account: bool,
@@ -2360,6 +2370,10 @@ impl SettingsModal {
             webhooks_loading: false,
             webhook_busy_ids: BTreeSet::new(),
             adding_webhook: false,
+            rules_account_id: None,
+            rules: Vec::new(),
+            rules_loading: false,
+            rule_busy_ids: BTreeSet::new(),
             loading_account: false,
             saving_account: false,
             deleting_account: false,
@@ -2376,6 +2390,9 @@ impl SettingsModal {
         self.webhooks_loading = false;
         self.webhook_busy_ids.clear();
         self.adding_webhook = false;
+        self.rules_account_id = None;
+        self.rules_loading = false;
+        self.rule_busy_ids.clear();
         self.confirm_delete_account = None;
         self.status = None;
         self.name_input
@@ -2400,6 +2417,8 @@ impl SettingsModal {
         self.confirm_delete_account = None;
         self.webhook_busy_ids.clear();
         self.adding_webhook = false;
+        self.rules_loading = false;
+        self.rule_busy_ids.clear();
         self.status = None;
         self.name_input
             .update(cx, |input, cx| input.set_value(account.name.clone(), cx));
@@ -2456,6 +2475,43 @@ impl SettingsModal {
         self.webhook_busy_ids.clear();
         self.adding_webhook = false;
         self.status = None;
+        cx.notify();
+    }
+
+    fn select_rules(&mut self, account_id: String, cx: &mut Context<Self>) {
+        self.active_tab = SettingsTab::Rules(account_id.clone());
+        self.rules_account_id = Some(account_id);
+        self.rules_loading = true;
+        self.rule_busy_ids.clear();
+        self.status = None;
+        cx.notify();
+    }
+
+    fn apply_rules(
+        &mut self,
+        account_id: &str,
+        rules: Vec<RuleDto>,
+        status: Option<(String, bool)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab != SettingsTab::Rules(account_id.to_string()) {
+            return;
+        }
+        self.rules_account_id = Some(account_id.to_string());
+        self.rules = rules;
+        self.rules_loading = false;
+        self.rule_busy_ids.clear();
+        self.status = status;
+        cx.notify();
+    }
+
+    fn fail_rules(&mut self, account_id: &str, message: String, cx: &mut Context<Self>) {
+        if self.active_tab != SettingsTab::Rules(account_id.to_string()) {
+            return;
+        }
+        self.rules_loading = false;
+        self.rule_busy_ids.clear();
+        self.status = Some((message, false));
         cx.notify();
     }
 
@@ -2639,23 +2695,25 @@ fn settings_tabs(
         ));
     }
 
+    for account in &state.accounts {
+        let label = format!("Rules ({})", account.name);
+        tabs = tabs.child(settings_tab_button(
+            SharedString::from(format!("settings-tab-rules-{}", account.id)),
+            label.as_str(),
+            modal.active_tab == SettingsTab::Rules(account.id.clone()),
+            {
+                let state_entity = state_entity.clone();
+                let modal_entity = modal_entity.clone();
+                let account_id = account.id.clone();
+                move |_, _, app_cx| {
+                    select_settings_rules(&state_entity, &modal_entity, account_id.clone(), app_cx);
+                }
+            },
+            cx,
+        ));
+    }
+
     tabs.child(settings_tab_button(
-        "settings-tab-rules",
-        "Rules",
-        modal.active_tab == SettingsTab::Rules,
-        {
-            let modal_entity = modal_entity.clone();
-            move |_, _, app_cx| {
-                let _ = modal_entity.update(app_cx, |modal, cx| {
-                    modal.active_tab = SettingsTab::Rules;
-                    modal.status = None;
-                    cx.notify();
-                });
-            }
-        },
-        cx,
-    ))
-    .child(settings_tab_button(
         "settings-tab-webhooks",
         "Webhooks",
         modal.active_tab == SettingsTab::Webhooks,
@@ -2711,8 +2769,6 @@ fn settings_body(
     modal: &SettingsModal,
     cx: &mut Context<SettingsModal>,
 ) -> gpui::AnyElement {
-    let theme = cx.theme();
-    let colors = theme.colors.clone();
     match &modal.active_tab {
         SettingsTab::General => div()
             .id("settings-body-general")
@@ -2737,12 +2793,19 @@ fn settings_body(
                 cx,
             ))
             .into_any_element(),
-        SettingsTab::Rules => div()
+        SettingsTab::Rules(account_id) => div()
+            .id("settings-body-rules")
             .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
             .p(px(18.0))
-            .text_size(px(theme.typography.body.size))
-            .text_color(colors.on_subtle)
-            .child("Rules editor remains in a later Phase 6 slice.")
+            .child(settings_rules_body(
+                state,
+                modal_entity,
+                modal,
+                account_id,
+                cx,
+            ))
             .into_any_element(),
         SettingsTab::Webhooks => div()
             .id("settings-body-webhooks")
@@ -3065,6 +3128,161 @@ fn settings_account_body(
                     }
                 })
                 .into_any_element()
+        })
+}
+
+fn settings_rules_body(
+    state: &NativeAppState,
+    modal_entity: &Entity<SettingsModal>,
+    modal: &SettingsModal,
+    account_id: &str,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let status = modal.status.clone();
+    let state_entity = modal.state.clone();
+    let account_label = state
+        .accounts
+        .iter()
+        .find(|account| account.id == account_id)
+        .map(|account| account.name.clone())
+        .unwrap_or_else(|| "Account".to_string());
+
+    let mut rule_list = div().flex().flex_col().gap(px(6.0));
+    if modal.rules_loading {
+        rule_list = rule_list.child(
+            div()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("Loading rules..."),
+        );
+    } else if modal.rules_account_id.as_deref() != Some(account_id) {
+        rule_list = rule_list.child(
+            div()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("Select this tab to load rules."),
+        );
+    } else if modal.rules.is_empty() {
+        rule_list = rule_list.child(
+            div()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("No rules configured for this account."),
+        );
+    } else {
+        for rule in &modal.rules {
+            let rule_id = rule.id.clone();
+            let busy = modal.rule_busy_ids.contains(&rule.id);
+            rule_list = rule_list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .py(px(6.0))
+                    .border_b_1()
+                    .border_color(colors.stroke_neutral_subtle)
+                    .child(
+                        Checkbox::new(SharedString::from(format!(
+                            "settings-rule-active-{}",
+                            rule.id
+                        )))
+                        .checked(rule.is_active)
+                        .disabled(busy || modal.rules_loading)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let modal_entity = modal_entity.clone();
+                            let account_id = account_id.to_string();
+                            let rule_id = rule_id.clone();
+                            move |_, _, _, app_cx| {
+                                start_settings_rule_toggle(
+                                    &state_entity,
+                                    &modal_entity,
+                                    account_id.clone(),
+                                    rule_id.clone(),
+                                    app_cx,
+                                );
+                            }
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(typography.body.size))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(colors.on_neutral)
+                                    .child(rule.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(typography.caption.size))
+                                    .text_color(colors.on_subtle)
+                                    .child(rule_counts_text(rule)),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "settings-rule-delete-{}",
+                            rule.id
+                        )))
+                        .label("Delete")
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(busy || modal.rules_loading)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let modal_entity = modal_entity.clone();
+                            let account_id = account_id.to_string();
+                            let rule_id = rule_id.clone();
+                            move |_, _, app_cx| {
+                                start_settings_rule_delete(
+                                    &state_entity,
+                                    &modal_entity,
+                                    account_id.clone(),
+                                    rule_id.clone(),
+                                    app_cx,
+                                );
+                            }
+                        }),
+                    ),
+            );
+        }
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .child(settings_section_title("Rules", cx))
+        .child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(colors.on_subtle)
+                .child(account_label),
+        )
+        .child(rule_list)
+        .when_some(status, |body, (message, ok)| {
+            body.child(
+                div()
+                    .text_size(px(typography.caption.size))
+                    .text_color(if ok {
+                        colors.status_success
+                    } else {
+                        colors.status_error
+                    })
+                    .child(message),
+            )
         })
 }
 
@@ -3468,6 +3686,52 @@ fn select_settings_webhooks(
         .detach();
 }
 
+fn select_settings_rules(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    app_cx: &mut App,
+) {
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.select_rules(account_id.clone(), cx);
+    });
+
+    let requested_account_id = account_id.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_settings_rules(base_url, account_id.clone()) });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let error_message = result.as_ref().err().map(|err| err.to_string());
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                    Ok(rules) => modal.apply_rules(&requested_account_id, rules, None, cx),
+                    Err(err) => {
+                        modal.fail_rules(&requested_account_id, err.to_string(), cx);
+                    }
+                }) {
+                    tracing::warn!("failed to apply native rules load: {err}");
+                }
+
+                if let Some(message) = error_message {
+                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                        state.last_error = Some(message);
+                        cx.notify();
+                    }) {
+                        tracing::warn!("failed to apply native rules error: {err}");
+                    }
+                }
+            }
+        })
+        .detach();
+}
+
 fn confirm_settings_account_delete(
     modal_entity: &Entity<SettingsModal>,
     account_id: String,
@@ -3647,6 +3911,106 @@ fn start_settings_account_delete(
                     }
                 }) {
                     tracing::warn!("failed to apply native account delete status: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn start_settings_rule_toggle(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    rule_id: String,
+    app_cx: &mut App,
+) {
+    start_settings_rule_mutation(
+        state_entity,
+        modal_entity,
+        account_id,
+        SettingsRuleMutation::Toggle {
+            rule_id: rule_id.clone(),
+        },
+        rule_id,
+        "Rule updated",
+        app_cx,
+    );
+}
+
+fn start_settings_rule_delete(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    rule_id: String,
+    app_cx: &mut App,
+) {
+    start_settings_rule_mutation(
+        state_entity,
+        modal_entity,
+        account_id,
+        SettingsRuleMutation::Delete {
+            rule_id: rule_id.clone(),
+        },
+        rule_id,
+        "Rule deleted",
+        app_cx,
+    );
+}
+
+fn start_settings_rule_mutation(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    mutation: SettingsRuleMutation,
+    busy_id: String,
+    success_message: &'static str,
+    app_cx: &mut App,
+) {
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.rule_busy_ids.insert(busy_id);
+        modal.status = None;
+        cx.notify();
+    });
+    state_entity.update(app_cx, |state, cx| {
+        state.last_error = None;
+        cx.notify();
+    });
+
+    let requested_account_id = account_id.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { mutate_settings_rules(base_url, account_id, mutation) });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let error_message = result.as_ref().err().map(|err| err.to_string());
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                    Ok(rules) => modal.apply_rules(
+                        &requested_account_id,
+                        rules,
+                        Some((success_message.to_string(), true)),
+                        cx,
+                    ),
+                    Err(err) => {
+                        modal.fail_rules(&requested_account_id, err.to_string(), cx);
+                    }
+                }) {
+                    tracing::warn!("failed to apply native rule mutation: {err}");
+                }
+
+                if let Some(message) = error_message {
+                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                        state.last_error = Some(message);
+                        cx.notify();
+                    }) {
+                        tracing::warn!("failed to apply native rule mutation error: {err}");
+                    }
                 }
             }
         })
@@ -3875,6 +4239,46 @@ fn load_settings_webhooks(base_url: String) -> Result<Vec<Webhook>> {
     })
 }
 
+fn load_settings_rules(base_url: String, account_id: String) -> Result<Vec<RuleDto>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .list_rules(&account_id)
+            .await
+            .with_context(|| format!("list rules for {account_id}"))
+    })
+}
+
+fn mutate_settings_rules(
+    base_url: String,
+    account_id: String,
+    mutation: SettingsRuleMutation,
+) -> Result<Vec<RuleDto>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        match mutation {
+            SettingsRuleMutation::Toggle { rule_id } => {
+                client
+                    .toggle_rule(&rule_id)
+                    .await
+                    .with_context(|| format!("toggle rule {rule_id}"))?;
+            }
+            SettingsRuleMutation::Delete { rule_id } => {
+                client
+                    .delete_rule(&rule_id)
+                    .await
+                    .with_context(|| format!("delete rule {rule_id}"))?;
+            }
+        }
+        client
+            .list_rules(&account_id)
+            .await
+            .with_context(|| format!("reload rules for {account_id}"))
+    })
+}
+
 fn mutate_settings_webhooks(
     base_url: String,
     mutation: SettingsWebhookMutation,
@@ -3981,6 +4385,16 @@ fn build_create_webhook_request(
         events: Some(events),
         account_id: None,
     })
+}
+
+fn rule_counts_text(rule: &RuleDto) -> String {
+    format!(
+        "{} condition{}, {} action{}",
+        rule.conditions.len(),
+        if rule.conditions.len() == 1 { "" } else { "s" },
+        rule.actions.len(),
+        if rule.actions.len() == 1 { "" } else { "s" }
+    )
 }
 
 fn update_account_settings_and_refresh(
@@ -6168,7 +6582,7 @@ fn date_time_value_to_utc_iso(value: DateTimeValue) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use email_types::MessageBody;
+    use email_types::{MessageBody, RuleActionDto, RuleConditionDto};
 
     fn account(id: &str) -> Account {
         Account {
@@ -7127,6 +7541,39 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "Choose a supported webhook event set.");
+    }
+
+    #[test]
+    fn rule_counts_text_pluralizes_counts() {
+        let mut rule = RuleDto {
+            id: "rule".to_string(),
+            account_id: "account".to_string(),
+            name: "Rule".to_string(),
+            is_active: true,
+            match_mode: "all".to_string(),
+            priority: 0,
+            conditions: vec![RuleConditionDto {
+                id: "condition".to_string(),
+                field: "from".to_string(),
+                operator: "contains".to_string(),
+                value: "ada".to_string(),
+            }],
+            actions: vec![RuleActionDto {
+                id: "action".to_string(),
+                action_type: "mark_read".to_string(),
+                action_value: None,
+            }],
+        };
+        assert_eq!(rule_counts_text(&rule), "1 condition, 1 action");
+
+        rule.conditions.push(RuleConditionDto {
+            id: "condition-2".to_string(),
+            field: "subject".to_string(),
+            operator: "contains".to_string(),
+            value: "status".to_string(),
+        });
+        rule.actions.clear();
+        assert_eq!(rule_counts_text(&rule), "2 conditions, 0 actions");
     }
 }
 

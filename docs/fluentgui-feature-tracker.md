@@ -126,7 +126,7 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Settings modal tabs: General, each account, Rules per account, Webhooks. | Native modal/nav sections. | Native partial; documented gaps. | General/account/Webhooks tabs implemented. Rules currently one placeholder, not per-account tabs. |
+| Settings modal tabs: General, each account, Rules per account, Webhooks. | Native modal/nav sections. | Native implemented; cargo check. | General/account/per-account Rules/Webhooks tabs implemented. |
 | General theme select. | Same. | Native implemented; cargo check. | Native uses buttons for Light/Dark. |
 | General density stepper with labels. | Same. | Native implemented; cargo check. | Levels `0..8`. |
 | Account info display name, email, provider. | Same. | Native implemented; automated tests. | Email/provider read-only; name request is validated and trimmed. |
@@ -135,8 +135,8 @@ Status values:
 | Excluded folders checkbox list. | Same. | Native implemented; cargo check. | Patches folder exclusion and refreshes account tree. |
 | Remove account danger zone with confirmation. | Same. | Native implemented; automated tests. | Deletes through account API, reloads native account state, and closes Settings. |
 | Save status. | Same. | Native implemented; cargo check. | Account save and folder-update success/error feedback. |
-| Rules list with enable toggle, name, counts, edit, delete, new. | Same. | Current audited; pending native. | Documented Phase 6b gap; per account. |
-| Rule editor with name, condition builder, actions, folder selector, save/cancel/error. | Same. | Current audited; pending native. | Documented Phase 6b gap. |
+| Rules list with enable toggle, name, counts, edit, delete, new. | Same. | Native partial; automated tests. | Per-account list, enable toggle, counts, and delete implemented. Edit/new remain with editor gap. |
+| Rule editor with name, condition builder, actions, folder selector, save/cancel/error. | Same. | Current audited; pending native. | Documented Phase 6e gap. |
 | Webhooks list, enabled toggle, signed indicator, delete. | Same. | Native implemented; cargo check. | Loads through typed API and preserves event/signed display. |
 | Add webhook: URL, secret, events select, add/error. | Same. | Native implemented; automated tests. | Uses same payload; event control supports `new_message` and `all`. |
 
