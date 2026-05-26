@@ -763,6 +763,7 @@ struct NativeAppState {
     selected_label: Option<String>,
     selected_message: Option<String>,
     selected_message_ids: Vec<String>,
+    expanded_thread_keys: BTreeSet<String>,
     selected_full_message: Option<FullMessage>,
     selected_message_resource: AsyncResource<FullMessage, String>,
     selected_message_labels: Vec<Label>,
@@ -800,6 +801,7 @@ impl Default for NativeAppState {
             selected_label: None,
             selected_message: None,
             selected_message_ids: Vec::new(),
+            expanded_thread_keys: BTreeSet::new(),
             selected_full_message: None,
             selected_message_resource: AsyncResource::new(),
             selected_message_labels: Vec::new(),
@@ -7759,7 +7761,11 @@ fn begin_message_collection_load(
     state: &mut NativeAppState,
     source: &NativeMessageSource,
 ) -> ResourceRequest {
+    let previous_source = NativeMessageSource::from_state(state);
     source.apply_selection(state);
+    if previous_source.as_ref() != Some(source) {
+        state.expanded_thread_keys.clear();
+    }
     state.messages.clear();
     state.selected_message = None;
     state.selected_message_ids.clear();
@@ -7860,6 +7866,7 @@ fn apply_loaded_message_collection(
     state.messages = loaded.messages;
     state.search_event_results = loaded.calendar_events;
     retain_existing_message_selection(state);
+    retain_existing_thread_expansions(state);
     state.selected_message = loaded
         .selected_message
         .or_else(|| state.messages.first().map(|message| message.id.clone()));
@@ -7894,6 +7901,7 @@ fn reject_message_collection_load(
     state.messages.clear();
     state.selected_message = None;
     state.selected_message_ids.clear();
+    state.expanded_thread_keys.clear();
     state.selected_full_message = None;
     state.selected_message_resource.reset();
     state.selected_message_labels.clear();
@@ -9878,6 +9886,90 @@ mod tests {
         state.selected_label = None;
         state.search.submitted_query = Some("report".to_string());
         assert_eq!(selected_regular_folder_id(&state), None);
+    }
+
+    #[test]
+    fn message_list_render_rows_group_regular_folder_threads() {
+        let mut older = message("older", "inbox", true);
+        older.thread_id = Some("thread-a".to_string());
+        older.date = Some("2026-05-25T12:00:00Z".to_string());
+        let mut latest = message("latest", "inbox", false);
+        latest.thread_id = Some("thread-a".to_string());
+        latest.date = Some("2026-05-26T12:00:00Z".to_string());
+        let mut solo = message("solo", "inbox", true);
+        solo.date = Some("2026-05-26T10:00:00Z".to_string());
+        let mut state = NativeAppState {
+            selected_folder: Some("inbox".to_string()),
+            messages: vec![older, solo, latest],
+            ..NativeAppState::default()
+        };
+
+        let rows = message_list_render_rows(&state);
+        assert_eq!(
+            rows.iter()
+                .filter_map(MessageListRenderRow::message_id)
+                .collect::<Vec<_>>(),
+            vec!["latest", "solo"]
+        );
+        assert_eq!(rows[0].thread_count(), Some(2));
+        assert!(!rows[0].is_indented());
+
+        state.expanded_thread_keys.insert("thread-a".to_string());
+        let rows = message_list_render_rows(&state);
+        assert_eq!(
+            rows.iter()
+                .filter_map(MessageListRenderRow::message_id)
+                .collect::<Vec<_>>(),
+            vec!["latest", "older", "solo"]
+        );
+        assert!(rows[1].is_indented());
+        assert!(matches!(
+            &rows[2],
+            MessageListRenderRow::CollapseThread { thread_key }
+                if thread_key == "thread-a"
+        ));
+    }
+
+    #[test]
+    fn message_list_render_rows_keep_non_regular_views_flat() {
+        let mut first = message("first", "inbox", true);
+        first.thread_id = Some("thread-a".to_string());
+        let mut second = message("second", "inbox", true);
+        second.thread_id = Some("thread-a".to_string());
+        let mut state = NativeAppState {
+            selected_folder: Some("inbox".to_string()),
+            messages: vec![first, second],
+            ..NativeAppState::default()
+        };
+
+        state.search.submitted_query = Some("status".to_string());
+        let rows = message_list_render_rows(&state);
+        assert_eq!(
+            rows.iter()
+                .filter_map(MessageListRenderRow::message_id)
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+
+        state.search = SearchState::default();
+        state.selected_folder = Some("smart:unread".to_string());
+        let rows = message_list_render_rows(&state);
+        assert_eq!(
+            rows.iter()
+                .filter_map(MessageListRenderRow::message_id)
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+
+        state.selected_folder = None;
+        state.selected_label = Some("label".to_string());
+        let rows = message_list_render_rows(&state);
+        assert_eq!(
+            rows.iter()
+                .filter_map(MessageListRenderRow::message_id)
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
     }
 
     #[test]
@@ -12708,6 +12800,165 @@ fn nav_item(
         .child(label)
 }
 
+#[derive(Clone, Debug)]
+struct MessageThreadGroup {
+    key: String,
+    messages: Vec<Message>,
+}
+
+#[derive(Clone, Debug)]
+enum MessageListRenderRow {
+    Message {
+        message: Message,
+        thread_key: Option<String>,
+        thread_count: usize,
+        indented: bool,
+    },
+    CollapseThread {
+        thread_key: String,
+    },
+}
+
+impl MessageListRenderRow {
+    fn message_id(&self) -> Option<&str> {
+        match self {
+            Self::Message { message, .. } => Some(message.id.as_str()),
+            Self::CollapseThread { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn thread_count(&self) -> Option<usize> {
+        match self {
+            Self::Message { thread_count, .. } if *thread_count > 1 => Some(*thread_count),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn is_indented(&self) -> bool {
+        matches!(self, Self::Message { indented: true, .. })
+    }
+}
+
+fn message_thread_key(message: &Message) -> String {
+    message
+        .thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|thread_id| !thread_id.is_empty())
+        .unwrap_or(message.id.as_str())
+        .to_string()
+}
+
+fn message_sort_timestamp(message: &Message) -> i64 {
+    message
+        .date
+        .as_deref()
+        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+        .map(|date| date.timestamp_millis())
+        .unwrap_or_default()
+}
+
+fn group_messages_by_thread(messages: &[Message]) -> Vec<MessageThreadGroup> {
+    let mut order = Vec::new();
+    let mut groups = BTreeMap::<String, Vec<Message>>::new();
+    for message in messages {
+        let key = message_thread_key(message);
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(message.clone());
+    }
+
+    order
+        .into_iter()
+        .filter_map(|key| {
+            let mut messages = groups.remove(&key)?;
+            messages.sort_by(|a, b| {
+                message_sort_timestamp(b)
+                    .cmp(&message_sort_timestamp(a))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            Some(MessageThreadGroup { key, messages })
+        })
+        .collect()
+}
+
+fn message_list_uses_threading(state: &NativeAppState) -> bool {
+    selected_regular_folder_id(state).is_some()
+}
+
+fn message_list_render_rows(state: &NativeAppState) -> Vec<MessageListRenderRow> {
+    if !message_list_uses_threading(state) {
+        return state
+            .messages
+            .iter()
+            .cloned()
+            .map(|message| MessageListRenderRow::Message {
+                message,
+                thread_key: None,
+                thread_count: 1,
+                indented: false,
+            })
+            .collect();
+    }
+
+    let selected_message = state.selected_message.as_deref();
+    let mut rows = Vec::new();
+    for group in group_messages_by_thread(&state.messages) {
+        let thread_count = group.messages.len();
+        let expanded = thread_count > 1
+            && (state.expanded_thread_keys.contains(&group.key)
+                || group
+                    .messages
+                    .iter()
+                    .skip(1)
+                    .any(|message| selected_message == Some(message.id.as_str())));
+
+        if let Some(latest) = group.messages.first().cloned() {
+            rows.push(MessageListRenderRow::Message {
+                message: latest,
+                thread_key: Some(group.key.clone()),
+                thread_count,
+                indented: false,
+            });
+        }
+
+        if expanded {
+            for message in group.messages.iter().skip(1).cloned() {
+                rows.push(MessageListRenderRow::Message {
+                    message,
+                    thread_key: Some(group.key.clone()),
+                    thread_count,
+                    indented: true,
+                });
+            }
+            rows.push(MessageListRenderRow::CollapseThread {
+                thread_key: group.key,
+            });
+        }
+    }
+
+    rows
+}
+
+fn retain_existing_thread_expansions(state: &mut NativeAppState) {
+    if !message_list_uses_threading(state) {
+        state.expanded_thread_keys.clear();
+        return;
+    }
+
+    let visible_threads = group_messages_by_thread(&state.messages)
+        .into_iter()
+        .filter(|group| group.messages.len() > 1)
+        .map(|group| group.key)
+        .collect::<BTreeSet<_>>();
+    state
+        .expanded_thread_keys
+        .retain(|key| visible_threads.contains(key));
+}
+
 fn mail_message_list(
     state_entity: &Entity<NativeAppState>,
     state: &NativeAppState,
@@ -12717,10 +12968,16 @@ fn mail_message_list(
     let colors = theme.colors.clone();
     let typography = theme.typography;
     let row_height = state.density.message_row_height.max(66.0);
-    let selected_id = state
-        .selected_message
-        .clone()
-        .or_else(|| state.messages.first().map(|message| message.id.clone()));
+    let render_rows = message_list_render_rows(state);
+    let selected_id = state.selected_message.clone().or_else(|| {
+        render_rows
+            .iter()
+            .find_map(|row| row.message_id().map(str::to_string))
+    });
+    let keyboard_ids = render_rows
+        .iter()
+        .filter_map(|row| row.message_id().map(str::to_string))
+        .collect::<Vec<_>>();
 
     let mut root = div()
         .tab_index(0)
@@ -12732,11 +12989,7 @@ fn mail_message_list(
         .min_h_0()
         .bg(colors.surface)
         .on_key_down({
-            let ids = state
-                .messages
-                .iter()
-                .map(|message| message.id.clone())
-                .collect::<Vec<_>>();
+            let ids = keyboard_ids;
             let selected_id = selected_id.clone();
             let state_entity = state_entity.clone();
             move |ev: &KeyDownEvent, _, app_cx| {
@@ -12780,7 +13033,6 @@ fn mail_message_list(
         );
     }
 
-    let messages = state.messages.clone();
     let search_events = state.search_event_results.clone();
     let selected_id_for_rows = selected_id.clone();
     let selected_ids_for_rows = state
@@ -12798,24 +13050,44 @@ fn mail_message_list(
             cx,
         ));
     }
-    if !messages.is_empty() {
+    if !render_rows.is_empty() {
+        let rows = render_rows.clone();
         list_body = list_body.child(
             uniform_list(
                 "native-mail-message-rows",
-                messages.len(),
+                rows.len(),
                 move |range, _, app_cx| {
                     range
-                        .map(|idx| {
-                            mail_message_row(
+                        .map(|idx| match &rows[idx] {
+                            MessageListRenderRow::Message {
+                                message,
+                                thread_key,
+                                thread_count,
+                                indented,
+                            } => mail_message_row(
                                 idx,
-                                &messages[idx],
-                                selected_id_for_rows.as_deref() == Some(messages[idx].id.as_str()),
-                                selected_ids_for_rows.contains(&messages[idx].id),
+                                message,
+                                selected_id_for_rows.as_deref() == Some(message.id.as_str()),
+                                selected_ids_for_rows.contains(&message.id),
+                                *thread_count,
+                                thread_key.clone(),
+                                *indented,
                                 row_height,
                                 row_state.clone(),
                                 list_entity.clone(),
                                 app_cx,
                             )
+                            .into_any_element(),
+                            MessageListRenderRow::CollapseThread { thread_key } => {
+                                mail_thread_collapse_row(
+                                    idx,
+                                    thread_key.clone(),
+                                    row_height,
+                                    row_state.clone(),
+                                    app_cx,
+                                )
+                                .into_any_element()
+                            }
                         })
                         .collect::<Vec<_>>()
                 },
@@ -13421,6 +13693,9 @@ fn mail_message_row(
     message: &Message,
     selected: bool,
     checked: bool,
+    thread_count: usize,
+    thread_key: Option<String>,
+    indented: bool,
     row_height: f32,
     state_entity: Entity<NativeAppState>,
     list_entity: Entity<MessageListPlaceholder>,
@@ -13444,6 +13719,7 @@ fn mail_message_row(
     let unread = !message.is_read;
     let message_id = message.id.clone();
     let checkbox_message_id = message.id.clone();
+    let click_thread_key = thread_key.filter(|_| thread_count > 1 && !indented);
     let click_state = state_entity.clone();
     let checkbox_state = state_entity.clone();
     let context_message = message.clone();
@@ -13470,7 +13746,7 @@ fn mail_message_row(
             move |style| style.bg(if selected { selected_bg } else { hover })
         })
         .on_click(move |_, _, app_cx| {
-            start_full_message_load(&click_state, &message_id, app_cx);
+            open_message_list_row(&click_state, &message_id, click_thread_key.clone(), app_cx);
         })
         .on_mouse_down(MouseButton::Right, move |ev, _, app_cx| {
             let menu = message_row_context_menu(
@@ -13492,7 +13768,8 @@ fn mail_message_row(
         }))
         .child(
             div()
-                .px(px(10.0))
+                .pl(px(if indented { 28.0 } else { 10.0 }))
+                .pr(px(10.0))
                 .flex()
                 .items_center()
                 .gap(px(10.0))
@@ -13602,6 +13879,9 @@ fn mail_message_row(
                                 })
                                 .when(message.snoozed_until.is_some(), |row| {
                                     row.child(message_row_badge("Snoozed", cx))
+                                })
+                                .when(thread_count > 1 && !indented, |row| {
+                                    row.child(message_row_count_badge(thread_count, cx))
                                 }),
                         )
                         .child(
@@ -13617,6 +13897,64 @@ fn mail_message_row(
         )
 }
 
+fn open_message_list_row(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    thread_key: Option<String>,
+    app_cx: &mut App,
+) {
+    if let Some(thread_key) = thread_key {
+        state_entity.update(app_cx, |state, cx| {
+            state.expanded_thread_keys.insert(thread_key);
+            cx.notify();
+        });
+    }
+    start_full_message_load(state_entity, message_id, app_cx);
+}
+
+fn mail_thread_collapse_row(
+    idx: usize,
+    thread_key: String,
+    row_height: f32,
+    state_entity: Entity<NativeAppState>,
+    cx: &mut App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+
+    div()
+        .id(("native-mail-thread-collapse-row", idx as u64))
+        .h(px((row_height * 0.52).max(34.0)))
+        .w_full()
+        .pl(px(54.0))
+        .pr(px(12.0))
+        .flex()
+        .items_center()
+        .border_b_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .bg(colors.surface)
+        .child(
+            Button::new(("native-mail-thread-collapse", idx))
+                .label("Collapse thread")
+                .size(ButtonSize::Compact)
+                .appearance(ButtonAppearance::Subtle)
+                .on_click(move |_, _, app_cx| {
+                    state_entity.update(app_cx, |state, cx| {
+                        state.expanded_thread_keys.remove(&thread_key);
+                        cx.notify();
+                    });
+                }),
+        )
+        .child(
+            div()
+                .ml(px(8.0))
+                .text_size(px(typography.caption.size))
+                .text_color(colors.on_subtle)
+                .child("Thread replies are hidden until expanded"),
+        )
+}
+
 fn message_row_badge(label: &'static str, cx: &mut App) -> gpui::Div {
     let theme = cx.theme();
     div()
@@ -13628,6 +13966,21 @@ fn message_row_badge(label: &'static str, cx: &mut App) -> gpui::Div {
         .text_size(px(10.0))
         .text_color(theme.colors.on_subtle)
         .child(label)
+}
+
+fn message_row_count_badge(count: usize, cx: &mut App) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .flex_none()
+        .min_w(px(18.0))
+        .px(px(5.0))
+        .py(px(1.0))
+        .rounded(px(999.0))
+        .bg(theme.colors.accent)
+        .text_size(px(10.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.colors.on_accent)
+        .child(count.to_string())
 }
 
 fn message_sender(message: &Message) -> String {

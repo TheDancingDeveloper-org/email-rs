@@ -75,8 +75,8 @@ Status values:
 | Bulk bar with Archive, Mark Read, Mark Unread, Delete, cancel. | Same. | Current audited; pending native. | Delete confirmation remains. |
 | Mark all read for regular folders. | Same. | Current audited; pending native. | Hidden for smart/label/search/advanced search. |
 | Empty/loading states. | Same. | Current audited; pending native. | Preserve `No folder selected`, `Loading...`, `No messages`. |
-| Thread grouping only in regular folder view. | Same. | Current audited; pending native. | Groups by `threadId` or message id; latest first. |
-| Rows show avatar/checkbox, sender, timestamp, subject, preview, unread dot, attachment, flag, snooze, thread count. | Same. | Backend verified; pending native. | `snoozedUntil` row serialization is covered; remaining work is native row detail parity. |
+| Thread grouping only in regular folder view. | Same. | Native implemented; automated tests. | Native groups by `threadId` or message id, renders latest first, and keeps search/smart/label views flat. |
+| Rows show avatar/checkbox, sender, timestamp, subject, preview, unread dot, attachment, flag, snooze, thread count. | Same. | Native implemented; cargo check. | Native rows render initials avatar, checkbox, sender/date, subject/preview, unread accent, attachment/flag/snooze badges, and thread count. |
 | Row context menu has open, reply, forward, archive, trash, read/unread, flag/unflag. | Same. | Native implemented; cargo check. | Reply/forward select and start the draft path. |
 | Keyboard j/k, Ctrl/Cmd+A, Escape, x, e, Delete/Backspace, u. | Same. | Native implemented; automated tests. | Message-list shortcut helper covered. |
 
