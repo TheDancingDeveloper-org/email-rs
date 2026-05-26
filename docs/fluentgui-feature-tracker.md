@@ -88,7 +88,7 @@ Status values:
 | Loading and not found states. | Same. | Native implemented; cargo check. | Native shows body loading and load-error status messages. |
 | Opening a message marks it read locally and attempts provider mark-seen. | Same backend call behavior. | Native implemented; automated tests. | Full-message load updates summary read state and unread counts. |
 | Toolbar: Reply, Forward, Read/Unread, Snooze, Archive, Delete. | Same. | Native implemented; cargo check. | Native toolbar uses typed message mutation APIs. |
-| Snooze presets: later today +3h, tomorrow 9am, next Monday 9am, custom datetime. | Same. | Current audited; pending native. | Requires native date/time picker. |
+| Snooze presets: later today +3h, tomorrow 9am, next Monday 9am, custom datetime. | Same. | Native implemented; automated tests. | Native has preset buttons plus a custom `DateTimePicker`. |
 | Message header: subject, flagged tag, labels, sender avatar/name/email, date. | Same. | Native implemented; cargo check. | Native header renders subject/sender/date, badges, and label row; avatar visual parity remains polish. |
 | Label add dropdown lists labels not already on the message. | Same. | Native implemented; cargo check. | Uses typed label APIs and hides labels already on the message. |
 | Header context menu: reply, forward, archive, delete, read/unread, copy sender email. | Same. | Native implemented; cargo check. | Right-click message header opens native menu; sender-email resolution is covered. |

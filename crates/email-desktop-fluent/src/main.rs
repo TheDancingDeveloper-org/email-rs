@@ -9086,6 +9086,25 @@ fn start_snooze_from_picker(
         .read(app_cx)
         .selected_value()
         .unwrap_or_else(default_snooze_value);
+    start_snooze_with_value(state_entity, message_id, value, app_cx);
+}
+
+fn start_snooze_with_preset(
+    state_entity: &Entity<NativeAppState>,
+    preset: SnoozePreset,
+    message_id: String,
+    app_cx: &mut App,
+) {
+    let value = snooze_preset_value_at(preset, Local::now());
+    start_snooze_with_value(state_entity, message_id, value, app_cx);
+}
+
+fn start_snooze_with_value(
+    state_entity: &Entity<NativeAppState>,
+    message_id: String,
+    value: DateTimeValue,
+    app_cx: &mut App,
+) {
     let until = match date_time_value_to_utc_iso(value) {
         Ok(until) => until,
         Err(err) => {
@@ -10257,6 +10276,86 @@ mod tests {
         );
         assert_eq!(reading_pane_key_action("e", false, true), None);
         assert_eq!(reading_pane_key_action("r", false, false), None);
+    }
+
+    #[test]
+    fn snooze_presets_match_web_offsets() {
+        let now = Local
+            .with_ymd_and_hms(2026, 5, 26, 14, 45, 0)
+            .single()
+            .expect("valid local time");
+
+        let later_today = snooze_preset_value_at(SnoozePreset::LaterToday, now);
+        assert_eq!(
+            (
+                later_today.year,
+                later_today.month,
+                later_today.day,
+                later_today.hour,
+                later_today.minute,
+            ),
+            (2026, 5, 26, 17, 0)
+        );
+
+        let tomorrow = snooze_preset_value_at(SnoozePreset::TomorrowMorning, now);
+        assert_eq!(
+            (
+                tomorrow.year,
+                tomorrow.month,
+                tomorrow.day,
+                tomorrow.hour,
+                tomorrow.minute,
+            ),
+            (2026, 5, 27, 9, 0)
+        );
+
+        let next_monday = snooze_preset_value_at(SnoozePreset::NextMonday, now);
+        assert_eq!(
+            (
+                next_monday.year,
+                next_monday.month,
+                next_monday.day,
+                next_monday.hour,
+                next_monday.minute,
+            ),
+            (2026, 6, 1, 9, 0)
+        );
+    }
+
+    #[test]
+    fn next_monday_snooze_skips_current_monday() {
+        let monday = Local
+            .with_ymd_and_hms(2026, 6, 1, 8, 30, 0)
+            .single()
+            .expect("valid local time");
+        let sunday = Local
+            .with_ymd_and_hms(2026, 6, 7, 8, 30, 0)
+            .single()
+            .expect("valid local time");
+
+        let from_monday = snooze_preset_value_at(SnoozePreset::NextMonday, monday);
+        assert_eq!(
+            (
+                from_monday.year,
+                from_monday.month,
+                from_monday.day,
+                from_monday.hour,
+                from_monday.minute,
+            ),
+            (2026, 6, 8, 9, 0)
+        );
+
+        let from_sunday = snooze_preset_value_at(SnoozePreset::NextMonday, sunday);
+        assert_eq!(
+            (
+                from_sunday.year,
+                from_sunday.month,
+                from_sunday.day,
+                from_sunday.hour,
+                from_sunday.minute,
+            ),
+            (2026, 6, 8, 9, 0)
+        );
     }
 
     #[test]
@@ -13590,6 +13689,13 @@ enum ReadingPaneKeyAction {
     ClearSelection,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnoozePreset {
+    LaterToday,
+    TomorrowMorning,
+    NextMonday,
+}
+
 fn reading_pane_key_action(key: &str, shift: bool, command: bool) -> Option<ReadingPaneKeyAction> {
     if key == "escape" {
         return Some(ReadingPaneKeyAction::ClearSelection);
@@ -14445,6 +14551,108 @@ fn reading_badge(label: &'static str, cx: &mut Context<ReadingPanePlaceholder>) 
         .child(label)
 }
 
+fn reading_snooze_controls(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    action_busy: bool,
+    snooze_picker: Entity<DateTimePicker>,
+    cx: &mut Context<ReadingPanePlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+
+    div()
+        .pt(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .flex_wrap()
+        .child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(colors.on_subtle)
+                .child("Snooze"),
+        )
+        .child(
+            Button::new("reading-snooze-later-today")
+                .label("Later today")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(action_busy)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    let message_id = message_id.to_string();
+                    move |_, _, app_cx| {
+                        start_snooze_with_preset(
+                            &state_entity,
+                            SnoozePreset::LaterToday,
+                            message_id.clone(),
+                            app_cx,
+                        );
+                    }
+                }),
+        )
+        .child(
+            Button::new("reading-snooze-tomorrow")
+                .label("Tomorrow")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(action_busy)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    let message_id = message_id.to_string();
+                    move |_, _, app_cx| {
+                        start_snooze_with_preset(
+                            &state_entity,
+                            SnoozePreset::TomorrowMorning,
+                            message_id.clone(),
+                            app_cx,
+                        );
+                    }
+                }),
+        )
+        .child(
+            Button::new("reading-snooze-next-week")
+                .label("Next week")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(action_busy)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    let message_id = message_id.to_string();
+                    move |_, _, app_cx| {
+                        start_snooze_with_preset(
+                            &state_entity,
+                            SnoozePreset::NextMonday,
+                            message_id.clone(),
+                            app_cx,
+                        );
+                    }
+                }),
+        )
+        .child(div().w(px(190.0)).child(snooze_picker.clone()))
+        .child(
+            Button::new("reading-snooze-custom")
+                .label("Custom")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(action_busy)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    let message_id = message_id.to_string();
+                    move |_, _, app_cx| {
+                        start_snooze_from_picker(
+                            &state_entity,
+                            snooze_picker.clone(),
+                            message_id.clone(),
+                            app_cx,
+                        );
+                    }
+                }),
+        )
+}
+
 fn reading_label_row(
     state_entity: &Entity<NativeAppState>,
     state: &NativeAppState,
@@ -15192,32 +15400,18 @@ fn reading_placeholder(
                                     }
                                 }),
                         )
-                        .child(
-                            Button::new("reading-snooze")
-                                .label("Snooze")
-                                .appearance(ButtonAppearance::Subtle)
-                                .size(ButtonSize::Compact)
-                                .disabled(action_busy)
-                                .on_click({
-                                    let state_entity = state_entity.clone();
-                                    let snooze_picker = snooze_picker.clone();
-                                    let message_id = message_id.clone();
-                                    move |_, _, app_cx| {
-                                        start_snooze_from_picker(
-                                            &state_entity,
-                                            snooze_picker.clone(),
-                                            message_id.clone(),
-                                            app_cx,
-                                        );
-                                    }
-                                }),
-                        )
-                        .child(div().w(px(190.0)).child(snooze_picker))
                         .when(is_flagged, |row| row.child(reading_badge("Flagged", cx)))
                         .when(has_attachments, |row| {
                             row.child(reading_badge("Attachment", cx))
                         }),
-                ),
+                )
+                .child(reading_snooze_controls(
+                    state_entity,
+                    &message_id,
+                    action_busy,
+                    snooze_picker,
+                    cx,
+                )),
         )
         .when_some(body_status, |pane, status| {
             pane.child(
@@ -16305,6 +16499,47 @@ fn default_snooze_value() -> DateTimeValue {
         hour: 9,
         minute: 0,
     })
+}
+
+fn snooze_preset_value_at(preset: SnoozePreset, now: chrono::DateTime<Local>) -> DateTimeValue {
+    let target = match preset {
+        SnoozePreset::LaterToday => {
+            let later = now + ChronoDuration::hours(3);
+            DateTimeValue::new(
+                later.year(),
+                later.month() as u8,
+                later.day() as u8,
+                later.hour() as u8,
+                0,
+            )
+        }
+        SnoozePreset::TomorrowMorning => {
+            let tomorrow = now + ChronoDuration::days(1);
+            DateTimeValue::new(
+                tomorrow.year(),
+                tomorrow.month() as u8,
+                tomorrow.day() as u8,
+                9,
+                0,
+            )
+        }
+        SnoozePreset::NextMonday => {
+            let days_until_monday = match now.weekday().num_days_from_monday() {
+                0 => 7,
+                days => 7 - days,
+            };
+            let next_monday = now + ChronoDuration::days(i64::from(days_until_monday));
+            DateTimeValue::new(
+                next_monday.year(),
+                next_monday.month() as u8,
+                next_monday.day() as u8,
+                9,
+                0,
+            )
+        }
+    };
+
+    target.unwrap_or_else(default_snooze_value)
 }
 
 fn recipient_suggestions(state: &NativeAppState) -> Vec<TokenInputSuggestion> {
