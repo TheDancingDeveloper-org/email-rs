@@ -28,9 +28,9 @@ use fluent_primitives::{
     TokenInputSuggestion, TokenInputToken,
 };
 use gpui::{
-    actions, div, prelude::*, px, svg, uniform_list, App, Context, Entity, FocusHandle, FontWeight,
-    IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    SharedString, Window,
+    actions, div, prelude::*, px, svg, uniform_list, App, ClipboardItem, Context, Entity,
+    FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, SharedString, Window,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -1486,6 +1486,7 @@ impl Render for MessageListPlaceholder {
 #[derive(Clone)]
 struct ReadingPanePlaceholder {
     state: Entity<NativeAppState>,
+    context_menu: Option<Entity<ContextMenu>>,
     recipient_input: Entity<TokenInput>,
     quick_reply_input: Entity<TextInput>,
     compose_to_input: Entity<TokenInput>,
@@ -1605,6 +1606,7 @@ impl ReadingPanePlaceholder {
         });
         Self {
             state,
+            context_menu: None,
             recipient_input,
             quick_reply_input,
             compose_to_input,
@@ -1635,14 +1637,22 @@ impl Render for ReadingPanePlaceholder {
             );
         }
 
-        reading_placeholder(
+        let mut pane = reading_placeholder(
             &self.state,
             &state,
             self.recipient_input.clone(),
             self.quick_reply_input.clone(),
             self.snooze_picker.clone(),
             cx,
-        )
+        );
+
+        if let Some(menu_entity) = &self.context_menu {
+            if menu_entity.read(cx).open {
+                pane = pane.child(menu_entity.clone());
+            }
+        }
+
+        pane
     }
 }
 
@@ -8921,6 +8931,10 @@ fn selected_from_email(state: &NativeAppState) -> Option<String> {
         .filter(|email| !email.is_empty())
 }
 
+fn selected_sender_email(state: &NativeAppState) -> Option<String> {
+    selected_from_email(state)
+}
+
 fn selected_forward_body(state: &NativeAppState) -> String {
     let body = selected_quote_text(state).unwrap_or_default();
 
@@ -9365,6 +9379,32 @@ mod tests {
     }
 
     #[test]
+    fn reading_pane_key_action_maps_web_shortcuts() {
+        assert_eq!(
+            reading_pane_key_action("e", false, false),
+            Some(ReadingPaneKeyAction::Archive)
+        );
+        assert_eq!(
+            reading_pane_key_action("#", false, false),
+            Some(ReadingPaneKeyAction::Delete)
+        );
+        assert_eq!(
+            reading_pane_key_action("3", true, false),
+            Some(ReadingPaneKeyAction::Delete)
+        );
+        assert_eq!(
+            reading_pane_key_action("u", false, false),
+            Some(ReadingPaneKeyAction::ToggleRead)
+        );
+        assert_eq!(
+            reading_pane_key_action("escape", false, false),
+            Some(ReadingPaneKeyAction::ClearSelection)
+        );
+        assert_eq!(reading_pane_key_action("e", false, true), None);
+        assert_eq!(reading_pane_key_action("r", false, false), None);
+    }
+
+    #[test]
     fn message_selection_helpers_track_visible_rows() {
         let mut state = NativeAppState {
             messages: vec![
@@ -9404,6 +9444,31 @@ mod tests {
         assert_eq!(sender_initials("Ada Lovelace"), "AL");
         assert_eq!(sender_initials("alerts@example.test"), "A");
         assert_eq!(sender_initials(""), "U");
+    }
+
+    #[test]
+    fn selected_sender_email_prefers_full_message_then_summary() {
+        let mut summary = message("message", "inbox", true);
+        summary.from_email = Some("summary@example.test".to_string());
+        let mut full = full_message("message", "inbox", true, false);
+        full.from_email = Some(" full@example.test ".to_string());
+        let mut state = NativeAppState {
+            selected_message: Some("message".to_string()),
+            messages: vec![summary],
+            selected_full_message: Some(full),
+            ..NativeAppState::default()
+        };
+
+        assert_eq!(
+            selected_sender_email(&state).as_deref(),
+            Some("full@example.test")
+        );
+
+        state.selected_full_message = None;
+        assert_eq!(
+            selected_sender_email(&state).as_deref(),
+            Some("summary@example.test")
+        );
     }
 
     #[test]
@@ -11430,6 +11495,32 @@ fn message_key_target(ids: &[String], selected_id: Option<&str>, key: &str) -> O
     Some(ids[next].clone())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadingPaneKeyAction {
+    Archive,
+    Delete,
+    ToggleRead,
+    ClearSelection,
+}
+
+fn reading_pane_key_action(key: &str, shift: bool, command: bool) -> Option<ReadingPaneKeyAction> {
+    if key == "escape" {
+        return Some(ReadingPaneKeyAction::ClearSelection);
+    }
+    if command {
+        return None;
+    }
+
+    match key {
+        "e" => Some(ReadingPaneKeyAction::Archive),
+        "#" => Some(ReadingPaneKeyAction::Delete),
+        "3" if shift => Some(ReadingPaneKeyAction::Delete),
+        "delete" | "backspace" => Some(ReadingPaneKeyAction::Delete),
+        "u" => Some(ReadingPaneKeyAction::ToggleRead),
+        _ => None,
+    }
+}
+
 fn handle_message_list_key(
     state_entity: &Entity<NativeAppState>,
     ids: &[String],
@@ -11496,6 +11587,101 @@ fn handle_message_list_key(
         "u" => start_message_list_read_toggle(state_entity, selected_id, app_cx),
         _ => false,
     }
+}
+
+fn handle_reading_pane_key(
+    state_entity: &Entity<NativeAppState>,
+    key: &str,
+    shift: bool,
+    command: bool,
+    app_cx: &mut App,
+) -> bool {
+    let Some(action) = reading_pane_key_action(key, shift, command) else {
+        return false;
+    };
+
+    if action == ReadingPaneKeyAction::ClearSelection {
+        clear_reading_selection(state_entity, app_cx);
+        return true;
+    }
+
+    let (message_id, is_read, busy) = {
+        let state = state_entity.read(app_cx);
+        (
+            state.selected_message.clone(),
+            state
+                .selected_full_message
+                .as_ref()
+                .map(|message| message.is_read)
+                .or_else(|| selected_summary(state).map(|message| message.is_read))
+                .unwrap_or(true),
+            state.messages_resource.is_loading() || state.compose.sending,
+        )
+    };
+    if busy {
+        return true;
+    }
+
+    let Some(message_id) = message_id else {
+        return false;
+    };
+    match action {
+        ReadingPaneKeyAction::Archive => start_message_mutation_and_refresh(
+            state_entity,
+            NativeMessageMutation::Archive { message_id },
+            app_cx,
+        ),
+        ReadingPaneKeyAction::Delete => start_message_mutation_and_refresh(
+            state_entity,
+            NativeMessageMutation::Delete { message_id },
+            app_cx,
+        ),
+        ReadingPaneKeyAction::ToggleRead => start_message_mutation_and_refresh(
+            state_entity,
+            NativeMessageMutation::SetRead {
+                message_id,
+                is_read: !is_read,
+            },
+            app_cx,
+        ),
+        ReadingPaneKeyAction::ClearSelection => {}
+    }
+    true
+}
+
+fn clear_reading_selection(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.selected_message = None;
+        state.selected_full_message = None;
+        state.selected_message_resource.reset();
+        state.selected_message_labels.clear();
+        state.selected_message_labels_resource.reset();
+        reset_compose_state(state, None);
+        cx.notify();
+    });
+}
+
+fn copy_selected_sender_email(state_entity: &Entity<NativeAppState>, app_cx: &mut App) -> bool {
+    let email = selected_sender_email(state_entity.read(app_cx));
+    let Some(email) = email else {
+        let message = "No sender email to copy.".to_string();
+        state_entity.update(app_cx, |state, cx| {
+            state.compose.error = Some(message.clone());
+            state.compose.notice = None;
+            state.last_error = Some(message);
+            cx.notify();
+        });
+        return false;
+    };
+
+    app_cx.write_to_clipboard(ClipboardItem::new_string(email));
+    state_entity.update(app_cx, |state, cx| {
+        state.compose.error = None;
+        state.compose.notice = Some("Sender email copied".to_string());
+        state.last_error = None;
+        cx.notify();
+    });
+    true
 }
 
 fn start_message_list_target_action(
@@ -11653,6 +11839,73 @@ fn message_row_context_menu(
                         app_cx,
                     );
                 }
+            })
+    })
+}
+
+fn reading_header_context_menu(
+    state_entity: Entity<NativeAppState>,
+    message_id: String,
+    is_read: bool,
+    position: Point<Pixels>,
+    app_cx: &mut App,
+) -> Entity<ContextMenu> {
+    let reply_state = state_entity.clone();
+    let forward_state = state_entity.clone();
+    let archive_state = state_entity.clone();
+    let delete_state = state_entity.clone();
+    let read_state = state_entity.clone();
+    let copy_state = state_entity;
+
+    app_cx.new(move |_| {
+        ContextMenu::build(position)
+            .action("Reply", move |_, _, app_cx| {
+                start_reply_draft(&reply_state, app_cx);
+            })
+            .action("Forward", move |_, _, app_cx| {
+                start_forward_draft(&forward_state, app_cx);
+            })
+            .separator()
+            .action("Archive", {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_message_mutation_and_refresh(
+                        &archive_state,
+                        NativeMessageMutation::Archive {
+                            message_id: message_id.clone(),
+                        },
+                        app_cx,
+                    );
+                }
+            })
+            .action("Delete", {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_message_mutation_and_refresh(
+                        &delete_state,
+                        NativeMessageMutation::Delete {
+                            message_id: message_id.clone(),
+                        },
+                        app_cx,
+                    );
+                }
+            })
+            .action(if is_read { "Mark unread" } else { "Mark read" }, {
+                let message_id = message_id.clone();
+                move |_, _, app_cx| {
+                    start_message_mutation_and_refresh(
+                        &read_state,
+                        NativeMessageMutation::SetRead {
+                            message_id: message_id.clone(),
+                            is_read: !is_read,
+                        },
+                        app_cx,
+                    );
+                }
+            })
+            .separator()
+            .action("Copy sender email", move |_, _, app_cx| {
+                copy_selected_sender_email(&copy_state, app_cx);
             })
     })
 }
@@ -12591,8 +12844,35 @@ fn reading_placeholder(
         .clone()
         .map(|error| (error, true))
         .or_else(|| state.compose.notice.clone().map(|notice| (notice, false)));
+    let pane_entity = cx.entity();
 
     div()
+        .tab_index(0)
+        .key_context("NativeReadingPane")
+        .on_key_down({
+            let state_entity = state_entity.clone();
+            let recipient_input = recipient_input.clone();
+            let quick_reply_input = quick_reply_input.clone();
+            let snooze_picker = snooze_picker.clone();
+            move |ev: &KeyDownEvent, window, app_cx| {
+                let editing = recipient_input.focus_handle(app_cx).is_focused(window)
+                    || quick_reply_input.focus_handle(app_cx).is_focused(window)
+                    || snooze_picker.focus_handle(app_cx).is_focused(window);
+                if editing {
+                    return;
+                }
+
+                if handle_reading_pane_key(
+                    &state_entity,
+                    ev.keystroke.key.as_str(),
+                    ev.keystroke.modifiers.shift,
+                    ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform,
+                    app_cx,
+                ) {
+                    app_cx.stop_propagation();
+                }
+            }
+        })
         .size_full()
         .flex()
         .flex_col()
@@ -12605,6 +12885,25 @@ fn reading_placeholder(
                 .py(px(14.0))
                 .border_b_1()
                 .border_color(colors.stroke_neutral_subtle)
+                .on_mouse_down(MouseButton::Right, {
+                    let state_entity = state_entity.clone();
+                    let pane_entity = pane_entity.clone();
+                    let message_id = message_id.clone();
+                    move |ev, _, app_cx| {
+                        let menu = reading_header_context_menu(
+                            state_entity.clone(),
+                            message_id.clone(),
+                            is_read,
+                            ev.position,
+                            app_cx,
+                        );
+                        pane_entity.update(app_cx, |pane, cx| {
+                            pane.context_menu = Some(menu);
+                            cx.notify();
+                        });
+                        app_cx.stop_propagation();
+                    }
+                })
                 .child(
                     div()
                         .text_size(px(typography.subtitle.size))

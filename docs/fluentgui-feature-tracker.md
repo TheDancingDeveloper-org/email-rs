@@ -77,8 +77,8 @@ Status values:
 | Empty/loading states. | Same. | Current audited; pending native. | Preserve `No folder selected`, `Loading...`, `No messages`. |
 | Thread grouping only in regular folder view. | Same. | Current audited; pending native. | Groups by `threadId` or message id; latest first. |
 | Rows show avatar/checkbox, sender, timestamp, subject, preview, unread dot, attachment, flag, snooze, thread count. | Same. | Backend verified; pending native. | `snoozedUntil` row serialization is covered; remaining work is native row detail parity. |
-| Row context menu has open, reply, forward, archive, trash, read/unread, flag/unflag. | Same. | Current audited; pending native. | Reply/forward currently select the message. |
-| Keyboard j/k, Ctrl/Cmd+A, Escape, x, e, Delete/Backspace, u. | Same. | Current audited; pending native. | Blocking parity item. |
+| Row context menu has open, reply, forward, archive, trash, read/unread, flag/unflag. | Same. | Native implemented; cargo check. | Reply/forward select and start the draft path. |
+| Keyboard j/k, Ctrl/Cmd+A, Escape, x, e, Delete/Backspace, u. | Same. | Native implemented; automated tests. | Message-list shortcut helper covered. |
 
 ## Reading Pane
 
@@ -87,15 +87,15 @@ Status values:
 | Empty state: select a message. | Same. | Current audited; pending native. | Text is `Select a message to read`. |
 | Loading and not found states. | Same. | Current audited; pending native. | Text is `Loading...` and `Message not found`. |
 | Opening a message marks it read locally and attempts provider mark-seen. | Same backend call behavior. | Current audited; pending native. | Fixture avoids live providers. |
-| Toolbar: Reply, Forward, Read/Unread, Snooze, Archive, Delete. | Same. | Current audited; pending native. | Preserve tooltips/shortcuts. |
+| Toolbar: Reply, Forward, Read/Unread, Snooze, Archive, Delete. | Same. | Native implemented; cargo check. | Native toolbar uses typed message mutation APIs. |
 | Snooze presets: later today +3h, tomorrow 9am, next Monday 9am, custom datetime. | Same. | Current audited; pending native. | Requires native date/time picker. |
 | Message header: subject, flagged tag, labels, sender avatar/name/email, date. | Same. | Current audited; pending native. | Label chips removable. |
 | Label add dropdown lists labels not already on the message. | Same. | Current audited; pending native. | Uses label APIs. |
-| Header context menu: reply, forward, archive, delete, read/unread, copy sender email. | Same. | Current audited; pending native. | Requires clipboard support. |
+| Header context menu: reply, forward, archive, delete, read/unread, copy sender email. | Same. | Native implemented; cargo check. | Right-click message header opens native menu; sender-email resolution is covered. |
 | Attachment indicator. | Same current level. | Current audited; product gap. | No current attachment download/open UI. |
 | HTML body shown in sandboxed iframe when available; text fallback otherwise. | Native rich document viewer with safe rendering and text fallback. | Current audited; pending native. | Largest migration risk. |
 | Quick reply textarea, send button, sending/error states. | Same. | Current audited; pending native. | Sends via `/api/v1/messages`. |
-| Shortcuts e, #, u, Escape. | Same. | Current audited; pending native. | Ignore while focus is in text inputs. |
+| Shortcuts e, #, u, Escape. | Same. | Native implemented; automated tests. | Ignored while quick-reply inputs or snooze picker are focused. |
 
 ## Compose
 
