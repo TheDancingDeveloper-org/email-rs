@@ -62,7 +62,7 @@ Status values:
 | Other folders under collapsible Folders group with indentation. | Same. | Current audited; pending native. | Preserve `[Gmail]/` depth behavior. |
 | Folder context menu: open, mark all read. | Same. | Current audited; pending native. | Smart folders expose only Open folder. |
 | Account list at bottom with avatars, email, Add account. | Same. | Current audited; pending native. | Multiple accounts covered by fixture. |
-| Footer density buttons, theme toggle, settings button. | Same. | Current audited; pending native. | Use native icons/buttons. |
+| Footer density buttons, theme toggle, settings button. | Same. | Native implemented; cargo check. | Settings opens the native modal. |
 
 ## Message List
 
@@ -126,19 +126,19 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Settings modal tabs: General, each account, Rules per account, Webhooks. | Native modal/nav sections. | Current audited; pending native. | Layout can change, sections cannot disappear. |
-| General theme select. | Same. | Current audited; pending native. | Native may use segmented control. |
-| General density stepper with labels. | Same. | Current audited; pending native. | Levels `0..8`. |
-| Account info display name, email, provider. | Same. | Current audited; pending native. | Email/provider read-only. |
-| Sync setting: download last N days or all. | Same. | Current audited; pending native. | PATCH account. |
-| Signature textarea. | Same. | Current audited; pending native. | Used by compose. |
-| Excluded folders checkbox list. | Same. | Current audited; pending native. | Current UI mutates local folder object. |
+| Settings modal tabs: General, each account, Rules per account, Webhooks. | Native modal/nav sections. | Native partial; documented gaps. | General/account tabs implemented. Rules currently one placeholder, not per-account tabs; Webhooks placeholder. |
+| General theme select. | Same. | Native implemented; cargo check. | Native uses buttons for Light/Dark. |
+| General density stepper with labels. | Same. | Native implemented; cargo check. | Levels `0..8`. |
+| Account info display name, email, provider. | Same. | Native implemented; automated tests. | Email/provider read-only; name request is validated and trimmed. |
+| Sync setting: download last N days or all. | Same. | Native implemented; automated tests. | PATCH account; `null` clear semantics fixed for all/no limit. |
+| Signature textarea. | Same. | Native implemented; automated tests. | Blank signature clears the account signature. |
+| Excluded folders checkbox list. | Same. | Native implemented; cargo check. | Patches folder exclusion and refreshes account tree. |
 | Remove account danger zone with confirmation. | Same. | Current audited; pending native. | Cascade delete remains backend behavior. |
-| Save status. | Same. | Current audited; pending native. | Success/error feedback. |
-| Rules list with enable toggle, name, counts, edit, delete, new. | Same. | Current audited; pending native. | Per account. |
-| Rule editor with name, condition builder, actions, folder selector, save/cancel/error. | Same. | Current audited; pending native. | App-specific screen. |
-| Webhooks list, enabled toggle, signed indicator, delete. | Same. | Current audited; pending native. | Preserve event display. |
-| Add webhook: URL, secret, events select, add/error. | Same. | Current audited; pending native. | Same payload. |
+| Save status. | Same. | Native implemented; cargo check. | Account save and folder-update success/error feedback. |
+| Rules list with enable toggle, name, counts, edit, delete, new. | Same. | Current audited; pending native. | Documented Phase 6b gap; per account. |
+| Rule editor with name, condition builder, actions, folder selector, save/cancel/error. | Same. | Current audited; pending native. | Documented Phase 6b gap. |
+| Webhooks list, enabled toggle, signed indicator, delete. | Same. | Current audited; pending native. | Documented Phase 6b gap; preserve event display. |
+| Add webhook: URL, secret, events select, add/error. | Same. | Current audited; pending native. | Documented Phase 6b gap; same payload. |
 
 ## Command Palette
 
@@ -147,7 +147,7 @@ Status values:
 | Ctrl/Cmd+K opens/closes palette. | Same. | Current audited; pending native. | Bind through native actions. |
 | Groups: Actions, Navigate, Labels, Folders, Message. | Same. | Current audited; pending native. | Requires enhanced generic palette. |
 | Fuzzy matching with label/keyword scoring. | Same or better. | Current audited; pending native. | Preserve predictable ordering. |
-| Actions: New Message, Advanced Search, Settings, theme, density. | Same. | Native partial; Settings pending. | New Message, Advanced Search, theme, and density wired. |
+| Actions: New Message, Advanced Search, Settings, theme, density. | Same. | Native implemented; cargo check. | New Message, Advanced Search, Settings, theme, and density wired. |
 | Navigation: Mail, Calendar, smart folders, labels, folders. | Same. | Current audited; pending native. | Folder hints include account/full path. |
 | Message actions: reply, forward, archive, delete, read/unread, flag/unflag. | Same. | Current audited; pending native. | Only for selected message. |
 | Keyboard Up/Down, Enter, Escape. | Same. | Current audited; pending native. | Mouse hover/select too. |

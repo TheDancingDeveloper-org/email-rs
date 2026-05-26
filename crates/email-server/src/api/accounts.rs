@@ -79,7 +79,7 @@ pub async fn update_account(
             .execute(&state.pool)
             .await?;
     }
-    if let Some(ref sig) = body.signature {
+    if let Some(sig) = body.signature {
         sqlx::query("UPDATE accounts SET signature = ? WHERE id = ?")
             .bind(sig)
             .bind(&id)
@@ -310,6 +310,45 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["name"], "New Name");
+    }
+
+    #[tokio::test]
+    async fn update_account_clears_optional_settings() {
+        let state = setup().await;
+        sqlx::query(
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type, sync_days_limit, signature) VALUES (?,?,?,?,?,?,?)",
+        )
+        .bind("clear-id")
+        .bind("Clear")
+        .bind("clear@example.com")
+        .bind("generic_imap")
+        .bind("password")
+        .bind(14i64)
+        .bind("Regards")
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "PATCH",
+            "/accounts/clear-id",
+            Some(serde_json::json!({
+                "syncDaysLimit": null,
+                "signature": null
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (sync_days_limit, signature): (Option<i64>, Option<String>) =
+            sqlx::query_as("SELECT sync_days_limit, signature FROM accounts WHERE id = ?")
+                .bind("clear-id")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(sync_days_limit, None);
+        assert_eq!(signature, None);
     }
 
     #[tokio::test]

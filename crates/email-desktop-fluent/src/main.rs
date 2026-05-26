@@ -11,8 +11,8 @@ use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
     Account, AccountSettings, BulkAction, BulkRequest, Condition, ConditionField, ConditionGroup,
-    ConditionOperator, Folder, FullMessage, Label, MatchMode, Message, PatchMessageRequest,
-    SendRequest, SnoozeRequest, SyncEvent,
+    ConditionOperator, Folder, FullMessage, Label, MatchMode, Message, PatchFolder,
+    PatchMessageRequest, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -45,7 +45,8 @@ actions!(
         StartCompose,
         StartReplyCompose,
         StartForwardCompose,
-        OpenAdvancedSearch
+        OpenAdvancedSearch,
+        OpenSettings
     ]
 );
 
@@ -762,6 +763,7 @@ struct EmailDesktopApp {
     workspace: Entity<Workspace>,
     palette: Entity<CommandPalette>,
     advanced_search_modal: Entity<AdvancedSearchModal>,
+    settings_modal: Entity<SettingsModal>,
     sync_updates: Receiver<NativeSyncUpdate>,
 }
 
@@ -782,6 +784,10 @@ impl EmailDesktopApp {
         let advanced_search_modal = cx.new({
             let state = state.clone();
             move |cx| AdvancedSearchModal::new(cx, state.clone())
+        });
+        let settings_modal = cx.new({
+            let state = state.clone();
+            move |cx| SettingsModal::new(cx, state.clone())
         });
         cx.spawn(
             |app: gpui::WeakEntity<Self>, async_cx: &mut gpui::AsyncApp| {
@@ -808,6 +814,7 @@ impl EmailDesktopApp {
             workspace,
             palette,
             advanced_search_modal,
+            settings_modal,
             sync_updates,
         }
     }
@@ -976,9 +983,17 @@ impl Render for EmailDesktopApp {
                     cx.notify();
                 }),
             )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &OpenSettings, _, cx| {
+                    open_settings_modal(&app.state, &app.settings_modal, cx);
+                    app.refresh_palette_entries(cx);
+                    cx.notify();
+                }),
+            )
             .child(self.workspace.clone())
             .child(self.palette.clone())
             .child(self.advanced_search_modal.clone())
+            .child(self.settings_modal.clone())
     }
 }
 
@@ -2284,6 +2299,988 @@ fn parse_condition_operator(value: &str) -> Option<ConditionOperator> {
         "starts_with" => Some(ConditionOperator::StartsWith),
         _ => None,
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SettingsTab {
+    General,
+    Account(String),
+    Rules,
+    Webhooks,
+}
+
+#[derive(Clone)]
+struct SettingsModal {
+    state: Entity<NativeAppState>,
+    active_tab: SettingsTab,
+    name_input: Entity<TextInput>,
+    sync_days_input: Entity<TextInput>,
+    signature_input: Entity<Textarea>,
+    loading_account: bool,
+    saving_account: bool,
+    status: Option<(String, bool)>,
+}
+
+impl SettingsModal {
+    fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        Self {
+            state,
+            active_tab: SettingsTab::General,
+            name_input: cx.new(|_| TextInput::new().placeholder("Display name")),
+            sync_days_input: cx.new(|_| TextInput::new().placeholder("All")),
+            signature_input: cx.new(|_| {
+                Textarea::new()
+                    .placeholder("Your email signature...")
+                    .rows(5)
+            }),
+            loading_account: false,
+            saving_account: false,
+            status: None,
+        }
+    }
+
+    fn reset(&mut self, cx: &mut Context<Self>) {
+        self.active_tab = SettingsTab::General;
+        self.loading_account = false;
+        self.saving_account = false;
+        self.status = None;
+        self.name_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.sync_days_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.signature_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        cx.notify();
+    }
+
+    fn select_account(&mut self, account: &Account, cx: &mut Context<Self>) {
+        self.active_tab = SettingsTab::Account(account.id.clone());
+        self.loading_account = true;
+        self.saving_account = false;
+        self.status = None;
+        self.name_input
+            .update(cx, |input, cx| input.set_value(account.name.clone(), cx));
+        self.sync_days_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.signature_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        cx.notify();
+    }
+
+    fn apply_account_settings(&mut self, settings: AccountSettings, cx: &mut Context<Self>) {
+        if self.active_tab != SettingsTab::Account(settings.id.clone()) {
+            return;
+        }
+
+        self.loading_account = false;
+        self.status = None;
+        self.name_input
+            .update(cx, |input, cx| input.set_value(settings.name, cx));
+        self.sync_days_input.update(cx, |input, cx| {
+            input.set_value(
+                settings
+                    .sync_days_limit
+                    .map(|days| days.to_string())
+                    .unwrap_or_default(),
+                cx,
+            );
+        });
+        self.signature_input.update(cx, |input, cx| {
+            input.set_value(settings.signature.unwrap_or_default(), cx);
+        });
+        cx.notify();
+    }
+
+    fn fail_account_settings(&mut self, account_id: &str, message: String, cx: &mut Context<Self>) {
+        if self.active_tab != SettingsTab::Account(account_id.to_string()) {
+            return;
+        }
+        self.loading_account = false;
+        self.status = Some((message, false));
+        cx.notify();
+    }
+
+    fn set_status(&mut self, status: Option<(String, bool)>, cx: &mut Context<Self>) {
+        self.status = status;
+        self.saving_account = false;
+        cx.notify();
+    }
+}
+
+impl Render for SettingsModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx).clone();
+        if !state.modals.settings_open {
+            return div();
+        }
+
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let mut backdrop = colors.surface_dim;
+        backdrop.a = 0.58;
+        let modal_entity = cx.entity();
+
+        div()
+            .absolute()
+            .inset_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(backdrop)
+            .on_mouse_down(MouseButton::Left, {
+                let state_entity = self.state.clone();
+                move |_, _, app_cx| close_settings_modal(&state_entity, app_cx)
+            })
+            .child(
+                div()
+                    .w(px(860.0))
+                    .max_h(px(620.0))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(colors.stroke_neutral)
+                    .bg(colors.surface)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, app_cx| {
+                        app_cx.stop_propagation();
+                    })
+                    .child(settings_header(&self.state, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .child(settings_tabs(&self.state, &modal_entity, &state, self, cx))
+                            .child(settings_body(&self.state, &modal_entity, &state, self, cx)),
+                    ),
+            )
+    }
+}
+
+fn settings_header(
+    state_entity: &Entity<NativeAppState>,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    div()
+        .px(px(18.0))
+        .py(px(14.0))
+        .border_b_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_size(px(typography.subtitle.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.on_neutral)
+                .child("Settings"),
+        )
+        .child(
+            Button::new("settings-close")
+                .label("Close")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    move |_, _, app_cx| close_settings_modal(&state_entity, app_cx)
+                }),
+        )
+}
+
+fn settings_tabs(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    state: &NativeAppState,
+    modal: &SettingsModal,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let mut tabs = div()
+        .w(px(220.0))
+        .min_h_0()
+        .border_r_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .p(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(settings_tab_button(
+            "settings-tab-general",
+            "General",
+            modal.active_tab == SettingsTab::General,
+            {
+                let modal_entity = modal_entity.clone();
+                move |_, _, app_cx| {
+                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal.active_tab = SettingsTab::General;
+                        modal.status = None;
+                        cx.notify();
+                    });
+                }
+            },
+            cx,
+        ));
+
+    for account in &state.accounts {
+        tabs = tabs.child(settings_tab_button(
+            SharedString::from(format!("settings-tab-account-{}", account.id)),
+            account.name.as_str(),
+            modal.active_tab == SettingsTab::Account(account.id.clone()),
+            {
+                let state_entity = state_entity.clone();
+                let modal_entity = modal_entity.clone();
+                let account_id = account.id.clone();
+                move |_, _, app_cx| {
+                    select_settings_account(
+                        &state_entity,
+                        &modal_entity,
+                        account_id.clone(),
+                        app_cx,
+                    );
+                }
+            },
+            cx,
+        ));
+    }
+
+    tabs.child(settings_tab_button(
+        "settings-tab-rules",
+        "Rules",
+        modal.active_tab == SettingsTab::Rules,
+        {
+            let modal_entity = modal_entity.clone();
+            move |_, _, app_cx| {
+                let _ = modal_entity.update(app_cx, |modal, cx| {
+                    modal.active_tab = SettingsTab::Rules;
+                    modal.status = None;
+                    cx.notify();
+                });
+            }
+        },
+        cx,
+    ))
+    .child(settings_tab_button(
+        "settings-tab-webhooks",
+        "Webhooks",
+        modal.active_tab == SettingsTab::Webhooks,
+        {
+            let modal_entity = modal_entity.clone();
+            move |_, _, app_cx| {
+                let _ = modal_entity.update(app_cx, |modal, cx| {
+                    modal.active_tab = SettingsTab::Webhooks;
+                    modal.status = None;
+                    cx.notify();
+                });
+            }
+        },
+        cx,
+    ))
+}
+
+fn settings_tab_button(
+    id: impl Into<gpui::ElementId>,
+    label: &str,
+    selected: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    div()
+        .id(id)
+        .h(px(32.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .rounded(px(4.0))
+        .bg(if selected {
+            colors.neutral_selected
+        } else {
+            colors.surface
+        })
+        .text_size(px(theme.typography.body.size))
+        .font_weight(if selected {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::NORMAL
+        })
+        .text_color(colors.on_neutral)
+        .cursor_pointer()
+        .on_click(on_click)
+        .child(label.to_string())
+        .into_any_element()
+}
+
+fn settings_body(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    state: &NativeAppState,
+    modal: &SettingsModal,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    match &modal.active_tab {
+        SettingsTab::General => div()
+            .id("settings-body-general")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p(px(18.0))
+            .child(settings_general_body(state, cx))
+            .into_any_element(),
+        SettingsTab::Account(account_id) => div()
+            .id("settings-body-account")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p(px(18.0))
+            .child(settings_account_body(
+                state_entity,
+                modal_entity,
+                state,
+                modal,
+                account_id,
+                cx,
+            ))
+            .into_any_element(),
+        SettingsTab::Rules => div()
+            .flex_1()
+            .p(px(18.0))
+            .text_size(px(theme.typography.body.size))
+            .text_color(colors.on_subtle)
+            .child("Rules editor remains in a later Phase 6 slice.")
+            .into_any_element(),
+        SettingsTab::Webhooks => div()
+            .flex_1()
+            .p(px(18.0))
+            .text_size(px(theme.typography.body.size))
+            .text_color(colors.on_subtle)
+            .child("Webhook management remains in a later Phase 6 slice.")
+            .into_any_element(),
+    }
+}
+
+fn settings_general_body(state: &NativeAppState, cx: &mut Context<SettingsModal>) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let theme_is_dark = state.theme == ThemeMode::Dark;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .child(settings_section_title("Appearance", cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Theme", cx))
+                .child(
+                    Button::new("settings-theme-light")
+                        .label("Light")
+                        .appearance(if theme_is_dark {
+                            ButtonAppearance::Subtle
+                        } else {
+                            ButtonAppearance::Neutral
+                        })
+                        .size(ButtonSize::Compact)
+                        .on_click(|_, _, app_cx| app_cx.dispatch_action(&ApplyLightTheme)),
+                )
+                .child(
+                    Button::new("settings-theme-dark")
+                        .label("Dark")
+                        .appearance(if theme_is_dark {
+                            ButtonAppearance::Neutral
+                        } else {
+                            ButtonAppearance::Subtle
+                        })
+                        .size(ButtonSize::Compact)
+                        .on_click(|_, _, app_cx| app_cx.dispatch_action(&ApplyDarkTheme)),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Density", cx))
+                .child(
+                    IconButton::new("settings-density-down", "icons/chevron_down.svg")
+                        .size(ButtonSize::Compact)
+                        .disabled(state.density.level == 0)
+                        .on_click(|_, _, app_cx| app_cx.dispatch_action(&DecreaseDensity)),
+                )
+                .child(
+                    div()
+                        .w(px(96.0))
+                        .text_size(px(typography.body.size))
+                        .text_color(colors.on_neutral)
+                        .child(format!("Level {}", state.density.level)),
+                )
+                .child(
+                    IconButton::new("settings-density-up", "icons/chevron_up.svg")
+                        .size(ButtonSize::Compact)
+                        .disabled(state.density.level >= 8)
+                        .on_click(|_, _, app_cx| app_cx.dispatch_action(&IncreaseDensity)),
+                ),
+        )
+}
+
+fn settings_account_body(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    state: &NativeAppState,
+    modal: &SettingsModal,
+    account_id: &str,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let Some(account) = state
+        .accounts
+        .iter()
+        .find(|account| account.id == account_id)
+    else {
+        return div()
+            .text_size(px(typography.body.size))
+            .text_color(colors.on_subtle)
+            .child("Account not found.");
+    };
+    let folders = state
+        .folders_by_account
+        .get(account_id)
+        .cloned()
+        .unwrap_or_default();
+    let status = modal.status.clone();
+
+    let mut folder_list = div().flex().flex_col().gap(px(4.0));
+    if folders.is_empty() {
+        folder_list = folder_list.child(
+            div()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("No folders synced yet."),
+        );
+    } else {
+        for folder in folders {
+            let folder_id = folder.id.clone();
+            let next_excluded = !folder.is_excluded;
+            folder_list = folder_list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        Checkbox::new(SharedString::from(format!("settings-folder-{}", folder.id)))
+                            .state(if folder.is_excluded {
+                                CheckboxState::Unchecked
+                            } else {
+                                CheckboxState::Checked
+                            })
+                            .on_click({
+                                let state_entity = state_entity.clone();
+                                let modal_entity = modal_entity.clone();
+                                move |_, _, _, app_cx| {
+                                    start_folder_exclusion_toggle(
+                                        &state_entity,
+                                        &modal_entity,
+                                        folder_id.clone(),
+                                        next_excluded,
+                                        app_cx,
+                                    );
+                                }
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(typography.body.size))
+                            .text_color(colors.on_neutral)
+                            .child(folder_label(&folder)),
+                    )
+                    .when(folder.is_excluded, |row| {
+                        row.child(
+                            div()
+                                .text_size(px(typography.caption.size))
+                                .text_color(colors.on_subtle)
+                                .child("excluded"),
+                        )
+                    }),
+            );
+        }
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .child(settings_section_title("Account info", cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Display name", cx))
+                .child(div().w(px(260.0)).child(modal.name_input.clone())),
+        )
+        .child(settings_readonly_row("Email", account.email.as_str(), cx))
+        .child(settings_readonly_row(
+            "Provider",
+            account.provider_type.as_str(),
+            cx,
+        ))
+        .child(settings_section_title("Sync settings", cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Download days", cx))
+                .child(div().w(px(140.0)).child(modal.sync_days_input.clone()))
+                .child(
+                    div()
+                        .text_size(px(typography.caption.size))
+                        .text_color(colors.on_subtle)
+                        .child("Leave empty for all"),
+                ),
+        )
+        .child(settings_section_title("Signature", cx))
+        .child(modal.signature_input.clone())
+        .child(settings_section_title("Excluded folders", cx))
+        .child(folder_list)
+        .when(modal.loading_account, |body| {
+            body.child(
+                div()
+                    .text_size(px(typography.caption.size))
+                    .text_color(colors.on_subtle)
+                    .child("Loading account settings..."),
+            )
+        })
+        .when_some(status, |body, (message, ok)| {
+            body.child(
+                div()
+                    .text_size(px(typography.caption.size))
+                    .text_color(if ok {
+                        colors.status_success
+                    } else {
+                        colors.status_error
+                    })
+                    .child(message),
+            )
+        })
+        .child(
+            div().flex().items_center().gap(px(8.0)).child(
+                Button::new("settings-save-account")
+                    .label(if modal.saving_account {
+                        "Saving..."
+                    } else {
+                        "Save changes"
+                    })
+                    .appearance(ButtonAppearance::Accent)
+                    .size(ButtonSize::Compact)
+                    .disabled(modal.loading_account || modal.saving_account)
+                    .on_click({
+                        let state_entity = state_entity.clone();
+                        let modal_entity = modal_entity.clone();
+                        let account_id = account_id.to_string();
+                        move |_, _, app_cx| {
+                            start_settings_save(
+                                &state_entity,
+                                &modal_entity,
+                                account_id.clone(),
+                                app_cx,
+                            );
+                        }
+                    }),
+            ),
+        )
+}
+
+fn settings_section_title(label: &'static str, cx: &mut Context<SettingsModal>) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .pt(px(4.0))
+        .text_size(px(theme.typography.body.size))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.colors.on_neutral)
+        .child(label)
+}
+
+fn settings_label(label: &'static str, cx: &mut Context<SettingsModal>) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .w(px(120.0))
+        .text_size(px(theme.typography.caption.size))
+        .text_color(theme.colors.on_subtle)
+        .child(label)
+}
+
+fn settings_readonly_row(
+    label: &'static str,
+    value: &str,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let body_size = theme.typography.body.size;
+    let value_color = theme.colors.on_subtle;
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(settings_label(label, cx))
+        .child(
+            div()
+                .text_size(px(body_size))
+                .text_color(value_color)
+                .child(value.to_string()),
+        )
+}
+
+fn open_settings_modal(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    app_cx: &mut App,
+) {
+    state_entity.update(app_cx, |state, cx| {
+        state.modals.settings_open = true;
+        state.modals.advanced_search_open = false;
+        cx.notify();
+    });
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.reset(cx);
+    });
+}
+
+fn close_settings_modal(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.modals.settings_open = false;
+        cx.notify();
+    });
+}
+
+fn select_settings_account(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    app_cx: &mut App,
+) {
+    let selection = {
+        let state = state_entity.read(app_cx);
+        state
+            .accounts
+            .iter()
+            .find(|account| account.id == account_id)
+            .cloned()
+            .map(|account| (state.api_base_url.clone(), account))
+    };
+
+    let Some((base_url, account)) = selection else {
+        let message = "Account not found.".to_string();
+        state_entity.update(app_cx, |state, cx| {
+            state.last_error = Some(message.clone());
+            cx.notify();
+        });
+        let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal.set_status(Some((message, false)), cx);
+        });
+        return;
+    };
+
+    let account_id = account.id.clone();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.select_account(&account, cx);
+    });
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_account_signature(base_url, account_id.clone()) });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    let requested_account_id = account.id.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let error_message = result.as_ref().err().map(|err| err.to_string());
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                    Ok(settings) => modal.apply_account_settings(settings, cx),
+                    Err(err) => {
+                        modal.fail_account_settings(&requested_account_id, err.to_string(), cx);
+                    }
+                }) {
+                    tracing::warn!("failed to apply native account settings load: {err}");
+                }
+
+                if let Some(message) = error_message {
+                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                        state.last_error = Some(message);
+                        cx.notify();
+                    }) {
+                        tracing::warn!("failed to apply native account settings error: {err}");
+                    }
+                }
+            }
+        })
+        .detach();
+}
+
+fn start_settings_save(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    app_cx: &mut App,
+) {
+    let (name, sync_days, signature) = {
+        let modal = modal_entity.read(app_cx);
+        (
+            modal.name_input.read(app_cx).text().to_string(),
+            modal.sync_days_input.read(app_cx).text().to_string(),
+            modal.signature_input.read(app_cx).text().to_string(),
+        )
+    };
+
+    let request = match build_account_settings_update_request(name, sync_days, signature) {
+        Ok(request) => request,
+        Err(message) => {
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.set_status(Some((message.clone(), false)), cx);
+            });
+            state_entity.update(app_cx, |state, cx| {
+                state.last_error = Some(message);
+                cx.notify();
+            });
+            return;
+        }
+    };
+
+    let (base_url, refresh_request) = state_entity.update(app_cx, |state, cx| {
+        let refresh_request = begin_sync_complete_refresh(state);
+        state.last_error = None;
+        cx.notify();
+        (state.api_base_url.clone(), refresh_request)
+    });
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.saving_account = true;
+        modal.status = None;
+        cx.notify();
+    });
+
+    let load_request = refresh_request.clone();
+    let requested_account_id = account_id.clone();
+    let task = app_cx.background_executor().spawn(async move {
+        update_account_settings_and_refresh(base_url, account_id.clone(), request, load_request)
+    });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let modal_status = match &result {
+                    Ok(_) => ("Saved".to_string(), true),
+                    Err(err) => (err.to_string(), false),
+                };
+
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_sync_refresh(state, refresh_request, loaded);
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, refresh_request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native settings save refresh: {err}");
+                }
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                    if modal.active_tab == SettingsTab::Account(requested_account_id.clone()) {
+                        modal.set_status(Some(modal_status), cx);
+                    } else {
+                        modal.saving_account = false;
+                        cx.notify();
+                    }
+                }) {
+                    tracing::warn!("failed to apply native settings save status: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn start_folder_exclusion_toggle(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    folder_id: String,
+    next_excluded: bool,
+    app_cx: &mut App,
+) {
+    let (base_url, refresh_request) = state_entity.update(app_cx, |state, cx| {
+        let refresh_request = begin_sync_complete_refresh(state);
+        state.last_error = None;
+        cx.notify();
+        (state.api_base_url.clone(), refresh_request)
+    });
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.status = Some(("Updating folder...".to_string(), true));
+        cx.notify();
+    });
+
+    let load_request = refresh_request.clone();
+    let task = app_cx.background_executor().spawn(async move {
+        patch_folder_exclusion_and_refresh(base_url, folder_id, next_excluded, load_request)
+    });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let modal_status = match &result {
+                    Ok(_) => ("Folder updated".to_string(), true),
+                    Err(err) => (err.to_string(), false),
+                };
+
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_sync_refresh(state, refresh_request, loaded);
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, refresh_request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native folder exclusion refresh: {err}");
+                }
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                    modal.set_status(Some(modal_status), cx);
+                }) {
+                    tracing::warn!("failed to apply native folder exclusion status: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn update_account_settings_and_refresh(
+    base_url: String,
+    account_id: String,
+    request: UpdateAccount,
+    refresh_request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .update_account(&account_id, &request)
+            .await
+            .with_context(|| format!("update account settings for {account_id}"))?;
+        load_sync_refresh_with_client(&client, refresh_request).await
+    })
+}
+
+fn patch_folder_exclusion_and_refresh(
+    base_url: String,
+    folder_id: String,
+    next_excluded: bool,
+    refresh_request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .patch_folder(
+                &folder_id,
+                &PatchFolder {
+                    is_excluded: Some(next_excluded),
+                },
+            )
+            .await
+            .with_context(|| format!("update folder exclusion for {folder_id}"))?;
+        load_sync_refresh_with_client(&client, refresh_request).await
+    })
+}
+
+async fn load_sync_refresh_with_client(
+    client: &EmailClient,
+    request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let tree = load_account_tree(client).await?;
+    let messages = if let Some(source) = request.source {
+        Some(load_message_collection_with_client(client, source, request.selected_message).await?)
+    } else {
+        None
+    };
+
+    Ok(LoadedSyncRefresh {
+        accounts: tree.accounts,
+        folders_by_account: tree.folders_by_account,
+        labels: tree.labels,
+        messages,
+    })
+}
+
+fn build_account_settings_update_request(
+    name: String,
+    sync_days: String,
+    signature: String,
+) -> std::result::Result<UpdateAccount, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Enter a display name.".to_string());
+    }
+
+    let sync_days_limit = if sync_days.trim().is_empty() {
+        None
+    } else {
+        let parsed = sync_days
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| "Download days must be a positive whole number.".to_string())?;
+        if parsed < 1 {
+            return Err("Download days must be a positive whole number.".to_string());
+        }
+        Some(parsed)
+    };
+
+    let signature = if signature.trim().is_empty() {
+        None
+    } else {
+        Some(signature)
+    };
+
+    Ok(UpdateAccount {
+        name: Some(name),
+        sync_days_limit: Some(sync_days_limit),
+        signature: Some(signature),
+    })
 }
 
 #[derive(Clone)]
@@ -5188,6 +6185,52 @@ mod tests {
 
         assert_eq!(err, "Wait for the account signature to load.");
     }
+
+    #[test]
+    fn settings_update_request_trims_name_and_sets_optional_values() {
+        let request = build_account_settings_update_request(
+            "  Ada  ".to_string(),
+            "30".to_string(),
+            "Regards,\nAda".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(request.name.as_deref(), Some("Ada"));
+        assert_eq!(request.sync_days_limit, Some(Some(30)));
+        assert_eq!(request.signature, Some(Some("Regards,\nAda".to_string())));
+    }
+
+    #[test]
+    fn settings_update_request_clears_blank_optional_values() {
+        let request = build_account_settings_update_request(
+            "Ada".to_string(),
+            " ".to_string(),
+            "\n  ".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(request.sync_days_limit, Some(None));
+        assert_eq!(request.signature, Some(None));
+    }
+
+    #[test]
+    fn settings_update_request_rejects_invalid_values() {
+        let err = build_account_settings_update_request(
+            " ".to_string(),
+            "30".to_string(),
+            "Sig".to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "Enter a display name.");
+
+        let err = build_account_settings_update_request(
+            "Ada".to_string(),
+            "0".to_string(),
+            "Sig".to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "Download days must be a positive whole number.");
+    }
 }
 
 fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
@@ -5208,10 +6251,10 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
             .action(|_, cx| cx.dispatch_action(&OpenAdvancedSearch)),
         PaletteEntry::new("settings", "Open Settings")
             .group("Actions")
-            .subtitle("Settings modal lands in Phase 6")
+            .subtitle("Open app and account settings")
             .keyword("preferences")
             .keyword("options")
-            .disabled(true),
+            .action(|_, cx| cx.dispatch_action(&OpenSettings)),
         PaletteEntry::new("theme-light", "Light theme")
             .group("Actions")
             .hint("Ctrl+Shift+L")
@@ -5675,6 +6718,15 @@ fn sidebar_footer(
                     } else {
                         app_cx.dispatch_action(&ApplyDarkTheme);
                     }
+                }),
+        )
+        .child(
+            Button::new("sidebar-settings")
+                .label("Settings")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .on_click(|_, _, app_cx| {
+                    app_cx.dispatch_action(&OpenSettings);
                 }),
         )
 }
