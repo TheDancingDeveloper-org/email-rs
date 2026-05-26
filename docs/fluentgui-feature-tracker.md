@@ -56,7 +56,7 @@ Status values:
 | Advanced search filter button state. | Same. | Native implemented; automated tests. | Opens native modal; active state follows advanced search state. |
 | Smart folders All Inboxes, Unread, Flagged, Snoozed. | Same. | Native implemented; cargo check. | API IDs are `all`, `unread`, `flagged`, `snoozed`. |
 | Calendar nav item. | Same. | Native implemented; cargo check. | Switches to calendar and loads the active week. |
-| Labels section with color dots. | Same. | Native partial; cargo check. | Native label rows load; color-dot fidelity still needs visual polish. |
+| Labels section with color dots. | Same. | Native implemented; automated tests. | Native label rows render parsed label colors with accent fallback. |
 | Per-account collapsible sections. | Same. | Native implemented; cargo check. | Account rows preserve unread badges and folder groups. |
 | Special folders ordered inbox, sent, drafts, archive, trash, spam. | Same. | Native implemented; cargo check. | Backend list orders by `special_use`; native renders ordered folder rows. |
 | Other folders under collapsible Folders group with indentation. | Same. | Native implemented; cargo check. | Native preserves folder path indentation. |

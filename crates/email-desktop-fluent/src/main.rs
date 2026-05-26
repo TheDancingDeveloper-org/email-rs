@@ -32,8 +32,8 @@ use fluent_primitives::{
     SuggestionListState, TextInput, Textarea, TokenInput, TokenInputSuggestion, TokenInputToken,
 };
 use gpui::{
-    actions, div, prelude::*, px, svg, uniform_list, App, ClipboardItem, Context, Entity,
-    FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
+    actions, div, prelude::*, px, rgb, svg, uniform_list, App, ClipboardItem, Context, Entity,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
     MouseDownEvent, Pixels, Point, Render, SharedString, Window,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -10401,6 +10401,15 @@ mod tests {
     }
 
     #[test]
+    fn label_color_parser_accepts_css_hex_colors() {
+        assert!(parse_label_color("#5b5fc7").is_some());
+        assert_eq!(parse_label_color("#abc"), parse_label_color("#aabbcc"));
+        assert_eq!(parse_label_color("5B5FC7"), parse_label_color("#5b5fc7"));
+        assert!(parse_label_color("not-a-color").is_none());
+        assert!(parse_label_color("#12").is_none());
+    }
+
+    #[test]
     fn recipient_suggestions_prefer_contacts_and_dedupe_visible_senders() {
         let mut ada_message = message("ada-message", "inbox", true);
         ada_message.from_name = Some("Visible Ada".to_string());
@@ -13037,7 +13046,7 @@ fn label_rows(
         let selected = state.selected_label.as_deref() == Some(label.id.as_str());
         let state_entity = state_entity.clone();
         rows = rows.child(
-            sidebar_nav_row(label.name.clone(), selected, None, 0, "icons/pin.svg", cx)
+            sidebar_label_row(label.name.clone(), selected, label.color.clone(), cx)
                 .id(SharedString::from(format!("label-{label_key}")))
                 .cursor_pointer()
                 .on_click(move |_, _, app_cx| {
@@ -13050,6 +13059,94 @@ fn label_rows(
         );
     }
     rows
+}
+
+fn sidebar_label_row(
+    label: String,
+    selected: bool,
+    color: String,
+    cx: &mut Context<SidebarPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let dot_color = parse_label_color(&color).unwrap_or(colors.accent);
+
+    div()
+        .min_h(px(28.0))
+        .pl(px(8.0))
+        .pr(px(8.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .rounded(px(3.0))
+        .bg(if selected {
+            colors.neutral_selected
+        } else {
+            colors.panel_bg
+        })
+        .text_size(px(typography.body.size))
+        .text_color(colors.on_neutral)
+        .hover({
+            let hover = colors.neutral_hover;
+            let selected_bg = colors.neutral_selected;
+            move |style| style.bg(if selected { selected_bg } else { hover })
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .w(px(3.0))
+                        .h(px(18.0))
+                        .rounded(px(999.0))
+                        .bg(if selected {
+                            colors.accent
+                        } else {
+                            colors.panel_bg
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(8.0))
+                        .rounded(px(999.0))
+                        .bg(dot_color),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(label),
+                ),
+        )
+}
+
+fn parse_label_color(value: &str) -> Option<Hsla> {
+    let trimmed = value.trim();
+    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    let expanded = match hex.len() {
+        3 => {
+            let mut out = String::with_capacity(6);
+            for ch in hex.chars() {
+                out.push(ch);
+                out.push(ch);
+            }
+            out
+        }
+        6 => hex.to_string(),
+        _ => return None,
+    };
+    u32::from_str_radix(&expanded, 16)
+        .ok()
+        .map(|value| rgb(value).into())
 }
 
 fn sidebar_nav_row(
