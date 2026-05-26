@@ -27,12 +27,12 @@ Status values:
 | Current | Native | Verified | Notes |
 |---|---|---|---|
 | Blank while accounts load. | Native loading state or brief skeleton. | Current audited; pending native. | Native should improve clarity without changing behavior. |
-| First-run account setup screen. | Native setup screen. | Current audited; pending native. | Covered by no-account fixture. |
-| Gmail OAuth start. | Fetch authorize URL and open system browser. | Manual required. | Requires credentials. |
-| Microsoft 365 OAuth start. | Same. | Manual required. | Requires credentials. |
-| Microsoft app-password fallback. | Native form with Outlook/SMTP defaults. | Current audited; pending native. | Defaults are `outlook.office365.com` and `smtp.office365.com`. |
-| Manual IMAP/SMTP form. | Native form with same fields and same-password toggle. | Current audited; pending native. | Fixture accounts avoid live service calls. |
-| Add account modal from sidebar. | Native modal. | Current audited; pending native. | Same success refresh behavior. |
+| First-run account setup screen. | Native setup modal shown automatically when no accounts exist. | Native implemented; automated tests. | Request builders and first-run reload/close behavior covered. |
+| Gmail OAuth start. | Fetch authorize URL and open system browser. | Manual required; native plumbing implemented. | Requires credentials; native exposes account refresh after browser callback. |
+| Microsoft 365 OAuth start. | Same. | Manual required; native plumbing implemented. | Requires credentials; native exposes account refresh after browser callback. |
+| Microsoft app-password fallback. | Native form with Outlook/SMTP defaults. | Native implemented; automated tests. | Defaults are `outlook.office365.com` and `smtp.office365.com`. |
+| Manual IMAP/SMTP form. | Native form with same fields and same-password toggle. | Native implemented; automated tests. | Fixture accounts avoid live service calls. |
+| Add account modal from sidebar. | Native modal. | Native implemented; cargo check. | Opens from sidebar and command palette; successful create reloads accounts. |
 
 ## Main Layout And Navigation
 
@@ -61,7 +61,7 @@ Status values:
 | Special folders ordered inbox, sent, drafts, archive, trash, spam. | Same. | Current audited; pending native. | Backend list orders by `special_use`. |
 | Other folders under collapsible Folders group with indentation. | Same. | Current audited; pending native. | Preserve `[Gmail]/` depth behavior. |
 | Folder context menu: open, mark all read. | Same. | Current audited; pending native. | Smart folders expose only Open folder. |
-| Account list at bottom with avatars, email, Add account. | Same. | Current audited; pending native. | Multiple accounts covered by fixture. |
+| Account list at bottom with avatars, email, Add account. | Same. | Native implemented; cargo check. | Native Add account opens the setup modal; avatar/email polish still tracks with sidebar parity. |
 | Footer density buttons, theme toggle, settings button. | Same. | Native implemented; cargo check. | Settings opens the native modal. |
 
 ## Message List
@@ -147,7 +147,7 @@ Status values:
 | Ctrl/Cmd+K opens/closes palette. | Same. | Current audited; pending native. | Bind through native actions. |
 | Groups: Actions, Navigate, Labels, Folders, Message. | Same. | Current audited; pending native. | Requires enhanced generic palette. |
 | Fuzzy matching with label/keyword scoring. | Same or better. | Current audited; pending native. | Preserve predictable ordering. |
-| Actions: New Message, Advanced Search, Settings, theme, density. | Same. | Native implemented; cargo check. | New Message, Advanced Search, Settings, theme, and density wired. |
+| Actions: New Message, Add Account, Advanced Search, Settings, theme, density. | Same. | Native implemented; cargo check. | New Message, Add Account, Advanced Search, Settings, theme, and density wired. |
 | Navigation: Mail, Calendar, smart folders, labels, folders. | Same. | Current audited; pending native. | Folder hints include account/full path. |
 | Message actions: reply, forward, archive, delete, read/unread, flag/unflag. | Same. | Current audited; pending native. | Only for selected message. |
 | Keyboard Up/Down, Enter, Escape. | Same. | Current audited; pending native. | Mouse hover/select too. |

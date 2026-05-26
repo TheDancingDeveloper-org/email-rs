@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,9 +12,9 @@ use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
     Account, AccountSettings, ActionInput, BulkAction, BulkRequest, Condition, ConditionField,
-    ConditionGroup, ConditionInput, ConditionOperator, CreateWebhook, Folder, FullMessage, Label,
-    MatchMode, Message, PatchFolder, PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest,
-    SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
+    ConditionGroup, ConditionInput, ConditionOperator, CreateAccount, CreateWebhook, Folder,
+    FullMessage, Label, MatchMode, Message, PatchFolder, PatchMessageRequest, RuleDto, SendRequest,
+    SnoozeRequest, SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -47,6 +48,7 @@ actions!(
         StartReplyCompose,
         StartForwardCompose,
         OpenAdvancedSearch,
+        OpenAccountSetup,
         OpenSettings
     ]
 );
@@ -763,6 +765,7 @@ struct EmailDesktopApp {
     state: Entity<NativeAppState>,
     workspace: Entity<Workspace>,
     palette: Entity<CommandPalette>,
+    account_setup_modal: Entity<AccountSetupModal>,
     advanced_search_modal: Entity<AdvancedSearchModal>,
     settings_modal: Entity<SettingsModal>,
     sync_updates: Receiver<NativeSyncUpdate>,
@@ -782,6 +785,10 @@ impl EmailDesktopApp {
         WindowTitle::set_status(cx, native_window_status(&state_snapshot));
         let (sync_tx, sync_updates) = mpsc::channel();
         start_sync_events_thread(state_snapshot.api_base_url.clone(), sync_tx);
+        let account_setup_modal = cx.new({
+            let state = state.clone();
+            move |cx| AccountSetupModal::new(cx, state.clone())
+        });
         let advanced_search_modal = cx.new({
             let state = state.clone();
             move |cx| AdvancedSearchModal::new(cx, state.clone())
@@ -814,6 +821,7 @@ impl EmailDesktopApp {
             state,
             workspace,
             palette,
+            account_setup_modal,
             advanced_search_modal,
             settings_modal,
             sync_updates,
@@ -985,6 +993,13 @@ impl Render for EmailDesktopApp {
                 }),
             )
             .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &OpenAccountSetup, _, cx| {
+                    open_account_setup_modal(&app.state, &app.account_setup_modal, cx);
+                    app.refresh_palette_entries(cx);
+                    cx.notify();
+                }),
+            )
+            .on_action(
                 cx.listener(|app: &mut EmailDesktopApp, _: &OpenSettings, _, cx| {
                     open_settings_modal(&app.state, &app.settings_modal, cx);
                     app.refresh_palette_entries(cx);
@@ -993,6 +1008,7 @@ impl Render for EmailDesktopApp {
             )
             .child(self.workspace.clone())
             .child(self.palette.clone())
+            .child(self.account_setup_modal.clone())
             .child(self.advanced_search_modal.clone())
             .child(self.settings_modal.clone())
     }
@@ -1218,6 +1234,15 @@ impl Render for SidebarPlaceholder {
                     .child(smart_folder_rows(&self.state, &state, cx))
                     .child(section_label("Accounts", cx))
                     .child(account_list)
+                    .child(
+                        Button::new("sidebar-add-account")
+                            .label("Add account")
+                            .appearance(ButtonAppearance::Subtle)
+                            .size(ButtonSize::Compact)
+                            .on_click(|_, _, app_cx| {
+                                app_cx.dispatch_action(&OpenAccountSetup);
+                            }),
+                    )
                     .child(section_label("Labels", cx))
                     .child(label_rows(&self.state, &state, cx)),
             )
@@ -2420,6 +2445,638 @@ fn parse_condition_operator(value: &str) -> Option<ConditionOperator> {
         "starts_with" => Some(ConditionOperator::StartsWith),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountSetupMode {
+    Choice,
+    ManualImap,
+    MicrosoftAppPassword,
+}
+
+impl AccountSetupMode {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Choice => "Connect account",
+            Self::ManualImap => "Manual IMAP/SMTP",
+            Self::MicrosoftAppPassword => "Microsoft app password",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountSetupProvider {
+    Gmail,
+    Microsoft,
+}
+
+impl AccountSetupProvider {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Gmail => "Gmail",
+            Self::Microsoft => "Microsoft 365",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AccountSetupFormDraft {
+    name: String,
+    email: String,
+    imap_host: String,
+    imap_port: String,
+    imap_password: String,
+    smtp_host: String,
+    smtp_port: String,
+    smtp_password: String,
+    same_password: bool,
+}
+
+struct AccountSetupModal {
+    state: Entity<NativeAppState>,
+    focus_handle: FocusHandle,
+    focused_on_open: bool,
+    mode: AccountSetupMode,
+    name_input: Entity<TextInput>,
+    email_input: Entity<TextInput>,
+    imap_host_input: Entity<TextInput>,
+    imap_port_input: Entity<TextInput>,
+    imap_password_input: Entity<TextInput>,
+    smtp_host_input: Entity<TextInput>,
+    smtp_port_input: Entity<TextInput>,
+    smtp_password_input: Entity<TextInput>,
+    same_password: bool,
+    submitting: bool,
+    refreshing: bool,
+    oauth_loading: Option<AccountSetupProvider>,
+    status: Option<(String, bool)>,
+}
+
+impl AccountSetupModal {
+    fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        Self {
+            state,
+            focus_handle: cx.focus_handle().tab_stop(true),
+            focused_on_open: false,
+            mode: AccountSetupMode::Choice,
+            name_input: cx.new(|_| TextInput::new().placeholder("Display name")),
+            email_input: cx.new(|_| TextInput::new().placeholder("name@example.com")),
+            imap_host_input: cx.new(|_| TextInput::new().placeholder("imap.example.com")),
+            imap_port_input: cx.new(|_| TextInput::new().placeholder("993")),
+            imap_password_input: cx
+                .new(|_| TextInput::new().placeholder("IMAP password").masked(true)),
+            smtp_host_input: cx.new(|_| TextInput::new().placeholder("smtp.example.com")),
+            smtp_port_input: cx.new(|_| TextInput::new().placeholder("587")),
+            smtp_password_input: cx
+                .new(|_| TextInput::new().placeholder("SMTP password").masked(true)),
+            same_password: true,
+            submitting: false,
+            refreshing: false,
+            oauth_loading: None,
+            status: None,
+        }
+    }
+
+    fn is_busy(&self) -> bool {
+        self.submitting || self.refreshing || self.oauth_loading.is_some()
+    }
+
+    fn reset(&mut self, cx: &mut Context<Self>) {
+        self.mode = AccountSetupMode::Choice;
+        self.same_password = true;
+        self.submitting = false;
+        self.refreshing = false;
+        self.oauth_loading = None;
+        self.status = None;
+        self.clear_inputs(cx);
+        cx.notify();
+    }
+
+    fn clear_inputs(&mut self, cx: &mut Context<Self>) {
+        self.name_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.email_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.imap_host_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.imap_port_input
+            .update(cx, |input, cx| input.set_value("993", cx));
+        self.imap_password_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.smtp_host_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.smtp_port_input
+            .update(cx, |input, cx| input.set_value("587", cx));
+        self.smtp_password_input
+            .update(cx, |input, cx| input.set_value("", cx));
+    }
+
+    fn show_mode(&mut self, mode: AccountSetupMode, cx: &mut Context<Self>) {
+        self.mode = mode;
+        self.same_password = true;
+        self.submitting = false;
+        self.refreshing = false;
+        self.oauth_loading = None;
+        self.status = None;
+        self.clear_inputs(cx);
+        if mode == AccountSetupMode::MicrosoftAppPassword {
+            self.imap_host_input.update(cx, |input, cx| {
+                input.set_value("outlook.office365.com", cx);
+            });
+            self.smtp_host_input.update(cx, |input, cx| {
+                input.set_value("smtp.office365.com", cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn set_status(&mut self, status: Option<(String, bool)>, cx: &mut Context<Self>) {
+        self.status = status;
+        self.submitting = false;
+        self.refreshing = false;
+        self.oauth_loading = None;
+        cx.notify();
+    }
+}
+
+impl Render for AccountSetupModal {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx).clone();
+        let first_run = state.accounts.is_empty();
+        if !first_run && !state.modals.account_setup_open {
+            self.focused_on_open = false;
+            return div();
+        }
+        if !self.focused_on_open {
+            window.focus(&self.focus_handle);
+            self.focused_on_open = true;
+        }
+
+        let theme = cx.theme();
+        let colors = theme.colors.clone();
+        let typography = theme.typography;
+        let mut backdrop = colors.surface_dim;
+        backdrop.a = 0.6;
+        let modal_entity = cx.entity();
+        let can_close = !first_run && !self.is_busy();
+
+        div()
+            .absolute()
+            .inset_0()
+            .size_full()
+            .tab_index(0)
+            .key_context("AccountSetupModal")
+            .track_focus(&self.focus_handle)
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(backdrop)
+            .on_key_down({
+                let state_entity = self.state.clone();
+                let modal_entity = modal_entity.clone();
+                move |ev: &KeyDownEvent, _, app_cx| {
+                    if handle_account_setup_key(
+                        &state_entity,
+                        &modal_entity,
+                        ev.keystroke.key.as_str(),
+                        app_cx,
+                    ) {
+                        app_cx.stop_propagation();
+                    }
+                }
+            })
+            .on_mouse_down(MouseButton::Left, {
+                let state_entity = self.state.clone();
+                move |_, _, app_cx| {
+                    if can_close {
+                        close_account_setup_modal(&state_entity, app_cx);
+                    }
+                }
+            })
+            .child(
+                div()
+                    .w(px(620.0))
+                    .max_h(px(680.0))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(colors.stroke_neutral)
+                    .bg(colors.surface)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, app_cx| {
+                        app_cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .px(px(18.0))
+                            .py(px(14.0))
+                            .border_b_1()
+                            .border_color(colors.stroke_neutral_subtle)
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(typography.subtitle.size))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(colors.on_neutral)
+                                            .child(if first_run {
+                                                "Set up email-rs"
+                                            } else {
+                                                "Add account"
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(typography.caption.size))
+                                            .text_color(colors.on_subtle)
+                                            .child(self.mode.title()),
+                                    ),
+                            )
+                            .when(can_close, |header| {
+                                header.child(
+                                    Button::new("account-setup-close")
+                                        .label("Close")
+                                        .appearance(ButtonAppearance::Subtle)
+                                        .size(ButtonSize::Compact)
+                                        .on_click({
+                                            let state_entity = self.state.clone();
+                                            move |_, _, app_cx| {
+                                                close_account_setup_modal(&state_entity, app_cx);
+                                            }
+                                        }),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("account-setup-body")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p(px(18.0))
+                            .child(account_setup_body(
+                                &self.state,
+                                &modal_entity,
+                                first_run,
+                                self,
+                                cx,
+                            )),
+                    ),
+            )
+    }
+}
+
+fn account_setup_body(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    first_run: bool,
+    modal: &AccountSetupModal,
+    cx: &mut Context<AccountSetupModal>,
+) -> gpui::AnyElement {
+    match modal.mode {
+        AccountSetupMode::Choice => {
+            account_setup_choice_body(state_entity, modal_entity, modal, cx).into_any_element()
+        }
+        AccountSetupMode::ManualImap | AccountSetupMode::MicrosoftAppPassword => {
+            account_setup_form_body(state_entity, modal_entity, first_run, modal, cx)
+                .into_any_element()
+        }
+    }
+}
+
+fn account_setup_choice_body(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    modal: &AccountSetupModal,
+    cx: &mut Context<AccountSetupModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let busy = modal.is_busy();
+    let gmail_loading = modal.oauth_loading == Some(AccountSetupProvider::Gmail);
+    let microsoft_loading = modal.oauth_loading == Some(AccountSetupProvider::Microsoft);
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(
+            Button::new("account-setup-gmail")
+                .label(if gmail_loading {
+                    "Opening Gmail..."
+                } else {
+                    "Connect Gmail"
+                })
+                .appearance(ButtonAppearance::Accent)
+                .disabled(busy)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    let modal_entity = modal_entity.clone();
+                    move |_, _, app_cx| {
+                        start_account_setup_oauth(
+                            &state_entity,
+                            &modal_entity,
+                            AccountSetupProvider::Gmail,
+                            app_cx,
+                        );
+                    }
+                }),
+        )
+        .child(
+            Button::new("account-setup-microsoft-oauth")
+                .label(if microsoft_loading {
+                    "Opening Microsoft 365..."
+                } else {
+                    "Connect Microsoft 365"
+                })
+                .appearance(ButtonAppearance::Neutral)
+                .disabled(busy)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    let modal_entity = modal_entity.clone();
+                    move |_, _, app_cx| {
+                        start_account_setup_oauth(
+                            &state_entity,
+                            &modal_entity,
+                            AccountSetupProvider::Microsoft,
+                            app_cx,
+                        );
+                    }
+                }),
+        )
+        .child(
+            div()
+                .h(px(1.0))
+                .my(px(4.0))
+                .bg(colors.stroke_neutral_subtle),
+        )
+        .child(
+            Button::new("account-setup-microsoft-app-password")
+                .label("Use Microsoft app password")
+                .appearance(ButtonAppearance::Subtle)
+                .disabled(busy)
+                .on_click({
+                    let modal_entity = modal_entity.clone();
+                    move |_, _, app_cx| {
+                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                            modal.show_mode(AccountSetupMode::MicrosoftAppPassword, cx);
+                        });
+                    }
+                }),
+        )
+        .child(
+            Button::new("account-setup-manual")
+                .label("Manual IMAP/SMTP")
+                .appearance(ButtonAppearance::Subtle)
+                .disabled(busy)
+                .on_click({
+                    let modal_entity = modal_entity.clone();
+                    move |_, _, app_cx| {
+                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                            modal.show_mode(AccountSetupMode::ManualImap, cx);
+                        });
+                    }
+                }),
+        )
+        .when_some(modal.status.as_ref(), |body, status| {
+            body.child(account_setup_status(status, cx)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        Button::new("account-setup-refresh")
+                            .label(if modal.refreshing {
+                                "Refreshing..."
+                            } else {
+                                "Refresh accounts"
+                            })
+                            .appearance(ButtonAppearance::Neutral)
+                            .size(ButtonSize::Compact)
+                            .disabled(busy)
+                            .on_click({
+                                let state_entity = state_entity.clone();
+                                let modal_entity = modal_entity.clone();
+                                move |_, _, app_cx| {
+                                    start_account_setup_refresh(
+                                        &state_entity,
+                                        &modal_entity,
+                                        app_cx,
+                                    );
+                                }
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(typography.caption.size))
+                            .text_color(colors.on_subtle)
+                            .child("Use after browser authorization completes."),
+                    ),
+            )
+        })
+}
+
+fn account_setup_form_body(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    first_run: bool,
+    modal: &AccountSetupModal,
+    cx: &mut Context<AccountSetupModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let busy = modal.is_busy();
+    let is_manual = modal.mode == AccountSetupMode::ManualImap;
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(account_setup_field("Name", modal.name_input.clone(), cx))
+        .child(account_setup_field("Email", modal.email_input.clone(), cx))
+        .child(
+            div()
+                .flex()
+                .gap(px(10.0))
+                .child(div().flex_1().min_w_0().child(account_setup_field(
+                    "IMAP host",
+                    modal.imap_host_input.clone(),
+                    cx,
+                )))
+                .child(div().w(px(120.0)).child(account_setup_field(
+                    "Port",
+                    modal.imap_port_input.clone(),
+                    cx,
+                ))),
+        )
+        .child(account_setup_field(
+            if is_manual {
+                "IMAP password"
+            } else {
+                "App password"
+            },
+            modal.imap_password_input.clone(),
+            cx,
+        ))
+        .child(
+            div()
+                .flex()
+                .gap(px(10.0))
+                .child(div().flex_1().min_w_0().child(account_setup_field(
+                    "SMTP host",
+                    modal.smtp_host_input.clone(),
+                    cx,
+                )))
+                .child(div().w(px(120.0)).child(account_setup_field(
+                    "Port",
+                    modal.smtp_port_input.clone(),
+                    cx,
+                ))),
+        )
+        .when(is_manual, |form| {
+            form.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        Checkbox::new("account-setup-same-password")
+                            .state(if modal.same_password {
+                                CheckboxState::Checked
+                            } else {
+                                CheckboxState::Unchecked
+                            })
+                            .disabled(busy)
+                            .on_click({
+                                let modal_entity = modal_entity.clone();
+                                move |new_state, _, _, app_cx| {
+                                    let same_password = matches!(new_state, CheckboxState::Checked);
+                                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                                        modal.same_password = same_password;
+                                        modal.status = None;
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(typography.body.size))
+                            .text_color(colors.on_neutral)
+                            .child("Use IMAP password for SMTP"),
+                    ),
+            )
+        })
+        .when(is_manual && !modal.same_password, |form| {
+            form.child(account_setup_field(
+                "SMTP password",
+                modal.smtp_password_input.clone(),
+                cx,
+            ))
+        })
+        .when_some(modal.status.as_ref(), |form, status| {
+            form.child(account_setup_status(status, cx))
+        })
+        .child(
+            div()
+                .pt(px(4.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    Button::new("account-setup-back")
+                        .label(if first_run { "Back" } else { "Cancel" })
+                        .appearance(ButtonAppearance::Subtle)
+                        .disabled(busy)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let modal_entity = modal_entity.clone();
+                            move |_, _, app_cx| {
+                                cancel_account_setup_form(
+                                    &state_entity,
+                                    &modal_entity,
+                                    first_run,
+                                    app_cx,
+                                );
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("account-setup-submit")
+                        .label(if modal.submitting {
+                            "Adding..."
+                        } else {
+                            "Add account"
+                        })
+                        .appearance(ButtonAppearance::Accent)
+                        .disabled(busy)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let modal_entity = modal_entity.clone();
+                            move |_, _, app_cx| {
+                                start_account_setup_create(&state_entity, &modal_entity, app_cx);
+                            }
+                        }),
+                ),
+        )
+}
+
+fn account_setup_field(
+    label: &'static str,
+    input: Entity<TextInput>,
+    cx: &mut Context<AccountSetupModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(
+            div()
+                .text_size(px(theme.typography.caption.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.on_subtle)
+                .child(label),
+        )
+        .child(input)
+}
+
+fn account_setup_status(status: &(String, bool), cx: &mut Context<AccountSetupModal>) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    div()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(if status.1 {
+            colors.status_success
+        } else {
+            colors.status_error
+        })
+        .bg(colors.surface)
+        .text_size(px(theme.typography.caption.size))
+        .text_color(if status.1 {
+            colors.status_success
+        } else {
+            colors.status_error
+        })
+        .child(status.0.clone())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4417,6 +5074,323 @@ fn settings_readonly_row(
         )
 }
 
+fn open_account_setup_modal(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    app_cx: &mut App,
+) {
+    state_entity.update(app_cx, |state, cx| {
+        state.modals.account_setup_open = true;
+        state.modals.settings_open = false;
+        state.modals.advanced_search_open = false;
+        cx.notify();
+    });
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.reset(cx);
+    });
+}
+
+fn close_account_setup_modal(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        if !state.accounts.is_empty() {
+            state.modals.account_setup_open = false;
+        }
+        cx.notify();
+    });
+}
+
+fn handle_account_setup_key(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    key: &str,
+    app_cx: &mut App,
+) -> bool {
+    match key {
+        "escape" => {
+            let (mode, busy, first_run) = {
+                let modal = modal_entity.read(app_cx);
+                (
+                    modal.mode,
+                    modal.is_busy(),
+                    modal.state.read(app_cx).accounts.is_empty(),
+                )
+            };
+            if busy {
+                return true;
+            }
+            if mode != AccountSetupMode::Choice {
+                let _ = modal_entity.update(app_cx, |modal, cx| {
+                    modal.show_mode(AccountSetupMode::Choice, cx);
+                });
+                return true;
+            }
+            if !first_run {
+                close_account_setup_modal(state_entity, app_cx);
+            }
+            true
+        }
+        "enter" | "return" => {
+            let mode = modal_entity.read(app_cx).mode;
+            if mode == AccountSetupMode::ManualImap
+                || mode == AccountSetupMode::MicrosoftAppPassword
+            {
+                start_account_setup_create(state_entity, modal_entity, app_cx);
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn cancel_account_setup_form(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    first_run: bool,
+    app_cx: &mut App,
+) {
+    if first_run {
+        let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal.show_mode(AccountSetupMode::Choice, cx);
+        });
+    } else {
+        close_account_setup_modal(state_entity, app_cx);
+    }
+}
+
+fn start_account_setup_oauth(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    provider: AccountSetupProvider,
+    app_cx: &mut App,
+) {
+    if modal_entity.read(app_cx).is_busy() {
+        return;
+    }
+
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.oauth_loading = Some(provider);
+        modal.status = None;
+        cx.notify();
+    });
+    state_entity.update(app_cx, |state, cx| {
+        state.last_error = None;
+        cx.notify();
+    });
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { authorize_account_setup(base_url, provider) });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let status = match &result {
+                    Ok(_) => (
+                        format!("Browser opened for {} authorization.", provider.label()),
+                        true,
+                    ),
+                    Err(err) => (err.to_string(), false),
+                };
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                    modal.set_status(Some(status.clone()), cx);
+                }) {
+                    tracing::warn!("failed to apply native OAuth status: {err}");
+                }
+
+                if !status.1 {
+                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                        state.last_error = Some(status.0);
+                        cx.notify();
+                    }) {
+                        tracing::warn!("failed to apply native OAuth error: {err}");
+                    }
+                }
+            }
+        })
+        .detach();
+}
+
+fn start_account_setup_create(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    app_cx: &mut App,
+) {
+    let (mode, draft, busy) = {
+        let modal = modal_entity.read(app_cx);
+        (
+            modal.mode,
+            AccountSetupFormDraft {
+                name: modal.name_input.read(app_cx).text().to_string(),
+                email: modal.email_input.read(app_cx).text().to_string(),
+                imap_host: modal.imap_host_input.read(app_cx).text().to_string(),
+                imap_port: modal.imap_port_input.read(app_cx).text().to_string(),
+                imap_password: modal.imap_password_input.read(app_cx).text().to_string(),
+                smtp_host: modal.smtp_host_input.read(app_cx).text().to_string(),
+                smtp_port: modal.smtp_port_input.read(app_cx).text().to_string(),
+                smtp_password: modal.smtp_password_input.read(app_cx).text().to_string(),
+                same_password: modal.same_password,
+            },
+            modal.is_busy(),
+        )
+    };
+    if busy {
+        return;
+    }
+
+    let request = match mode {
+        AccountSetupMode::ManualImap => build_manual_account_request(draft),
+        AccountSetupMode::MicrosoftAppPassword => build_microsoft_app_password_request(draft),
+        AccountSetupMode::Choice => Err("Choose an account setup method.".to_string()),
+    };
+    let request = match request {
+        Ok(request) => request,
+        Err(message) => {
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.set_status(Some((message.clone(), false)), cx);
+            });
+            state_entity.update(app_cx, |state, cx| {
+                state.last_error = Some(message);
+                cx.notify();
+            });
+            return;
+        }
+    };
+
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.submitting = true;
+        modal.status = None;
+        cx.notify();
+    });
+    state_entity.update(app_cx, |state, cx| {
+        state.last_error = None;
+        cx.notify();
+    });
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { create_account_and_reload(base_url, request) });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let error_message = result.as_ref().err().map(|err| err.to_string());
+
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_account_create_reload(state, loaded);
+                        }
+                        Err(err) => {
+                            state.last_error = Some(err.to_string());
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native account create reload: {err}");
+                }
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                    if let Some(message) = error_message {
+                        modal.set_status(Some((message, false)), cx);
+                    } else {
+                        modal.reset(cx);
+                    }
+                }) {
+                    tracing::warn!("failed to apply native account create status: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn start_account_setup_refresh(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    app_cx: &mut App,
+) {
+    if modal_entity.read(app_cx).is_busy() {
+        return;
+    }
+
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.refreshing = true;
+        modal.status = None;
+        cx.notify();
+    });
+    state_entity.update(app_cx, |state, cx| {
+        state.last_error = None;
+        cx.notify();
+    });
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { reload_accounts(base_url) });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let error_message = result.as_ref().err().map(|err| err.to_string());
+                let loaded_has_accounts = result
+                    .as_ref()
+                    .map(|loaded| !loaded.accounts.is_empty())
+                    .unwrap_or(false);
+
+                if loaded_has_accounts {
+                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                        if let Ok(loaded) = result {
+                            apply_account_create_reload(state, loaded);
+                            sync_window_title(state, cx);
+                            cx.notify();
+                        }
+                    }) {
+                        tracing::warn!("failed to apply native account refresh: {err}");
+                    }
+                }
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                    if loaded_has_accounts {
+                        modal.reset(cx);
+                    } else if let Some(message) = error_message.clone() {
+                        modal.set_status(Some((message.clone(), false)), cx);
+                    } else {
+                        modal.set_status(
+                            Some(("No authorized account found yet.".to_string(), false)),
+                            cx,
+                        );
+                    }
+                }) {
+                    tracing::warn!("failed to apply native account refresh status: {err}");
+                }
+
+                if let Some(message) = error_message {
+                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                        state.last_error = Some(message);
+                        cx.notify();
+                    }) {
+                        tracing::warn!("failed to apply native account refresh error: {err}");
+                    }
+                }
+            }
+        })
+        .detach();
+}
+
 fn open_settings_modal(
     state_entity: &Entity<NativeAppState>,
     modal_entity: &Entity<SettingsModal>,
@@ -4820,6 +5794,82 @@ fn start_settings_account_delete(
             }
         })
         .detach();
+}
+
+fn authorize_account_setup(base_url: String, provider: AccountSetupProvider) -> Result<String> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let response = match provider {
+            AccountSetupProvider::Gmail => client.gmail_authorize().await?,
+            AccountSetupProvider::Microsoft => client.microsoft_authorize().await?,
+        };
+        open_url_in_browser(&response.url)
+            .with_context(|| format!("open {} authorization URL", provider.label()))?;
+        Ok(response.url)
+    })
+}
+
+fn open_url_in_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .context("launch default browser")?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .context("launch default browser")?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .context("launch default browser")?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(anyhow!(
+        "opening a browser is not supported on this platform"
+    ))
+}
+
+fn create_account_and_reload(base_url: String, request: CreateAccount) -> Result<NativeAppState> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client.create_account(&request).await.with_context(|| {
+            format!(
+                "create {} account for {}",
+                request.provider_type, request.email
+            )
+        })?;
+        let mut loaded = load_accounts(&client)
+            .await
+            .context("reload accounts after creating account")?;
+        loaded.api_base_url = base_url;
+        Ok(loaded)
+    })
+}
+
+fn reload_accounts(base_url: String) -> Result<NativeAppState> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let mut loaded = load_accounts(&client).await.context("reload accounts")?;
+        loaded.api_base_url = base_url;
+        Ok(loaded)
+    })
 }
 
 fn start_settings_rule_toggle(
@@ -5402,6 +6452,58 @@ fn mutate_settings_webhooks(
     })
 }
 
+fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeAppState) {
+    let had_accounts = !state.accounts.is_empty();
+    let theme = state.theme.clone();
+    let density = state.density.clone();
+    let selected_view = state.selected_view.clone();
+    let selected_folder = state.selected_folder.clone();
+    let selected_label = state.selected_label.clone();
+    let selected_message = state.selected_message.clone();
+    let selected_message_ids = state.selected_message_ids.clone();
+    let selected_full_message = state.selected_full_message.clone();
+    let selected_message_resource = state.selected_message_resource.clone();
+    let selected_message_labels = state.selected_message_labels.clone();
+    let selected_message_labels_resource = state.selected_message_labels_resource.clone();
+    let selected_event = state.selected_event.clone();
+    let search = state.search.clone();
+    let messages = state.messages.clone();
+    let messages_resource = state.messages_resource.clone();
+    let palette = state.palette.clone();
+    let sync = state.sync.clone();
+    let compose = state.compose.clone();
+
+    loaded.theme = theme;
+    loaded.density = density;
+    if had_accounts {
+        loaded.selected_view = selected_view;
+        loaded.selected_folder = selected_folder;
+        loaded.selected_label = selected_label;
+        loaded.selected_message = selected_message;
+        loaded.selected_message_ids = selected_message_ids;
+        loaded.selected_full_message = selected_full_message;
+        loaded.selected_message_resource = selected_message_resource;
+        loaded.selected_message_labels = selected_message_labels;
+        loaded.selected_message_labels_resource = selected_message_labels_resource;
+        loaded.selected_event = selected_event;
+        loaded.search = search;
+        loaded.messages = messages;
+        loaded.messages_resource = messages_resource;
+    } else {
+        loaded.selected_view = SelectedView::Mail;
+    }
+    loaded.palette = palette;
+    loaded.sync = sync;
+    loaded.compose = compose;
+    loaded.modals = ModalStates {
+        account_setup_open: false,
+        settings_open: false,
+        advanced_search_open: false,
+    };
+    loaded.last_error = None;
+    *state = loaded;
+}
+
 fn apply_account_delete_reload(
     state: &mut NativeAppState,
     deleted_account_id: &str,
@@ -5437,6 +6539,119 @@ fn apply_account_delete_reload(
     };
     loaded.last_error = None;
     *state = loaded;
+}
+
+fn build_manual_account_request(
+    draft: AccountSetupFormDraft,
+) -> std::result::Result<CreateAccount, String> {
+    let name = validate_account_setup_name(&draft.name)?;
+    let email = validate_account_setup_email(&draft.email)?;
+    let imap_host = validate_account_setup_host(&draft.imap_host, "IMAP host")?;
+    let imap_port = parse_account_setup_port(&draft.imap_port, "IMAP")?;
+    let smtp_host = validate_account_setup_host(&draft.smtp_host, "SMTP host")?;
+    let smtp_port = parse_account_setup_port(&draft.smtp_port, "SMTP")?;
+    let imap_password = validate_account_setup_password(&draft.imap_password, "IMAP password")?;
+    let smtp_password = if draft.same_password {
+        imap_password.clone()
+    } else {
+        validate_account_setup_password(&draft.smtp_password, "SMTP password")?
+    };
+
+    Ok(CreateAccount {
+        name,
+        email,
+        provider_type: "imap".to_string(),
+        auth_type: "basic".to_string(),
+        oauth_token_json: None,
+        host: Some(imap_host),
+        port: Some(imap_port),
+        use_ssl: None,
+        password: Some(imap_password),
+        smtp_host: Some(smtp_host),
+        smtp_port: Some(smtp_port),
+        smtp_password: Some(smtp_password),
+    })
+}
+
+fn build_microsoft_app_password_request(
+    draft: AccountSetupFormDraft,
+) -> std::result::Result<CreateAccount, String> {
+    let name = validate_account_setup_name(&draft.name)?;
+    let email = validate_account_setup_email(&draft.email)?;
+    let imap_host = validate_account_setup_host(&draft.imap_host, "IMAP host")?;
+    let imap_port = parse_account_setup_port(&draft.imap_port, "IMAP")?;
+    let smtp_host = validate_account_setup_host(&draft.smtp_host, "SMTP host")?;
+    let smtp_port = parse_account_setup_port(&draft.smtp_port, "SMTP")?;
+    let password = validate_account_setup_password(&draft.imap_password, "App password")?;
+
+    Ok(CreateAccount {
+        name,
+        email,
+        provider_type: "microsoft365".to_string(),
+        auth_type: "app_password".to_string(),
+        oauth_token_json: None,
+        host: Some(imap_host),
+        port: Some(imap_port),
+        use_ssl: None,
+        password: Some(password.clone()),
+        smtp_host: Some(smtp_host),
+        smtp_port: Some(smtp_port),
+        smtp_password: Some(password),
+    })
+}
+
+fn validate_account_setup_name(value: &str) -> std::result::Result<String, String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Err("Enter a display name.".to_string())
+    } else {
+        Ok(value)
+    }
+}
+
+fn validate_account_setup_email(value: &str) -> std::result::Result<String, String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err("Enter an email address.".to_string());
+    }
+    if !value.contains('@') {
+        return Err("Enter a valid email address.".to_string());
+    }
+    Ok(value)
+}
+
+fn validate_account_setup_host(
+    value: &str,
+    label: &'static str,
+) -> std::result::Result<String, String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Err(format!("Enter a {label}."))
+    } else {
+        Ok(value)
+    }
+}
+
+fn validate_account_setup_password(
+    value: &str,
+    label: &'static str,
+) -> std::result::Result<String, String> {
+    if value.trim().is_empty() {
+        Err(format!("Enter a {label}."))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn parse_account_setup_port(value: &str, label: &'static str) -> std::result::Result<i64, String> {
+    let port = value
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| format!("{label} port must be a positive whole number."))?;
+    if !(1..=65535).contains(&port) {
+        return Err(format!("{label} port must be between 1 and 65535."));
+    }
+    Ok(port)
 }
 
 fn build_create_webhook_request(
@@ -8631,6 +9846,200 @@ mod tests {
         assert_eq!(err, "Download days must be a positive whole number.");
     }
 
+    fn account_setup_draft() -> AccountSetupFormDraft {
+        AccountSetupFormDraft {
+            name: "  Ada  ".to_string(),
+            email: "  ada@example.test  ".to_string(),
+            imap_host: "  imap.example.test  ".to_string(),
+            imap_port: "993".to_string(),
+            imap_password: "imap-secret".to_string(),
+            smtp_host: "  smtp.example.test  ".to_string(),
+            smtp_port: "587".to_string(),
+            smtp_password: "smtp-secret".to_string(),
+            same_password: true,
+        }
+    }
+
+    #[test]
+    fn manual_account_request_trims_fields_and_reuses_imap_password() {
+        let request = build_manual_account_request(account_setup_draft()).unwrap();
+
+        assert_eq!(request.name, "Ada");
+        assert_eq!(request.email, "ada@example.test");
+        assert_eq!(request.provider_type, "imap");
+        assert_eq!(request.auth_type, "basic");
+        assert_eq!(request.host.as_deref(), Some("imap.example.test"));
+        assert_eq!(request.port, Some(993));
+        assert_eq!(request.password.as_deref(), Some("imap-secret"));
+        assert_eq!(request.smtp_host.as_deref(), Some("smtp.example.test"));
+        assert_eq!(request.smtp_port, Some(587));
+        assert_eq!(request.smtp_password.as_deref(), Some("imap-secret"));
+        assert_eq!(request.use_ssl, None);
+    }
+
+    #[test]
+    fn manual_account_request_uses_distinct_smtp_password() {
+        let mut draft = account_setup_draft();
+        draft.same_password = false;
+
+        let request = build_manual_account_request(draft).unwrap();
+
+        assert_eq!(request.password.as_deref(), Some("imap-secret"));
+        assert_eq!(request.smtp_password.as_deref(), Some("smtp-secret"));
+    }
+
+    #[test]
+    fn microsoft_app_password_request_maps_defaults() {
+        let mut draft = account_setup_draft();
+        draft.imap_host = "outlook.office365.com".to_string();
+        draft.smtp_host = "smtp.office365.com".to_string();
+        draft.imap_password = "app-secret".to_string();
+
+        let request = build_microsoft_app_password_request(draft).unwrap();
+
+        assert_eq!(request.provider_type, "microsoft365");
+        assert_eq!(request.auth_type, "app_password");
+        assert_eq!(request.host.as_deref(), Some("outlook.office365.com"));
+        assert_eq!(request.port, Some(993));
+        assert_eq!(request.password.as_deref(), Some("app-secret"));
+        assert_eq!(request.smtp_host.as_deref(), Some("smtp.office365.com"));
+        assert_eq!(request.smtp_port, Some(587));
+        assert_eq!(request.smtp_password.as_deref(), Some("app-secret"));
+    }
+
+    #[test]
+    fn account_setup_request_rejects_invalid_values() {
+        let mut draft = account_setup_draft();
+        draft.email = "ada".to_string();
+        let err = build_manual_account_request(draft).unwrap_err();
+        assert_eq!(err, "Enter a valid email address.");
+
+        let mut draft = account_setup_draft();
+        draft.imap_port = "0".to_string();
+        let err = build_manual_account_request(draft).unwrap_err();
+        assert_eq!(err, "IMAP port must be between 1 and 65535.");
+
+        let mut draft = account_setup_draft();
+        draft.same_password = false;
+        draft.smtp_password = " ".to_string();
+        let err = build_manual_account_request(draft).unwrap_err();
+        assert_eq!(err, "Enter a SMTP password.");
+    }
+
+    #[test]
+    fn account_create_reload_closes_setup_on_first_run() {
+        let mut state = NativeAppState {
+            theme: ThemeMode::Light,
+            density: DensityTokens::new(6),
+            modals: ModalStates {
+                account_setup_open: true,
+                settings_open: true,
+                advanced_search_open: true,
+            },
+            palette: PaletteState {
+                open: true,
+                query: "account".to_string(),
+            },
+            ..NativeAppState::default()
+        };
+        let loaded = NativeAppState {
+            api_base_url: "http://localhost:3000".to_string(),
+            accounts: vec![account("new")],
+            accounts_resource: AsyncResource::ready(vec![account("new")]),
+            selected_folder: Some("inbox".to_string()),
+            selected_message: Some("message".to_string()),
+            messages: vec![message("message", "inbox", true)],
+            messages_resource: AsyncResource::ready(vec![message("message", "inbox", true)]),
+            theme: ThemeMode::Dark,
+            density: DensityTokens::new(1),
+            ..NativeAppState::default()
+        };
+
+        apply_account_create_reload(&mut state, loaded);
+
+        assert_eq!(state.accounts, vec![account("new")]);
+        assert_eq!(state.theme, ThemeMode::Light);
+        assert_eq!(state.density.level, 6);
+        assert_eq!(state.selected_view, SelectedView::Mail);
+        assert_eq!(state.selected_folder.as_deref(), Some("inbox"));
+        assert_eq!(state.selected_message.as_deref(), Some("message"));
+        assert!(!state.modals.account_setup_open);
+        assert!(!state.modals.settings_open);
+        assert!(!state.modals.advanced_search_open);
+        assert!(state.palette.open);
+        assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn account_create_reload_preserves_existing_workspace_selection() {
+        let mut state = NativeAppState {
+            accounts: vec![account("old")],
+            accounts_resource: AsyncResource::ready(vec![account("old")]),
+            selected_view: SelectedView::Calendar,
+            selected_folder: Some("old-inbox".to_string()),
+            selected_label: Some("label-a".to_string()),
+            selected_message: Some("old-message".to_string()),
+            selected_full_message: Some(full_message("old-message", "old-inbox", true, false)),
+            selected_event: Some("event-1".to_string()),
+            search: SearchState {
+                query: "status".to_string(),
+                submitted_query: Some("status".to_string()),
+                ..SearchState::default()
+            },
+            messages: vec![message("old-message", "old-inbox", true)],
+            messages_resource: AsyncResource::ready(vec![message(
+                "old-message",
+                "old-inbox",
+                true,
+            )]),
+            compose: ComposeState {
+                open: true,
+                account_id: Some("old".to_string()),
+                ..ComposeState::default()
+            },
+            modals: ModalStates {
+                account_setup_open: true,
+                settings_open: false,
+                advanced_search_open: true,
+            },
+            last_error: Some("old".to_string()),
+            ..NativeAppState::default()
+        };
+        let loaded = NativeAppState {
+            api_base_url: "http://localhost:3000".to_string(),
+            accounts: vec![account("old"), account("new")],
+            accounts_resource: AsyncResource::ready(vec![account("old"), account("new")]),
+            selected_view: SelectedView::Mail,
+            selected_folder: Some("new-inbox".to_string()),
+            selected_message: Some("new-message".to_string()),
+            messages: vec![message("new-message", "new-inbox", true)],
+            messages_resource: AsyncResource::ready(vec![message(
+                "new-message",
+                "new-inbox",
+                true,
+            )]),
+            ..NativeAppState::default()
+        };
+
+        apply_account_create_reload(&mut state, loaded);
+
+        assert_eq!(state.accounts, vec![account("old"), account("new")]);
+        assert_eq!(state.selected_view, SelectedView::Calendar);
+        assert_eq!(state.selected_folder.as_deref(), Some("old-inbox"));
+        assert_eq!(state.selected_label.as_deref(), Some("label-a"));
+        assert_eq!(state.selected_message.as_deref(), Some("old-message"));
+        assert_eq!(state.selected_event.as_deref(), Some("event-1"));
+        assert_eq!(state.search.submitted_query.as_deref(), Some("status"));
+        assert_eq!(
+            state.messages,
+            vec![message("old-message", "old-inbox", true)]
+        );
+        assert!(state.compose.open);
+        assert!(!state.modals.account_setup_open);
+        assert!(!state.modals.advanced_search_open);
+        assert!(state.last_error.is_none());
+    }
+
     #[test]
     fn account_delete_reload_preserves_native_state_and_resets_deleted_compose() {
         let mut state = NativeAppState {
@@ -8925,6 +10334,13 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
             .keyword("preferences")
             .keyword("options")
             .action(|_, cx| cx.dispatch_action(&OpenSettings)),
+        PaletteEntry::new("add-account", "Add Account")
+            .group("Actions")
+            .subtitle("Connect Gmail, Microsoft 365, or IMAP")
+            .keyword("setup")
+            .keyword("oauth")
+            .keyword("imap")
+            .action(|_, cx| cx.dispatch_action(&OpenAccountSetup)),
         PaletteEntry::new("theme-light", "Light theme")
             .group("Actions")
             .hint("Ctrl+Shift+L")

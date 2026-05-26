@@ -24,9 +24,10 @@ Last updated: 2026-05-26
 
 ## Remaining Gaps
 
-- Add-account/setup remains tracked outside Settings: first-run setup,
-  Gmail/Microsoft OAuth, Microsoft app-password, manual IMAP/SMTP, and the
-  sidebar Add account modal are still pending native work.
+- Add-account/setup moved forward in Phase 6g: first-run setup,
+  Gmail/Microsoft OAuth launch, Microsoft app-password, manual IMAP/SMTP, and
+  the sidebar Add account entry are now native, with real-provider verification
+  still manual.
 - Settings focus management still needs manual UI walkthrough once the broader
   account setup surfaces exist.
 - Advanced-search backend behavior remains a product/backend gap: native and web
