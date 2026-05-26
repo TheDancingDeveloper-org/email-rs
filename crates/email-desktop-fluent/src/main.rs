@@ -153,9 +153,10 @@ fn main() -> Result<()> {
 
         let palette = cx.new({
             let state = state_entity.read(cx).clone();
+            let state_entity = state_entity.clone();
             move |cx| {
                 let mut palette = CommandPalette::new(cx).max_results(14);
-                palette.set_entries(palette_entries(&state), cx);
+                palette.set_entries(palette_entries(&state, &state_entity), cx);
                 palette
             }
         });
@@ -904,8 +905,9 @@ impl EmailDesktopApp {
 
     fn refresh_palette_entries(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx).clone();
+        let state_entity = self.state.clone();
         self.palette.update(cx, |palette, cx| {
-            palette.set_entries(palette_entries(&state), cx)
+            palette.set_entries(palette_entries(&state, &state_entity), cx)
         });
     }
 }
@@ -9279,6 +9281,59 @@ mod tests {
     }
 
     #[test]
+    fn preferred_account_folder_prefers_visible_inbox() {
+        let mut archive = folder("archive", 0);
+        let mut inbox = folder("inbox", 0);
+        inbox.special_use = Some("inbox".to_string());
+        let mut state = NativeAppState {
+            folders_by_account: BTreeMap::from([(
+                "account".to_string(),
+                vec![archive.clone(), inbox.clone()],
+            )]),
+            ..NativeAppState::default()
+        };
+
+        assert_eq!(
+            preferred_account_folder_id(&state, "account").as_deref(),
+            Some("inbox")
+        );
+
+        archive.is_excluded = false;
+        inbox.is_excluded = true;
+        state
+            .folders_by_account
+            .insert("account".to_string(), vec![archive, inbox]);
+
+        assert_eq!(
+            preferred_account_folder_id(&state, "account").as_deref(),
+            Some("archive")
+        );
+    }
+
+    #[test]
+    fn selected_palette_message_state_uses_summary_then_full_message() {
+        let mut summary = message("message", "inbox", false);
+        summary.is_flagged = true;
+        let mut state = NativeAppState {
+            selected_message: Some("message".to_string()),
+            messages: vec![summary],
+            selected_full_message: Some(full_message("message", "inbox", true, false)),
+            ..NativeAppState::default()
+        };
+
+        assert_eq!(
+            selected_palette_message_state(&state),
+            Some(("message".to_string(), false, true))
+        );
+
+        state.messages.clear();
+        assert_eq!(
+            selected_palette_message_state(&state),
+            Some(("message".to_string(), true, false))
+        );
+    }
+
+    #[test]
     fn message_key_target_tracks_roving_selection() {
         let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
@@ -10312,7 +10367,10 @@ mod tests {
     }
 }
 
-fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
+fn palette_entries(
+    state: &NativeAppState,
+    state_entity: &Entity<NativeAppState>,
+) -> Vec<PaletteEntry> {
     let mut entries = vec![
         PaletteEntry::new("compose", "New Message")
             .group("Actions")
@@ -10380,6 +10438,30 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
             .action(|_, cx| cx.dispatch_action(&SelectCalendarView)),
     ];
 
+    for (kind, label) in [
+        ("all", "All Inboxes"),
+        ("unread", "Unread"),
+        ("flagged", "Flagged"),
+        ("snoozed", "Snoozed"),
+    ] {
+        let nav_state = state_entity.clone();
+        let kind = kind.to_string();
+        entries.push(
+            PaletteEntry::new(format!("smart:{kind}"), label)
+                .group("Navigate")
+                .hint("smart")
+                .subtitle("Open smart folder")
+                .keyword("folder")
+                .action(move |_, cx| {
+                    start_message_collection_load(
+                        &nav_state,
+                        NativeMessageSource::SmartFolder(kind.clone()),
+                        cx,
+                    );
+                }),
+        );
+    }
+
     if state.selected_message.is_some() {
         entries.push(
             PaletteEntry::new("message-reply", "Reply")
@@ -10397,14 +10479,110 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
         );
     }
 
+    if let Some((message_id, is_read, is_flagged)) = selected_palette_message_state(state) {
+        let archive_state = state_entity.clone();
+        let archive_id = message_id.clone();
+        entries.push(
+            PaletteEntry::new("message-archive", "Archive Message")
+                .group("Message")
+                .hint("e")
+                .keyword("archive")
+                .action(move |_, cx| {
+                    start_message_mutation_and_refresh(
+                        &archive_state,
+                        NativeMessageMutation::Archive {
+                            message_id: archive_id.clone(),
+                        },
+                        cx,
+                    );
+                }),
+        );
+
+        let delete_state = state_entity.clone();
+        let delete_id = message_id.clone();
+        entries.push(
+            PaletteEntry::new("message-delete", "Delete Message")
+                .group("Message")
+                .hint("Del")
+                .keyword("trash")
+                .keyword("delete")
+                .action(move |_, cx| {
+                    start_message_mutation_and_refresh(
+                        &delete_state,
+                        NativeMessageMutation::Delete {
+                            message_id: delete_id.clone(),
+                        },
+                        cx,
+                    );
+                }),
+        );
+
+        let read_state = state_entity.clone();
+        let read_id = message_id.clone();
+        entries.push(
+            PaletteEntry::new(
+                "message-toggle-read",
+                if is_read { "Mark Unread" } else { "Mark Read" },
+            )
+            .group("Message")
+            .hint("u")
+            .keyword("read")
+            .keyword("unread")
+            .action(move |_, cx| {
+                start_message_mutation_and_refresh(
+                    &read_state,
+                    NativeMessageMutation::SetRead {
+                        message_id: read_id.clone(),
+                        is_read: !is_read,
+                    },
+                    cx,
+                );
+            }),
+        );
+
+        let flag_state = state_entity.clone();
+        let flag_id = message_id.clone();
+        entries.push(
+            PaletteEntry::new(
+                "message-toggle-flag",
+                if is_flagged {
+                    "Unflag Message"
+                } else {
+                    "Flag Message"
+                },
+            )
+            .group("Message")
+            .keyword("flag")
+            .keyword("star")
+            .action(move |_, cx| {
+                start_message_mutation_and_refresh(
+                    &flag_state,
+                    NativeMessageMutation::SetFlagged {
+                        message_id: flag_id.clone(),
+                        is_flagged: !is_flagged,
+                    },
+                    cx,
+                );
+            }),
+        );
+    }
+
     entries.extend(state.labels.iter().map(|label| {
+        let nav_state = state_entity.clone();
+        let label_id = label.id.clone();
         PaletteEntry::new(format!("label:{}", label.id), label.name.clone())
             .group("Labels")
             .hint("label")
-            .subtitle("Label navigation lands in Phase 4")
+            .subtitle("Open label")
             .keyword("label")
             .keyword("tag")
-            .disabled(true)
+            .action(move |_, cx| {
+                start_message_collection_load(
+                    &nav_state,
+                    NativeMessageSource::Label(label_id.clone()),
+                    cx,
+                );
+            })
     }));
 
     entries.extend(state.folders_by_account.iter().flat_map(|(_, folders)| {
@@ -10412,25 +10590,68 @@ fn palette_entries(state: &NativeAppState) -> Vec<PaletteEntry> {
             .iter()
             .filter(|folder| !folder.is_excluded)
             .map(|folder| {
+                let nav_state = state_entity.clone();
+                let folder_id = folder.id.clone();
                 PaletteEntry::new(format!("folder:{}", folder.id), folder.name.clone())
                     .group("Folders")
                     .hint(folder.full_path.clone())
-                    .subtitle("Folder navigation lands in Phase 4")
+                    .subtitle("Open folder")
                     .keyword("folder")
                     .keyword(folder.full_path.clone())
-                    .disabled(true)
+                    .action(move |_, cx| {
+                        start_message_collection_load(
+                            &nav_state,
+                            NativeMessageSource::Folder(folder_id.clone()),
+                            cx,
+                        );
+                    })
             })
     }));
 
     entries.extend(state.accounts.iter().map(|account| {
-        PaletteEntry::new(account.id.clone(), account.name.clone())
+        let nav_state = state_entity.clone();
+        let folder_id = preferred_account_folder_id(state, &account.id);
+        let mut entry = PaletteEntry::new(account.id.clone(), account.name.clone())
             .group("Accounts")
             .subtitle(account.email.clone())
             .keyword("account")
-            .disabled(true)
+            .keyword("inbox")
+            .disabled(folder_id.is_none());
+        if let Some(folder_id) = folder_id {
+            entry = entry.action(move |_, cx| {
+                start_message_collection_load(
+                    &nav_state,
+                    NativeMessageSource::Folder(folder_id.clone()),
+                    cx,
+                );
+            });
+        }
+        entry
     }));
 
     entries
+}
+
+fn selected_palette_message_state(state: &NativeAppState) -> Option<(String, bool, bool)> {
+    let selected_id = state.selected_message.as_ref()?;
+    if let Some(summary) = selected_summary(state) {
+        return Some((summary.id.clone(), summary.is_read, summary.is_flagged));
+    }
+
+    state
+        .selected_full_message
+        .as_ref()
+        .filter(|message| message.id == *selected_id)
+        .map(|message| (message.id.clone(), message.is_read, message.is_flagged))
+}
+
+fn preferred_account_folder_id(state: &NativeAppState, account_id: &str) -> Option<String> {
+    let folders = state.folders_by_account.get(account_id)?;
+    folders
+        .iter()
+        .find(|folder| folder.special_use.as_deref() == Some("inbox") && !folder.is_excluded)
+        .or_else(|| folders.iter().find(|folder| !folder.is_excluded))
+        .map(|folder| folder.id.clone())
 }
 
 fn section_label(label: &'static str, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {

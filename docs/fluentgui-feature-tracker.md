@@ -148,8 +148,8 @@ Status values:
 | Groups: Actions, Navigate, Labels, Folders, Message. | Same. | Current audited; pending native. | Requires enhanced generic palette. |
 | Fuzzy matching with label/keyword scoring. | Same or better. | Current audited; pending native. | Preserve predictable ordering. |
 | Actions: New Message, Add Account, Advanced Search, Settings, theme, density. | Same. | Native implemented; cargo check. | New Message, Add Account, Advanced Search, Settings, theme, and density wired. |
-| Navigation: Mail, Calendar, smart folders, labels, folders. | Same. | Current audited; pending native. | Folder hints include account/full path. |
-| Message actions: reply, forward, archive, delete, read/unread, flag/unflag. | Same. | Current audited; pending native. | Only for selected message. |
+| Navigation: Mail, Calendar, smart folders, labels, folders. | Same. | Native implemented; automated tests. | Smart folders, labels, folders, and account inbox entries call native navigation. |
+| Message actions: reply, forward, archive, delete, read/unread, flag/unflag. | Same. | Native implemented; automated tests. | Only for selected message; actions reuse native message mutation refresh. |
 | Keyboard Up/Down, Enter, Escape. | Same. | Current audited; pending native. | Mouse hover/select too. |
 
 ## Calendar
