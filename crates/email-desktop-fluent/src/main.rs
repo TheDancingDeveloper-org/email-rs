@@ -11,8 +11,9 @@ use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
     Account, AccountSettings, BulkAction, BulkRequest, Condition, ConditionField, ConditionGroup,
-    ConditionOperator, Folder, FullMessage, Label, MatchMode, Message, PatchFolder,
-    PatchMessageRequest, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount,
+    ConditionOperator, CreateWebhook, Folder, FullMessage, Label, MatchMode, Message, PatchFolder,
+    PatchMessageRequest, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount, UpdateWebhook,
+    Webhook,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -2309,6 +2310,13 @@ enum SettingsTab {
     Webhooks,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SettingsWebhookMutation {
+    Create(CreateWebhook),
+    Toggle { webhook_id: String, enabled: bool },
+    Delete { webhook_id: String },
+}
+
 #[derive(Clone)]
 struct SettingsModal {
     state: Entity<NativeAppState>,
@@ -2316,6 +2324,13 @@ struct SettingsModal {
     name_input: Entity<TextInput>,
     sync_days_input: Entity<TextInput>,
     signature_input: Entity<Textarea>,
+    webhook_url_input: Entity<TextInput>,
+    webhook_secret_input: Entity<TextInput>,
+    webhook_events: String,
+    webhooks: Vec<Webhook>,
+    webhooks_loading: bool,
+    webhook_busy_ids: BTreeSet<String>,
+    adding_webhook: bool,
     loading_account: bool,
     saving_account: bool,
     deleting_account: bool,
@@ -2337,6 +2352,14 @@ impl SettingsModal {
                     .placeholder("Your email signature...")
                     .rows(5)
             }),
+            webhook_url_input: cx
+                .new(|_| TextInput::new().placeholder("https://example.com/webhook")),
+            webhook_secret_input: cx.new(|_| TextInput::new().placeholder("HMAC signing secret")),
+            webhook_events: "new_message".to_string(),
+            webhooks: Vec::new(),
+            webhooks_loading: false,
+            webhook_busy_ids: BTreeSet::new(),
+            adding_webhook: false,
             loading_account: false,
             saving_account: false,
             deleting_account: false,
@@ -2350,6 +2373,9 @@ impl SettingsModal {
         self.loading_account = false;
         self.saving_account = false;
         self.deleting_account = false;
+        self.webhooks_loading = false;
+        self.webhook_busy_ids.clear();
+        self.adding_webhook = false;
         self.confirm_delete_account = None;
         self.status = None;
         self.name_input
@@ -2358,6 +2384,11 @@ impl SettingsModal {
             .update(cx, |input, cx| input.set_value("", cx));
         self.signature_input
             .update(cx, |input, cx| input.set_value("", cx));
+        self.webhook_url_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.webhook_secret_input
+            .update(cx, |input, cx| input.set_value("", cx));
+        self.webhook_events = "new_message".to_string();
         cx.notify();
     }
 
@@ -2367,6 +2398,8 @@ impl SettingsModal {
         self.saving_account = false;
         self.deleting_account = false;
         self.confirm_delete_account = None;
+        self.webhook_busy_ids.clear();
+        self.adding_webhook = false;
         self.status = None;
         self.name_input
             .update(cx, |input, cx| input.set_value(account.name.clone(), cx));
@@ -2414,6 +2447,51 @@ impl SettingsModal {
         self.status = status;
         self.saving_account = false;
         self.deleting_account = false;
+        cx.notify();
+    }
+
+    fn select_webhooks(&mut self, cx: &mut Context<Self>) {
+        self.active_tab = SettingsTab::Webhooks;
+        self.webhooks_loading = true;
+        self.webhook_busy_ids.clear();
+        self.adding_webhook = false;
+        self.status = None;
+        cx.notify();
+    }
+
+    fn apply_webhooks(
+        &mut self,
+        webhooks: Vec<Webhook>,
+        status: Option<(String, bool)>,
+        clear_new: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab != SettingsTab::Webhooks {
+            return;
+        }
+        self.webhooks = webhooks;
+        self.webhooks_loading = false;
+        self.webhook_busy_ids.clear();
+        self.adding_webhook = false;
+        self.status = status;
+        if clear_new {
+            self.webhook_url_input
+                .update(cx, |input, cx| input.set_value("", cx));
+            self.webhook_secret_input
+                .update(cx, |input, cx| input.set_value("", cx));
+            self.webhook_events = "new_message".to_string();
+        }
+        cx.notify();
+    }
+
+    fn fail_webhooks(&mut self, message: String, cx: &mut Context<Self>) {
+        if self.active_tab != SettingsTab::Webhooks {
+            return;
+        }
+        self.webhooks_loading = false;
+        self.webhook_busy_ids.clear();
+        self.adding_webhook = false;
+        self.status = Some((message, false));
         cx.notify();
     }
 }
@@ -2582,13 +2660,10 @@ fn settings_tabs(
         "Webhooks",
         modal.active_tab == SettingsTab::Webhooks,
         {
+            let state_entity = state_entity.clone();
             let modal_entity = modal_entity.clone();
             move |_, _, app_cx| {
-                let _ = modal_entity.update(app_cx, |modal, cx| {
-                    modal.active_tab = SettingsTab::Webhooks;
-                    modal.status = None;
-                    cx.notify();
-                });
+                select_settings_webhooks(&state_entity, &modal_entity, app_cx);
             }
         },
         cx,
@@ -2670,11 +2745,12 @@ fn settings_body(
             .child("Rules editor remains in a later Phase 6 slice.")
             .into_any_element(),
         SettingsTab::Webhooks => div()
+            .id("settings-body-webhooks")
             .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
             .p(px(18.0))
-            .text_size(px(theme.typography.body.size))
-            .text_color(colors.on_subtle)
-            .child("Webhook management remains in a later Phase 6 slice.")
+            .child(settings_webhooks_body(modal_entity, modal, cx))
             .into_any_element(),
     }
 }
@@ -2992,6 +3068,234 @@ fn settings_account_body(
         })
 }
 
+fn settings_webhooks_body(
+    modal_entity: &Entity<SettingsModal>,
+    modal: &SettingsModal,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let state_entity = modal.state.clone();
+    let status = modal.status.clone();
+
+    let mut webhook_list = div().flex().flex_col().gap(px(6.0));
+    if modal.webhooks_loading {
+        webhook_list = webhook_list.child(
+            div()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("Loading webhooks..."),
+        );
+    } else if modal.webhooks.is_empty() {
+        webhook_list = webhook_list.child(
+            div()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("No webhooks configured."),
+        );
+    } else {
+        for webhook in &modal.webhooks {
+            let webhook_id = webhook.id.clone();
+            let busy = modal.webhook_busy_ids.contains(&webhook.id);
+            webhook_list = webhook_list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .py(px(6.0))
+                    .border_b_1()
+                    .border_color(colors.stroke_neutral_subtle)
+                    .child(
+                        Checkbox::new(SharedString::from(format!(
+                            "settings-webhook-enabled-{}",
+                            webhook.id
+                        )))
+                        .checked(webhook.enabled)
+                        .disabled(busy || modal.webhooks_loading)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let modal_entity = modal_entity.clone();
+                            let webhook_id = webhook_id.clone();
+                            move |new_state, _, _, app_cx| {
+                                start_settings_webhook_toggle(
+                                    &state_entity,
+                                    &modal_entity,
+                                    webhook_id.clone(),
+                                    matches!(new_state, CheckboxState::Checked),
+                                    app_cx,
+                                );
+                            }
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(typography.body.size))
+                                    .text_color(colors.on_neutral)
+                                    .child(webhook.url.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(typography.caption.size))
+                                    .text_color(colors.on_subtle)
+                                    .child(format!(
+                                        "Events: {}{}",
+                                        webhook.events,
+                                        if webhook.secret.is_some() {
+                                            " - signed"
+                                        } else {
+                                            ""
+                                        }
+                                    )),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "settings-webhook-delete-{}",
+                            webhook.id
+                        )))
+                        .label("Delete")
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(busy || modal.webhooks_loading)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let modal_entity = modal_entity.clone();
+                            let webhook_id = webhook_id.clone();
+                            move |_, _, app_cx| {
+                                start_settings_webhook_delete(
+                                    &state_entity,
+                                    &modal_entity,
+                                    webhook_id.clone(),
+                                    app_cx,
+                                );
+                            }
+                        }),
+                    ),
+            );
+        }
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .child(settings_section_title("Configured webhooks", cx))
+        .child(webhook_list)
+        .child(settings_section_title("Add webhook", cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("URL", cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(220.0))
+                        .child(modal.webhook_url_input.clone()),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Secret", cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(220.0))
+                        .child(modal.webhook_secret_input.clone()),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Events", cx))
+                .child(
+                    Button::new("settings-webhook-events-new-message")
+                        .label("New message")
+                        .appearance(if modal.webhook_events == "new_message" {
+                            ButtonAppearance::Neutral
+                        } else {
+                            ButtonAppearance::Subtle
+                        })
+                        .size(ButtonSize::Compact)
+                        .on_click({
+                            let modal_entity = modal_entity.clone();
+                            move |_, _, app_cx| {
+                                let _ = modal_entity.update(app_cx, |modal, cx| {
+                                    modal.webhook_events = "new_message".to_string();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("settings-webhook-events-all")
+                        .label("All")
+                        .appearance(if modal.webhook_events == "all" {
+                            ButtonAppearance::Neutral
+                        } else {
+                            ButtonAppearance::Subtle
+                        })
+                        .size(ButtonSize::Compact)
+                        .on_click({
+                            let modal_entity = modal_entity.clone();
+                            move |_, _, app_cx| {
+                                let _ = modal_entity.update(app_cx, |modal, cx| {
+                                    modal.webhook_events = "all".to_string();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                ),
+        )
+        .when_some(status, |body, (message, ok)| {
+            body.child(
+                div()
+                    .text_size(px(typography.caption.size))
+                    .text_color(if ok {
+                        colors.status_success
+                    } else {
+                        colors.status_error
+                    })
+                    .child(message),
+            )
+        })
+        .child(
+            Button::new("settings-add-webhook")
+                .label(if modal.adding_webhook {
+                    "Adding..."
+                } else {
+                    "Add webhook"
+                })
+                .appearance(ButtonAppearance::Accent)
+                .size(ButtonSize::Compact)
+                .disabled(modal.adding_webhook || modal.webhooks_loading)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    let modal_entity = modal_entity.clone();
+                    move |_, _, app_cx| {
+                        start_settings_webhook_create(&state_entity, &modal_entity, app_cx);
+                    }
+                }),
+        )
+}
+
 fn settings_section_title(label: &'static str, cx: &mut Context<SettingsModal>) -> gpui::Div {
     let theme = cx.theme();
     div()
@@ -3115,6 +3419,48 @@ fn select_settings_account(
                         cx.notify();
                     }) {
                         tracing::warn!("failed to apply native account settings error: {err}");
+                    }
+                }
+            }
+        })
+        .detach();
+}
+
+fn select_settings_webhooks(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    app_cx: &mut App,
+) {
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.select_webhooks(cx);
+    });
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_settings_webhooks(base_url) });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let error_message = result.as_ref().err().map(|err| err.to_string());
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                    Ok(webhooks) => modal.apply_webhooks(webhooks, None, false, cx),
+                    Err(err) => modal.fail_webhooks(err.to_string(), cx),
+                }) {
+                    tracing::warn!("failed to apply native webhooks load: {err}");
+                }
+
+                if let Some(message) = error_message {
+                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                        state.last_error = Some(message);
+                        cx.notify();
+                    }) {
+                        tracing::warn!("failed to apply native webhooks error: {err}");
                     }
                 }
             }
@@ -3307,6 +3653,145 @@ fn start_settings_account_delete(
         .detach();
 }
 
+fn start_settings_webhook_create(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    app_cx: &mut App,
+) {
+    let (url, secret, events) = {
+        let modal = modal_entity.read(app_cx);
+        (
+            modal.webhook_url_input.read(app_cx).text().to_string(),
+            modal.webhook_secret_input.read(app_cx).text().to_string(),
+            modal.webhook_events.clone(),
+        )
+    };
+    let request = match build_create_webhook_request(url, secret, events) {
+        Ok(request) => request,
+        Err(message) => {
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.fail_webhooks(message.clone(), cx);
+            });
+            state_entity.update(app_cx, |state, cx| {
+                state.last_error = Some(message);
+                cx.notify();
+            });
+            return;
+        }
+    };
+
+    start_settings_webhook_mutation(
+        state_entity,
+        modal_entity,
+        SettingsWebhookMutation::Create(request),
+        None,
+        "Webhook added",
+        true,
+        app_cx,
+    );
+}
+
+fn start_settings_webhook_toggle(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    webhook_id: String,
+    enabled: bool,
+    app_cx: &mut App,
+) {
+    start_settings_webhook_mutation(
+        state_entity,
+        modal_entity,
+        SettingsWebhookMutation::Toggle {
+            webhook_id: webhook_id.clone(),
+            enabled,
+        },
+        Some(webhook_id),
+        "Webhook updated",
+        false,
+        app_cx,
+    );
+}
+
+fn start_settings_webhook_delete(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    webhook_id: String,
+    app_cx: &mut App,
+) {
+    start_settings_webhook_mutation(
+        state_entity,
+        modal_entity,
+        SettingsWebhookMutation::Delete {
+            webhook_id: webhook_id.clone(),
+        },
+        Some(webhook_id),
+        "Webhook deleted",
+        false,
+        app_cx,
+    );
+}
+
+fn start_settings_webhook_mutation(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    mutation: SettingsWebhookMutation,
+    busy_id: Option<String>,
+    success_message: &'static str,
+    clear_new: bool,
+    app_cx: &mut App,
+) {
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        if let Some(id) = busy_id.as_ref() {
+            modal.webhook_busy_ids.insert(id.clone());
+        } else {
+            modal.adding_webhook = true;
+        }
+        modal.status = None;
+        cx.notify();
+    });
+    state_entity.update(app_cx, |state, cx| {
+        state.last_error = None;
+        cx.notify();
+    });
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { mutate_settings_webhooks(base_url, mutation) });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let error_message = result.as_ref().err().map(|err| err.to_string());
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                    Ok(webhooks) => modal.apply_webhooks(
+                        webhooks,
+                        Some((success_message.to_string(), true)),
+                        clear_new,
+                        cx,
+                    ),
+                    Err(err) => modal.fail_webhooks(err.to_string(), cx),
+                }) {
+                    tracing::warn!("failed to apply native webhook mutation: {err}");
+                }
+
+                if let Some(message) = error_message {
+                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                        state.last_error = Some(message);
+                        cx.notify();
+                    }) {
+                        tracing::warn!("failed to apply native webhook mutation error: {err}");
+                    }
+                }
+            }
+        })
+        .detach();
+}
+
 fn start_folder_exclusion_toggle(
     state_entity: &Entity<NativeAppState>,
     modal_entity: &Entity<SettingsModal>,
@@ -3382,6 +3867,56 @@ fn delete_account_and_reload(base_url: String, account_id: String) -> Result<Nat
     })
 }
 
+fn load_settings_webhooks(base_url: String) -> Result<Vec<Webhook>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client.list_webhooks().await.context("list webhooks")
+    })
+}
+
+fn mutate_settings_webhooks(
+    base_url: String,
+    mutation: SettingsWebhookMutation,
+) -> Result<Vec<Webhook>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        match mutation {
+            SettingsWebhookMutation::Create(request) => {
+                client
+                    .create_webhook(&request)
+                    .await
+                    .context("create webhook")?;
+            }
+            SettingsWebhookMutation::Toggle {
+                webhook_id,
+                enabled,
+            } => {
+                client
+                    .update_webhook(
+                        &webhook_id,
+                        &UpdateWebhook {
+                            url: None,
+                            secret: None,
+                            events: None,
+                            enabled: Some(enabled),
+                        },
+                    )
+                    .await
+                    .with_context(|| format!("update webhook {webhook_id}"))?;
+            }
+            SettingsWebhookMutation::Delete { webhook_id } => {
+                client
+                    .delete_webhook(&webhook_id)
+                    .await
+                    .with_context(|| format!("delete webhook {webhook_id}"))?;
+            }
+        }
+        client.list_webhooks().await.context("reload webhooks")
+    })
+}
+
 fn apply_account_delete_reload(
     state: &mut NativeAppState,
     deleted_account_id: &str,
@@ -3417,6 +3952,35 @@ fn apply_account_delete_reload(
     };
     loaded.last_error = None;
     *state = loaded;
+}
+
+fn build_create_webhook_request(
+    url: String,
+    secret: String,
+    events: String,
+) -> std::result::Result<CreateWebhook, String> {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("Enter a webhook URL.".to_string());
+    }
+
+    let events = match events.trim() {
+        "" | "new_message" => "new_message".to_string(),
+        "all" => "all".to_string(),
+        _ => return Err("Choose a supported webhook event set.".to_string()),
+    };
+    let secret = if secret.trim().is_empty() {
+        None
+    } else {
+        Some(secret.trim().to_string())
+    };
+
+    Ok(CreateWebhook {
+        url,
+        secret,
+        events: Some(events),
+        account_id: None,
+    })
 }
 
 fn update_account_settings_and_refresh(
@@ -6516,6 +7080,53 @@ mod tests {
         assert!(!state.compose.open);
         assert_eq!(state.compose.revision, 5);
         assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn webhook_create_request_trims_fields_and_defaults_events() {
+        let request = build_create_webhook_request(
+            "  https://example.test/hook  ".to_string(),
+            "  ".to_string(),
+            "".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(request.url, "https://example.test/hook");
+        assert_eq!(request.secret, None);
+        assert_eq!(request.events.as_deref(), Some("new_message"));
+        assert_eq!(request.account_id, None);
+    }
+
+    #[test]
+    fn webhook_create_request_accepts_secret_and_all_events() {
+        let request = build_create_webhook_request(
+            "https://example.test/hook".to_string(),
+            "  secret  ".to_string(),
+            "all".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(request.secret.as_deref(), Some("secret"));
+        assert_eq!(request.events.as_deref(), Some("all"));
+    }
+
+    #[test]
+    fn webhook_create_request_rejects_invalid_values() {
+        let err = build_create_webhook_request(
+            " ".to_string(),
+            "".to_string(),
+            "new_message".to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "Enter a webhook URL.");
+
+        let err = build_create_webhook_request(
+            "https://example.test/hook".to_string(),
+            "".to_string(),
+            "message_deleted".to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "Choose a supported webhook event set.");
     }
 }
 

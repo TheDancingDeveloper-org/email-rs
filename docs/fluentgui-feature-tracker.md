@@ -126,7 +126,7 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Settings modal tabs: General, each account, Rules per account, Webhooks. | Native modal/nav sections. | Native partial; documented gaps. | General/account tabs implemented. Rules currently one placeholder, not per-account tabs; Webhooks placeholder. |
+| Settings modal tabs: General, each account, Rules per account, Webhooks. | Native modal/nav sections. | Native partial; documented gaps. | General/account/Webhooks tabs implemented. Rules currently one placeholder, not per-account tabs. |
 | General theme select. | Same. | Native implemented; cargo check. | Native uses buttons for Light/Dark. |
 | General density stepper with labels. | Same. | Native implemented; cargo check. | Levels `0..8`. |
 | Account info display name, email, provider. | Same. | Native implemented; automated tests. | Email/provider read-only; name request is validated and trimmed. |
@@ -137,8 +137,8 @@ Status values:
 | Save status. | Same. | Native implemented; cargo check. | Account save and folder-update success/error feedback. |
 | Rules list with enable toggle, name, counts, edit, delete, new. | Same. | Current audited; pending native. | Documented Phase 6b gap; per account. |
 | Rule editor with name, condition builder, actions, folder selector, save/cancel/error. | Same. | Current audited; pending native. | Documented Phase 6b gap. |
-| Webhooks list, enabled toggle, signed indicator, delete. | Same. | Current audited; pending native. | Documented Phase 6b gap; preserve event display. |
-| Add webhook: URL, secret, events select, add/error. | Same. | Current audited; pending native. | Documented Phase 6b gap; same payload. |
+| Webhooks list, enabled toggle, signed indicator, delete. | Same. | Native implemented; cargo check. | Loads through typed API and preserves event/signed display. |
+| Add webhook: URL, secret, events select, add/error. | Same. | Native implemented; automated tests. | Uses same payload; event control supports `new_message` and `all`. |
 
 ## Command Palette
 
