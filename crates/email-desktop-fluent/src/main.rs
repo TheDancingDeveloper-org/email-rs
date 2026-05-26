@@ -69,6 +69,7 @@ const MAX_SIDEBAR_WIDTH: u16 = 700;
 const DEFAULT_MESSAGE_LIST_WIDTH: u16 = 420;
 const MIN_MESSAGE_LIST_WIDTH: u16 = 320;
 const MAX_MESSAGE_LIST_WIDTH: u16 = 640;
+const SYNC_COMPLETE_VISIBLE_FOR: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeKeyAction {
@@ -841,6 +842,7 @@ struct NativeSyncStatus {
     total: i64,
     last_message: Option<String>,
     last_error: Option<String>,
+    completed_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1040,10 +1042,18 @@ impl EmailDesktopApp {
                 }
             }
         }
+        let expired = self.state.update(cx, |state, cx| {
+            if expire_sync_completion(&mut state.sync, Instant::now()) {
+                cx.notify();
+                true
+            } else {
+                false
+            }
+        });
         if refresh_requested {
             start_sync_complete_refresh(&self.state, cx);
         }
-        if changed {
+        if changed || expired {
             cx.notify();
         }
     }
@@ -1479,7 +1489,9 @@ impl Render for SidebarPlaceholder {
                             .child("Compose"),
                     ),
             )
-            .child(sync_status_strip(&state.sync, cx))
+            .when(sync_status_visible(&state.sync), |sidebar| {
+                sidebar.child(sync_status_strip(&state.sync, cx))
+            })
             .child(
                 div()
                     .id("sidebar-scroll")
@@ -7442,11 +7454,13 @@ fn apply_sync_update(status: &mut NativeSyncStatus, update: NativeSyncUpdate) {
             status.connected = false;
             status.last_error = None;
             status.last_message = Some("Connecting to sync events".to_string());
+            status.completed_at = None;
         }
         NativeSyncUpdate::Connected => {
             status.connected = true;
             status.last_error = None;
             status.last_message = Some("Waiting for sync activity".to_string());
+            status.completed_at = None;
         }
         NativeSyncUpdate::Event(SyncEvent::SyncStart {
             account_id,
@@ -7460,6 +7474,7 @@ fn apply_sync_update(status: &mut NativeSyncStatus, update: NativeSyncUpdate) {
             status.total = folder_count.unwrap_or_default();
             status.last_error = None;
             status.last_message = Some("Sync started".to_string());
+            status.completed_at = None;
         }
         NativeSyncUpdate::Event(SyncEvent::SyncFolderDone {
             account_id,
@@ -7475,6 +7490,7 @@ fn apply_sync_update(status: &mut NativeSyncStatus, update: NativeSyncUpdate) {
             status.total = total.unwrap_or(status.total);
             status.last_error = None;
             status.last_message = Some("Syncing folders".to_string());
+            status.completed_at = None;
         }
         NativeSyncUpdate::Event(SyncEvent::SyncComplete { account_id }) => {
             status.connected = true;
@@ -7484,13 +7500,38 @@ fn apply_sync_update(status: &mut NativeSyncStatus, update: NativeSyncUpdate) {
             status.done = status.total.max(status.done);
             status.last_error = None;
             status.last_message = Some("Sync complete".to_string());
+            status.completed_at = Some(Instant::now());
         }
         NativeSyncUpdate::Error(message) => {
             status.connected = false;
             status.syncing = false;
             status.last_error = Some(message);
+            status.completed_at = None;
         }
     }
+}
+
+fn sync_status_visible(status: &NativeSyncStatus) -> bool {
+    status.syncing || status.last_error.is_some() || status.completed_at.is_some()
+}
+
+fn expire_sync_completion(status: &mut NativeSyncStatus, now: Instant) -> bool {
+    if status.syncing || status.last_error.is_some() {
+        return false;
+    }
+    let Some(completed_at) = status.completed_at else {
+        return false;
+    };
+    if now.saturating_duration_since(completed_at) < SYNC_COMPLETE_VISIBLE_FOR {
+        return false;
+    }
+
+    status.completed_at = None;
+    status.last_message = None;
+    status.folder = None;
+    status.done = 0;
+    status.total = 0;
+    true
 }
 
 fn sync_status_title(status: &NativeSyncStatus) -> String {
@@ -10962,6 +11003,7 @@ mod tests {
             }),
         );
         assert!(status.syncing);
+        assert!(sync_status_visible(&status));
         assert_eq!(status.total, 4);
         assert_eq!(sync_progress_ratio(&status), 0.0);
 
@@ -10986,6 +11028,41 @@ mod tests {
         assert!(!status.syncing);
         assert_eq!(status.done, 4);
         assert_eq!(sync_status_title(&status), "Sync complete");
+        assert!(sync_status_visible(&status));
+        assert!(status.completed_at.is_some());
+    }
+
+    #[test]
+    fn sync_completion_visibility_expires_after_web_delay() {
+        let mut status = NativeSyncStatus::default();
+        apply_sync_update(
+            &mut status,
+            NativeSyncUpdate::Event(SyncEvent::SyncStart {
+                account_id: "account".to_string(),
+                folder_count: Some(1),
+            }),
+        );
+        apply_sync_update(
+            &mut status,
+            NativeSyncUpdate::Event(SyncEvent::SyncComplete {
+                account_id: "account".to_string(),
+            }),
+        );
+        let completed_at = status.completed_at.expect("sync completion timestamp");
+
+        assert!(!expire_sync_completion(
+            &mut status,
+            completed_at + SYNC_COMPLETE_VISIBLE_FOR - Duration::from_millis(1),
+        ));
+        assert!(sync_status_visible(&status));
+        assert!(expire_sync_completion(
+            &mut status,
+            completed_at + SYNC_COMPLETE_VISIBLE_FOR,
+        ));
+        assert!(!sync_status_visible(&status));
+        assert_eq!(status.last_message, None);
+        assert_eq!(status.done, 0);
+        assert_eq!(status.total, 0);
     }
 
     #[test]

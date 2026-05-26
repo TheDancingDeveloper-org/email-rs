@@ -50,7 +50,7 @@ Status values:
 | Current | Native | Verified | Notes |
 |---|---|---|---|
 | Compose button opens new compose for first account. | Same. | Native implemented; cargo check. | Uses the first account and surfaces an error when no account is available. |
-| Sync progress strip from SSE. | Same. | Native partial; automated tests. | Native SSE parser/status strip implemented; hide-after-completion timing still needs manual parity check. |
+| Sync progress strip from SSE. | Same. | Native implemented; automated tests. | Native strip appears during sync/error/completion and expires completion after the web 3 s delay. |
 | Search mail and calendar with 150 ms suggestions. | Same. | Native implemented; automated tests. | Native suggestions fetch messages and events after the existing delay; submitted search also preserves event results. |
 | Search suggestion keyboard Up/Down/Enter/Escape. | Same. | Native implemented; automated tests. | Active suggestion selection is tracked separately from Enter without an active suggestion. |
 | Advanced search filter button state. | Same. | Native implemented; automated tests. | Opens native modal; active state follows advanced search state. |
