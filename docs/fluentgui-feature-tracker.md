@@ -18,7 +18,7 @@ Status values:
 | Windows uses Wry/WebView2. | Windows uses FluentGUI/GPUI. | Manual required. | Remove WebView2 only after parity. |
 | Windows enforces single instance and foregrounds existing window. | Same through FluentGUI lifecycle extension. | Manual required. | Blocking cutover item. |
 | Windows close button hides to tray, tray has Open and Quit. | Same. | Manual required. | Blocking cutover item. |
-| Window title is `email-rs`; browser title shows unread count. | Native title/tray/status shows unread count. | Current audited; pending native. | Browser title remains for web mode. |
+| Window title is `email-rs`; browser title shows unread count. | Native title/status shows unread count. | Native implemented; automated tests. | Tray unread count remains tied to platform tray work. |
 | Default size 1280x800, Windows min 800x600, icon set. | Same window size/min/icon. | Current audited; pending native. | Needs FluentGUI min-size/icon support. |
 | Snap/WebKit-specific Linux environment workarounds. | Re-evaluate after GPUI. | Pending native. | Keep only if still needed for packages. |
 
@@ -40,10 +40,10 @@ Status values:
 |---|---|---|---|
 | 3-pane mail layout: sidebar, message list, reading pane. | FluentGUI workspace with resizable sidebar and message-list split. | Current audited; pending native. | Requires generic split panels. |
 | Calendar replaces message list plus reading pane while sidebar remains. | Same view switch. | Native implemented; cargo check. | Calendar route owns the main content while sidebar remains mounted. |
-| Persist theme and density. | Persist native theme and density. | Current audited; pending native. | Current store persists only these keys. |
+| Persist theme and density. | Persist native theme and density. | Native implemented; automated tests. | Native settings file persists these keys. |
 | Sidebar width and message-list width persist in localStorage. | Persist in native settings. | Current audited; pending native. | Current keys are `email_sidebar_w` and `email_msglist_w`. |
-| Density controls from sidebar footer and settings. | Same. | Current audited; pending native. | Levels `0..8`. |
-| Light/dark toggle. | Same through FluentGUI theme. | Current audited; pending native. | Verify custom views subscribe to theme. |
+| Density controls from sidebar footer and settings. | Same. | Native implemented; cargo check. | Levels `0..8`; palette density actions are also wired. |
+| Light/dark toggle. | Same through FluentGUI theme. | Native implemented; cargo check. | Theme toggle persists through native preferences. |
 
 ## Sidebar
 
@@ -54,13 +54,13 @@ Status values:
 | Search mail and calendar with 150 ms suggestions. | Same. | Native implemented; automated tests. | Native suggestions fetch messages and events after the existing delay; submitted search also preserves event results. |
 | Search suggestion keyboard Up/Down/Enter/Escape. | Same. | Native implemented; automated tests. | Active suggestion selection is tracked separately from Enter without an active suggestion. |
 | Advanced search filter button state. | Same. | Native implemented; automated tests. | Opens native modal; active state follows advanced search state. |
-| Smart folders All Inboxes, Unread, Flagged, Snoozed. | Same. | Current audited; pending native. | API IDs are `all`, `unread`, `flagged`, `snoozed`. |
+| Smart folders All Inboxes, Unread, Flagged, Snoozed. | Same. | Native implemented; cargo check. | API IDs are `all`, `unread`, `flagged`, `snoozed`. |
 | Calendar nav item. | Same. | Native implemented; cargo check. | Switches to calendar and loads the active week. |
-| Labels section with color dots. | Same. | Current audited; pending native. | Labels currently fetched only for first account. |
-| Per-account collapsible sections. | Same. | Current audited; pending native. | Preserve account unread badge. |
-| Special folders ordered inbox, sent, drafts, archive, trash, spam. | Same. | Current audited; pending native. | Backend list orders by `special_use`. |
-| Other folders under collapsible Folders group with indentation. | Same. | Current audited; pending native. | Preserve `[Gmail]/` depth behavior. |
-| Folder context menu: open, mark all read. | Same. | Current audited; pending native. | Smart folders expose only Open folder. |
+| Labels section with color dots. | Same. | Native partial; cargo check. | Native label rows load; color-dot fidelity still needs visual polish. |
+| Per-account collapsible sections. | Same. | Native implemented; cargo check. | Account rows preserve unread badges and folder groups. |
+| Special folders ordered inbox, sent, drafts, archive, trash, spam. | Same. | Native implemented; cargo check. | Backend list orders by `special_use`; native renders ordered folder rows. |
+| Other folders under collapsible Folders group with indentation. | Same. | Native implemented; cargo check. | Native preserves folder path indentation. |
+| Folder context menu: open, mark all read. | Same. | Native implemented; cargo check. | Regular folders expose mark-read; smart folders stay navigation-only. |
 | Account list at bottom with avatars, email, Add account. | Same. | Native implemented; cargo check. | Native Add account opens the setup modal; avatar/email polish still tracks with sidebar parity. |
 | Footer density buttons, theme toggle, settings button. | Same. | Native implemented; cargo check. | Settings opens the native modal. |
 
@@ -70,11 +70,11 @@ Status values:
 |---|---|---|---|
 | Fetch folder, label, smart-folder, search, and advanced-search result messages. | Same through `email-client`. | Native implemented; automated tests. | Advanced search source wired; backend gap logged. |
 | Debounced search results. | Same. | Current audited; pending native. | Current debounce is 300 ms. |
-| Header shows folder/search label, unread count, search count. | Same. | Current audited; pending native. | Preserve exact labels where possible. |
-| Select-all checkbox with indeterminate state. | Same. | Current audited; pending native. | Needed for bulk actions. |
-| Bulk bar with Archive, Mark Read, Mark Unread, Delete, cancel. | Same. | Current audited; pending native. | Delete confirmation remains. |
-| Mark all read for regular folders. | Same. | Current audited; pending native. | Hidden for smart/label/search/advanced search. |
-| Empty/loading states. | Same. | Current audited; pending native. | Preserve `No folder selected`, `Loading...`, `No messages`. |
+| Header shows folder/search label, unread count, search count. | Same. | Native implemented; cargo check. | Native header uses current mailbox title and visible unread/result counts. |
+| Select-all checkbox with indeterminate state. | Same. | Native implemented; automated tests. | Selection helper covers checked/unchecked/indeterminate states. |
+| Bulk bar with Archive, Mark Read, Mark Unread, Delete, cancel. | Same. | Native implemented; cargo check. | Bulk actions reuse typed message mutation refresh. |
+| Mark all read for regular folders. | Same. | Native implemented; cargo check. | Hidden for smart/label/search/advanced search. |
+| Empty/loading states. | Same. | Native implemented; cargo check. | Native status covers no folder, loading, errors, empty search, and empty views. |
 | Thread grouping only in regular folder view. | Same. | Native implemented; automated tests. | Native groups by `threadId` or message id, renders latest first, and keeps search/smart/label views flat. |
 | Rows show avatar/checkbox, sender, timestamp, subject, preview, unread dot, attachment, flag, snooze, thread count. | Same. | Native implemented; cargo check. | Native rows render initials avatar, checkbox, sender/date, subject/preview, unread accent, attachment/flag/snooze badges, and thread count. |
 | Row context menu has open, reply, forward, archive, trash, read/unread, flag/unflag. | Same. | Native implemented; cargo check. | Reply/forward select and start the draft path. |
@@ -84,13 +84,13 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Empty state: select a message. | Same. | Current audited; pending native. | Text is `Select a message to read`. |
-| Loading and not found states. | Same. | Current audited; pending native. | Text is `Loading...` and `Message not found`. |
-| Opening a message marks it read locally and attempts provider mark-seen. | Same backend call behavior. | Current audited; pending native. | Fixture avoids live providers. |
+| Empty state: select a message. | Same. | Native implemented; cargo check. | Native empty text is `Select a message to read it.` |
+| Loading and not found states. | Same. | Native implemented; cargo check. | Native shows body loading and load-error status messages. |
+| Opening a message marks it read locally and attempts provider mark-seen. | Same backend call behavior. | Native implemented; automated tests. | Full-message load updates summary read state and unread counts. |
 | Toolbar: Reply, Forward, Read/Unread, Snooze, Archive, Delete. | Same. | Native implemented; cargo check. | Native toolbar uses typed message mutation APIs. |
 | Snooze presets: later today +3h, tomorrow 9am, next Monday 9am, custom datetime. | Same. | Current audited; pending native. | Requires native date/time picker. |
-| Message header: subject, flagged tag, labels, sender avatar/name/email, date. | Same. | Current audited; pending native. | Label chips removable. |
-| Label add dropdown lists labels not already on the message. | Same. | Current audited; pending native. | Uses label APIs. |
+| Message header: subject, flagged tag, labels, sender avatar/name/email, date. | Same. | Native implemented; cargo check. | Native header renders subject/sender/date, badges, and label row; avatar visual parity remains polish. |
+| Label add dropdown lists labels not already on the message. | Same. | Native implemented; cargo check. | Uses typed label APIs and hides labels already on the message. |
 | Header context menu: reply, forward, archive, delete, read/unread, copy sender email. | Same. | Native implemented; cargo check. | Right-click message header opens native menu; sender-email resolution is covered. |
 | Attachment indicator. | Same current level. | Current audited; product gap. | No current attachment download/open UI. |
 | HTML body shown in sandboxed iframe when available; text fallback otherwise. | Native rich document viewer with safe rendering and text fallback. | Native implemented; automated tests. | Native uses a lossy safe `RichDocument` renderer; manual visual fidelity pass remains. |
