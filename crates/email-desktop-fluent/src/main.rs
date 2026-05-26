@@ -62,6 +62,13 @@ const APP_ID: &str = "org.email-rs.desktop.fluent";
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const NATIVE_SETTINGS_ENV: &str = "EMAIL_RS_FLUENT_SETTINGS_PATH";
 const NATIVE_SETTINGS_FILE: &str = "fluentgui-settings.conf";
+const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
+const DEFAULT_SIDEBAR_WIDTH: u16 = 280;
+const MIN_SIDEBAR_WIDTH: u16 = 80;
+const MAX_SIDEBAR_WIDTH: u16 = 700;
+const DEFAULT_MESSAGE_LIST_WIDTH: u16 = 420;
+const MIN_MESSAGE_LIST_WIDTH: u16 = 320;
+const MAX_MESSAGE_LIST_WIDTH: u16 = 640;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeKeyAction {
@@ -116,6 +123,7 @@ fn main() -> Result<()> {
     let mut initial_state = load_initial_state(&base_url)?;
     let preferences = load_native_preferences();
     preferences.apply_to_state(&mut initial_state);
+    let initial_layout = initial_state.layout;
 
     let fluent_app = FluentApp::new(native_window_title(&initial_state))
         .app_id(APP_ID)
@@ -139,7 +147,7 @@ fn main() -> Result<()> {
         });
         let sidebar_dock = cx.new(|cx| {
             DockPanel::new(cx, DockPosition::Left, "Mail")
-                .size(280.0)
+                .size(initial_layout.sidebar_width as f32)
                 .content(sidebar.clone().into())
         });
 
@@ -159,16 +167,21 @@ fn main() -> Result<()> {
             PaneGroup::horizontal()
                 .first(message_list.clone().into())
                 .second(reading_pane.clone().into())
-                .ratio(0.42)
+                .ratio(message_list_ratio_for_width(
+                    initial_layout.message_list_width,
+                    DEFAULT_WINDOW_WIDTH,
+                    initial_layout.sidebar_width as f32,
+                ))
                 .constraints(
                     PaneConstraints::new()
-                        .first_min(320.0)
+                        .first_min(MIN_MESSAGE_LIST_WIDTH as f32)
                         .second_min(420.0)
-                        .first_max(Some(640.0)),
+                        .first_max(Some(MAX_MESSAGE_LIST_WIDTH as f32)),
                 )
         });
         let main_content = cx.new({
             let state = state_entity.clone();
+            let mail_split = mail_split.clone();
             move |cx| {
                 MainContentPlaceholder::new(cx, state.clone(), mail_split.clone(), calendar.clone())
             }
@@ -202,7 +215,16 @@ fn main() -> Result<()> {
             }
         });
 
-        cx.new(|cx| EmailDesktopApp::new(cx, state_entity.clone(), workspace, palette))
+        cx.new(|cx| {
+            EmailDesktopApp::new(
+                cx,
+                state_entity.clone(),
+                workspace,
+                palette,
+                sidebar_dock.clone(),
+                mail_split.clone(),
+            )
+        })
     });
 
     Ok(())
@@ -547,6 +569,19 @@ fn parse_native_preferences(raw: &str) -> NativePreferences {
                     preferences.density_level = level.min(8);
                 }
             }
+            "email_sidebar_w" | "sidebar_width" => {
+                if let Some(width) = parse_layout_width(value, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+                {
+                    preferences.layout.sidebar_width = width;
+                }
+            }
+            "email_msglist_w" | "message_list_width" => {
+                if let Some(width) =
+                    parse_layout_width(value, MIN_MESSAGE_LIST_WIDTH, MAX_MESSAGE_LIST_WIDTH)
+                {
+                    preferences.layout.message_list_width = width;
+                }
+            }
             _ => {}
         }
     }
@@ -555,10 +590,52 @@ fn parse_native_preferences(raw: &str) -> NativePreferences {
 
 fn serialize_native_preferences(preferences: &NativePreferences) -> String {
     format!(
-        "theme={}\ndensity={}\n",
+        "theme={}\ndensity={}\nemail_sidebar_w={}\nemail_msglist_w={}\n",
         preferences.theme.as_str(),
-        preferences.density_level.min(8)
+        preferences.density_level.min(8),
+        preferences.layout.sidebar_width,
+        preferences.layout.message_list_width
     )
+}
+
+fn parse_layout_width(value: &str, min: u16, max: u16) -> Option<u16> {
+    let width = value.trim().parse::<f32>().ok()?;
+    width
+        .is_finite()
+        .then(|| clamp_layout_width(width, min, max))
+}
+
+fn clamp_layout_width(width: f32, min: u16, max: u16) -> u16 {
+    let width = if width.is_finite() { width } else { min as f32 };
+    width.round().clamp(min as f32, max as f32) as u16
+}
+
+fn message_list_ratio_for_width(width: u16, window_width: f32, sidebar_width: f32) -> f32 {
+    let content_width = mail_content_width(window_width, sidebar_width);
+    (width as f32 / content_width).clamp(0.1, 0.9)
+}
+
+fn message_list_width_for_ratio(ratio: f32, window_width: f32, sidebar_width: f32) -> u16 {
+    let ratio = if ratio.is_finite() { ratio } else { 0.5 };
+    clamp_layout_width(
+        ratio.clamp(0.1, 0.9) * mail_content_width(window_width, sidebar_width),
+        MIN_MESSAGE_LIST_WIDTH,
+        MAX_MESSAGE_LIST_WIDTH,
+    )
+}
+
+fn mail_content_width(window_width: f32, sidebar_width: f32) -> f32 {
+    let window_width = if window_width.is_finite() {
+        window_width
+    } else {
+        DEFAULT_WINDOW_WIDTH
+    };
+    let sidebar_width = if sidebar_width.is_finite() {
+        sidebar_width
+    } else {
+        DEFAULT_SIDEBAR_WIDTH as f32
+    };
+    (window_width - sidebar_width).max(1.0)
 }
 
 fn native_settings_path() -> PathBuf {
@@ -645,10 +722,26 @@ impl Default for DensityTokens {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeLayoutPreferences {
+    sidebar_width: u16,
+    message_list_width: u16,
+}
+
+impl Default for NativeLayoutPreferences {
+    fn default() -> Self {
+        Self {
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            message_list_width: DEFAULT_MESSAGE_LIST_WIDTH,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NativePreferences {
     theme: ThemeMode,
     density_level: u8,
+    layout: NativeLayoutPreferences,
 }
 
 impl NativePreferences {
@@ -656,12 +749,14 @@ impl NativePreferences {
         Self {
             theme: state.theme.clone(),
             density_level: state.density.level,
+            layout: state.layout,
         }
     }
 
     fn apply_to_state(&self, state: &mut NativeAppState) {
         state.theme = self.theme.clone();
         state.density = DensityTokens::new(self.density_level);
+        state.layout = self.layout;
     }
 }
 
@@ -670,6 +765,7 @@ impl Default for NativePreferences {
         Self {
             theme: ThemeMode::Dark,
             density_level: DensityTokens::default().level,
+            layout: NativeLayoutPreferences::default(),
         }
     }
 }
@@ -761,6 +857,7 @@ struct NativeAppState {
     api_base_url: String,
     theme: ThemeMode,
     density: DensityTokens,
+    layout: NativeLayoutPreferences,
     selected_view: SelectedView,
     selected_folder: Option<String>,
     selected_label: Option<String>,
@@ -799,6 +896,7 @@ impl Default for NativeAppState {
             api_base_url: String::new(),
             theme: ThemeMode::Dark,
             density: DensityTokens::default(),
+            layout: NativeLayoutPreferences::default(),
             selected_view: SelectedView::Mail,
             selected_folder: None,
             selected_label: None,
@@ -837,10 +935,13 @@ struct EmailDesktopApp {
     state: Entity<NativeAppState>,
     workspace: Entity<Workspace>,
     palette: Entity<CommandPalette>,
+    sidebar_dock: Entity<DockPanel>,
+    mail_split: Entity<PaneGroup>,
     account_setup_modal: Entity<AccountSetupModal>,
     advanced_search_modal: Entity<AdvancedSearchModal>,
     settings_modal: Entity<SettingsModal>,
     sync_updates: Receiver<NativeSyncUpdate>,
+    last_window_width: f32,
 }
 
 impl EmailDesktopApp {
@@ -849,6 +950,8 @@ impl EmailDesktopApp {
         state: Entity<NativeAppState>,
         workspace: Entity<Workspace>,
         palette: Entity<CommandPalette>,
+        sidebar_dock: Entity<DockPanel>,
+        mail_split: Entity<PaneGroup>,
     ) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
@@ -889,14 +992,25 @@ impl EmailDesktopApp {
             },
         )
         .detach();
+        cx.observe(&sidebar_dock, |app, _, cx| {
+            app.persist_sidebar_width_preference(cx)
+        })
+        .detach();
+        cx.observe(&mail_split, |app, _, cx| {
+            app.persist_message_list_width_preference(cx)
+        })
+        .detach();
         Self {
             state,
             workspace,
             palette,
+            sidebar_dock,
+            mail_split,
             account_setup_modal,
             advanced_search_modal,
             settings_modal,
             sync_updates,
+            last_window_width: DEFAULT_WINDOW_WIDTH,
         }
     }
 
@@ -974,6 +1088,53 @@ impl EmailDesktopApp {
         }
     }
 
+    fn persist_sidebar_width_preference(&mut self, cx: &mut Context<Self>) {
+        let sidebar_width = clamp_layout_width(
+            self.sidebar_dock.read(cx).size,
+            MIN_SIDEBAR_WIDTH,
+            MAX_SIDEBAR_WIDTH,
+        );
+        let current_message_width = self.state.read(cx).layout.message_list_width;
+        let next_ratio = message_list_ratio_for_width(
+            current_message_width,
+            self.last_window_width,
+            sidebar_width as f32,
+        );
+        let preferences = self.state.update(cx, |state, cx| {
+            if state.layout.sidebar_width == sidebar_width {
+                return None;
+            }
+            state.layout.sidebar_width = sidebar_width;
+            cx.notify();
+            Some(NativePreferences::from_state(state))
+        });
+
+        if let Some(preferences) = preferences {
+            self.mail_split
+                .update(cx, |split, cx| split.set_ratio(next_ratio, cx));
+            self.persist_preferences(preferences, cx);
+        }
+    }
+
+    fn persist_message_list_width_preference(&mut self, cx: &mut Context<Self>) {
+        let ratio = self.mail_split.read(cx).ratio_value();
+        let sidebar_width = self.state.read(cx).layout.sidebar_width as f32;
+        let message_list_width =
+            message_list_width_for_ratio(ratio, self.last_window_width, sidebar_width);
+        let preferences = self.state.update(cx, |state, cx| {
+            if state.layout.message_list_width == message_list_width {
+                return None;
+            }
+            state.layout.message_list_width = message_list_width;
+            cx.notify();
+            Some(NativePreferences::from_state(state))
+        });
+
+        if let Some(preferences) = preferences {
+            self.persist_preferences(preferences, cx);
+        }
+    }
+
     fn refresh_palette_entries(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx).clone();
         let state_entity = self.state.clone();
@@ -984,7 +1145,12 @@ impl EmailDesktopApp {
 }
 
 impl Render for EmailDesktopApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let window_width = f32::from(window.bounds().size.width);
+        if window_width.is_finite() {
+            self.last_window_width = window_width.max(1.0);
+        }
+
         div()
             .id("email-desktop-fluent-root")
             .size_full()
@@ -9792,16 +9958,28 @@ mod tests {
 
     #[test]
     fn native_preferences_parse_and_clamp_density() {
-        let preferences =
-            parse_native_preferences("\n# comment\ntheme=light\ndensity=22\nignored=value\n");
+        let preferences = parse_native_preferences(
+            "\n# comment\ntheme=light\ndensity=22\nemail_sidebar_w=900\nemail_msglist_w=99\nignored=value\n",
+        );
 
         assert_eq!(
             preferences,
             NativePreferences {
                 theme: ThemeMode::Light,
                 density_level: 8,
+                layout: NativeLayoutPreferences {
+                    sidebar_width: MAX_SIDEBAR_WIDTH,
+                    message_list_width: MIN_MESSAGE_LIST_WIDTH,
+                },
             }
         );
+    }
+
+    #[test]
+    fn native_layout_preferences_translate_message_width_to_split_ratio() {
+        let ratio = message_list_ratio_for_width(420, 1280.0, 280.0);
+        assert!((ratio - 0.42).abs() < f32::EPSILON);
+        assert_eq!(message_list_width_for_ratio(ratio, 1280.0, 280.0), 420);
     }
 
     #[test]
@@ -9817,6 +9995,10 @@ mod tests {
         let preferences = NativePreferences {
             theme: ThemeMode::Light,
             density_level: 2,
+            layout: NativeLayoutPreferences {
+                sidebar_width: 333,
+                message_list_width: 444,
+            },
         };
 
         write_native_preferences(&path, &preferences).expect("write preferences");

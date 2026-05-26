@@ -41,7 +41,7 @@ Status values:
 | 3-pane mail layout: sidebar, message list, reading pane. | FluentGUI workspace with resizable sidebar and message-list split. | Current audited; pending native. | Requires generic split panels. |
 | Calendar replaces message list plus reading pane while sidebar remains. | Same view switch. | Native implemented; cargo check. | Calendar route owns the main content while sidebar remains mounted. |
 | Persist theme and density. | Persist native theme and density. | Native implemented; automated tests. | Native settings file persists these keys. |
-| Sidebar width and message-list width persist in localStorage. | Persist in native settings. | Current audited; pending native. | Current keys are `email_sidebar_w` and `email_msglist_w`. |
+| Sidebar width and message-list width persist in localStorage. | Persist in native settings. | Native implemented; automated tests. | Native settings persist `email_sidebar_w` and `email_msglist_w`; message-list pixels are translated to the FluentGUI split ratio. |
 | Density controls from sidebar footer and settings. | Same. | Native implemented; cargo check. | Levels `0..8`; palette density actions are also wired. |
 | Light/dark toggle. | Same through FluentGUI theme. | Native implemented; cargo check. | Theme toggle persists through native preferences. |
 
