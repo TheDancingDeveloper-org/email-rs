@@ -31,10 +31,15 @@ Last updated: 2026-05-26
   treatment; the new setup surface handles the no-account state after load.
 - Settings and account setup focus order should get one manual keyboard
   walkthrough after the remaining modal work settles.
+- Command-palette navigation/actions moved forward in Phase 7a; remaining
+  palette gaps are keyboard walkthrough and calendar-event search/navigation.
 - Larger parity remains open for Windows lifecycle/tray behavior, Calendar,
-  command-palette navigation/actions, message-list and reading-pane polish,
-  advanced-search backend structured params, and snoozed row serialization.
+  message-list and reading-pane polish, advanced-search backend structured
+  params, and snoozed row serialization.
 
 ## Verification
 
+- `cargo fmt --all -- --check`
+- `git diff --check`
 - `cargo check -p email-desktop-fluent`
+- `cargo test -p email-desktop-fluent`
