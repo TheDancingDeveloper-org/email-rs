@@ -49,8 +49,8 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Compose button opens new compose for first account. | Same. | Current audited; pending native. | Disabled/no-op when no account. |
-| Sync progress strip from SSE. | Same. | Current audited; pending native. | Uses `/api/v1/events`, completion hides after 3s. |
+| Compose button opens new compose for first account. | Same. | Native implemented; cargo check. | Uses the first account and surfaces an error when no account is available. |
+| Sync progress strip from SSE. | Same. | Native partial; automated tests. | Native SSE parser/status strip implemented; hide-after-completion timing still needs manual parity check. |
 | Search mail and calendar with 150 ms suggestions. | Same. | Native implemented; automated tests. | Native suggestions fetch messages and events after the existing delay; submitted search also preserves event results. |
 | Search suggestion keyboard Up/Down/Enter/Escape. | Same. | Native implemented; automated tests. | Active suggestion selection is tracked separately from Enter without an active suggestion. |
 | Advanced search filter button state. | Same. | Native implemented; automated tests. | Opens native modal; active state follows advanced search state. |
@@ -94,22 +94,22 @@ Status values:
 | Header context menu: reply, forward, archive, delete, read/unread, copy sender email. | Same. | Native implemented; cargo check. | Right-click message header opens native menu; sender-email resolution is covered. |
 | Attachment indicator. | Same current level. | Current audited; product gap. | No current attachment download/open UI. |
 | HTML body shown in sandboxed iframe when available; text fallback otherwise. | Native rich document viewer with safe rendering and text fallback. | Current audited; pending native. | Largest migration risk. |
-| Quick reply textarea, send button, sending/error states. | Same. | Current audited; pending native. | Sends via `/api/v1/messages`. |
+| Quick reply textarea, send button, sending/error states. | Same. | Native implemented; automated tests. | Sends via `/api/v1/messages`; request defaults and errors covered. |
 | Shortcuts e, #, u, Escape. | Same. | Native implemented; automated tests. | Ignored while quick-reply inputs or snooze picker are focused. |
 
 ## Compose
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Compose replaces reading pane when open. | Same. | Current audited; pending native. | No detached window currently. |
-| Modes: new, reply, forward. | Same. | Current audited; pending native. | Mode tag displayed. |
-| Fields: To, optional Cc/Bcc, Subject, body. | Same. | Current audited; pending native. | Recipient token input required. |
-| Recipient autocomplete from message/contact history. | Same. | Current audited; pending native. | Uses `/api/v1/contacts/suggest`. |
-| Account signature appended on send and previewed in editor. | Same. | Current audited; pending native. | Preserves `--` separator. |
-| Reply includes quoted block on send and quote preview. | Same. | Current audited; pending native. | Quote source is text body. |
-| Forward pre-fills forwarded message body. | Same. | Current audited; pending native. | Header text must be preserved. |
-| Send disabled until recipient and body exist; shows sending/error; close on success. | Same. | Current audited; pending native. | Network error handling required. |
-| Discard closes compose. | Same. | Current audited; pending native. | Optional confirm not part of parity. |
+| Compose replaces reading pane when open. | Same. | Native implemented; cargo check. | No detached window currently. |
+| Modes: new, reply, forward. | Same. | Native implemented; automated tests. | Mode tag displayed; reply/forward payload behavior covered. |
+| Fields: To, optional Cc/Bcc, Subject, body. | Same. | Native implemented; cargo check. | Recipient token inputs and multiline body editor are wired. |
+| Recipient autocomplete from message/contact history. | Same. | Native partial; cargo check. | Native suggestions come from visible message senders; server-backed contact suggestions remain pending. |
+| Account signature appended on send and previewed in editor. | Same. | Native implemented; automated tests. | Preserves `--` separator and waits for signature load. |
+| Reply includes quoted block on send and quote preview. | Same. | Native implemented; automated tests. | Quote source is text body. |
+| Forward pre-fills forwarded message body. | Same. | Native implemented; automated tests. | Forward omits `In-Reply-To` and preserves forwarded body seed. |
+| Send disabled until recipient and body exist; shows sending/error; close on success. | Same. | Native implemented; automated tests. | Network send path updates native sending/error/notice state. |
+| Discard closes compose. | Same. | Native implemented; cargo check. | Optional confirm not part of parity. |
 
 ## Search And Advanced Search
 
