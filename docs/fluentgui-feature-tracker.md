@@ -135,8 +135,8 @@ Status values:
 | Excluded folders checkbox list. | Same. | Native implemented; cargo check. | Patches folder exclusion and refreshes account tree. |
 | Remove account danger zone with confirmation. | Same. | Native implemented; automated tests. | Deletes through account API, reloads native account state, and closes Settings. |
 | Save status. | Same. | Native implemented; cargo check. | Account save and folder-update success/error feedback. |
-| Rules list with enable toggle, name, counts, edit, delete, new. | Same. | Native partial; automated tests. | Per-account list, enable toggle, counts, and delete implemented. Edit/new remain with editor gap. |
-| Rule editor with name, condition builder, actions, folder selector, save/cancel/error. | Same. | Current audited; pending native. | Documented Phase 6e gap. |
+| Rules list with enable toggle, name, counts, edit, delete, new. | Same. | Native implemented; automated tests. | Per-account list, enable toggle, counts, edit, delete, and new implemented. |
+| Rule editor with name, condition builder, actions, folder selector, save/cancel/error. | Same. | Native implemented; automated tests. | Create/update payloads, validation, save/cancel, and error status implemented in Phase 6f. |
 | Webhooks list, enabled toggle, signed indicator, delete. | Same. | Native implemented; cargo check. | Loads through typed API and preserves event/signed display. |
 | Add webhook: URL, secret, events select, add/error. | Same. | Native implemented; automated tests. | Uses same payload; event control supports `new_message` and `all`. |
 

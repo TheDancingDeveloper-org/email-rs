@@ -10,10 +10,10 @@ use chrono::{Datelike as _, Duration as ChronoDuration, Local, TimeZone as _, Ut
 use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
-    Account, AccountSettings, BulkAction, BulkRequest, Condition, ConditionField, ConditionGroup,
-    ConditionOperator, CreateWebhook, Folder, FullMessage, Label, MatchMode, Message, PatchFolder,
-    PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount,
-    UpdateWebhook, Webhook,
+    Account, AccountSettings, ActionInput, BulkAction, BulkRequest, Condition, ConditionField,
+    ConditionGroup, ConditionInput, ConditionOperator, CreateWebhook, Folder, FullMessage, Label,
+    MatchMode, Message, PatchFolder, PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest,
+    SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -27,9 +27,9 @@ use fluent_primitives::{
     TokenInputSuggestion, TokenInputToken,
 };
 use gpui::{
-    actions, div, prelude::*, px, svg, uniform_list, App, Context, Entity, FontWeight, IntoElement,
-    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString,
-    Window,
+    actions, div, prelude::*, px, svg, uniform_list, App, Context, Entity, FocusHandle, FontWeight,
+    IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    SharedString, Window,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -2194,6 +2194,126 @@ fn boolean_dropdown(
         })
 }
 
+fn rule_condition_field_dropdown(
+    id: impl Into<gpui::ElementId>,
+    selected: &'static str,
+    modal_entity: Entity<SettingsModal>,
+    condition_id: String,
+) -> Dropdown {
+    Dropdown::new(id)
+        .selected(selected)
+        .option("from", "From")
+        .option("to", "To")
+        .option("cc", "Cc")
+        .option("subject", "Subject")
+        .option("body", "Body")
+        .option("filename", "Filename")
+        .option("has_attachment", "Has attachment")
+        .option("is_read", "Is read")
+        .option("is_flagged", "Is starred")
+        .option("date_after", "Date after")
+        .option("date_before", "Date before")
+        .on_select(move |value, app_cx| {
+            let Some(field) = parse_condition_field(&value.to_string()) else {
+                return;
+            };
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.set_rule_condition_field(&condition_id, field, cx);
+            });
+        })
+}
+
+fn rule_condition_operator_dropdown(
+    id: impl Into<gpui::ElementId>,
+    selected: &'static str,
+    modal_entity: Entity<SettingsModal>,
+    condition_id: String,
+) -> Dropdown {
+    Dropdown::new(id)
+        .selected(selected)
+        .option("contains", "contains")
+        .option("not_contains", "doesn't contain")
+        .option("equals", "equals")
+        .option("starts_with", "starts with")
+        .on_select(move |value, app_cx| {
+            let Some(operator) = parse_condition_operator(&value.to_string()) else {
+                return;
+            };
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.set_rule_condition_operator(&condition_id, operator);
+                cx.notify();
+            });
+        })
+}
+
+fn rule_boolean_dropdown(
+    id: impl Into<gpui::ElementId>,
+    selected: &'static str,
+    modal_entity: Entity<SettingsModal>,
+    condition_id: String,
+) -> Dropdown {
+    Dropdown::new(id)
+        .selected(selected)
+        .option("true", "Yes")
+        .option("false", "No")
+        .on_select(move |value, app_cx| {
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.set_rule_condition_value(&condition_id, value.to_string());
+                cx.notify();
+            });
+        })
+}
+
+fn rule_action_type_dropdown(
+    id: impl Into<gpui::ElementId>,
+    selected: &str,
+    modal_entity: Entity<SettingsModal>,
+    action_key: u64,
+) -> Dropdown {
+    Dropdown::new(id)
+        .selected(selected.to_string())
+        .option("mark_read", "Mark as read")
+        .option("mark_unread", "Mark as unread")
+        .option("flag", "Flag message")
+        .option("unflag", "Unflag message")
+        .option("archive", "Archive")
+        .option("delete", "Delete")
+        .option("move_to_folder", "Move to folder")
+        .on_select(move |value, app_cx| {
+            let action_type = value.to_string();
+            if !is_supported_rule_action(&action_type) {
+                return;
+            }
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.set_rule_action_type(action_key, action_type);
+                cx.notify();
+            });
+        })
+}
+
+fn rule_action_folder_dropdown(
+    id: impl Into<gpui::ElementId>,
+    selected: Option<String>,
+    folders: Vec<Folder>,
+    modal_entity: Entity<SettingsModal>,
+    action_key: u64,
+) -> Dropdown {
+    let mut dropdown = Dropdown::new(id).placeholder("Select folder");
+    if let Some(selected) = selected.filter(|value| !value.trim().is_empty()) {
+        dropdown = dropdown.selected(selected);
+    }
+    for folder in folders {
+        dropdown = dropdown.option(folder.id.clone(), rule_folder_option_label(&folder));
+    }
+    dropdown.on_select(move |value, app_cx| {
+        let selected = value.to_string();
+        let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal.set_rule_action_value(action_key, Some(selected));
+            cx.notify();
+        });
+    })
+}
+
 fn advanced_label(label: &'static str, cx: &mut Context<AdvancedSearchModal>) -> gpui::Div {
     let theme = cx.theme();
     div()
@@ -2312,8 +2432,50 @@ enum SettingsTab {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsRuleMutation {
+    Save(SettingsRuleSaveRequest),
     Toggle { rule_id: String },
     Delete { rule_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettingsRuleActionDraft {
+    action_type: String,
+    action_value: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SettingsRuleEditorMode {
+    New,
+    Edit(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettingsRuleSaveRequest {
+    mode: SettingsRuleEditorMode,
+    account_id: String,
+    name: String,
+    match_mode: String,
+    conditions: Vec<ConditionInput>,
+    actions: Vec<ActionInput>,
+}
+
+#[derive(Clone)]
+struct SettingsRuleConditionRow {
+    key: u64,
+    condition: Condition,
+    value_input: Entity<TextInput>,
+    field_dropdown: Entity<Dropdown>,
+    operator_dropdown: Entity<Dropdown>,
+    bool_dropdown: Entity<Dropdown>,
+}
+
+#[derive(Clone)]
+struct SettingsRuleActionRow {
+    key: u64,
+    action_type: String,
+    action_value: Option<String>,
+    action_dropdown: Entity<Dropdown>,
+    folder_dropdown: Entity<Dropdown>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2326,6 +2488,8 @@ enum SettingsWebhookMutation {
 #[derive(Clone)]
 struct SettingsModal {
     state: Entity<NativeAppState>,
+    focus_handle: FocusHandle,
+    focused_on_open: bool,
     active_tab: SettingsTab,
     name_input: Entity<TextInput>,
     sync_days_input: Entity<TextInput>,
@@ -2341,6 +2505,14 @@ struct SettingsModal {
     rules: Vec<RuleDto>,
     rules_loading: bool,
     rule_busy_ids: BTreeSet<String>,
+    rule_editor_mode: Option<SettingsRuleEditorMode>,
+    rule_editor_account_id: Option<String>,
+    rule_name_input: Entity<TextInput>,
+    rule_match_mode: MatchMode,
+    rule_condition_rows: Vec<SettingsRuleConditionRow>,
+    rule_action_rows: Vec<SettingsRuleActionRow>,
+    rule_next_key: u64,
+    rule_saving: bool,
     loading_account: bool,
     saving_account: bool,
     deleting_account: bool,
@@ -2354,6 +2526,8 @@ impl SettingsModal {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         Self {
             state,
+            focus_handle: cx.focus_handle().tab_stop(true),
+            focused_on_open: false,
             active_tab: SettingsTab::General,
             name_input: cx.new(|_| TextInput::new().placeholder("Display name")),
             sync_days_input: cx.new(|_| TextInput::new().placeholder("All")),
@@ -2374,6 +2548,14 @@ impl SettingsModal {
             rules: Vec::new(),
             rules_loading: false,
             rule_busy_ids: BTreeSet::new(),
+            rule_editor_mode: None,
+            rule_editor_account_id: None,
+            rule_name_input: cx.new(|_| TextInput::new().placeholder("Rule name")),
+            rule_match_mode: MatchMode::All,
+            rule_condition_rows: Vec::new(),
+            rule_action_rows: Vec::new(),
+            rule_next_key: 1,
+            rule_saving: false,
             loading_account: false,
             saving_account: false,
             deleting_account: false,
@@ -2393,6 +2575,7 @@ impl SettingsModal {
         self.rules_account_id = None;
         self.rules_loading = false;
         self.rule_busy_ids.clear();
+        self.reset_rule_editor(cx);
         self.confirm_delete_account = None;
         self.status = None;
         self.name_input
@@ -2419,6 +2602,7 @@ impl SettingsModal {
         self.adding_webhook = false;
         self.rules_loading = false;
         self.rule_busy_ids.clear();
+        self.reset_rule_editor(cx);
         self.status = None;
         self.name_input
             .update(cx, |input, cx| input.set_value(account.name.clone(), cx));
@@ -2483,6 +2667,7 @@ impl SettingsModal {
         self.rules_account_id = Some(account_id);
         self.rules_loading = true;
         self.rule_busy_ids.clear();
+        self.reset_rule_editor(cx);
         self.status = None;
         cx.notify();
     }
@@ -2511,8 +2696,297 @@ impl SettingsModal {
         }
         self.rules_loading = false;
         self.rule_busy_ids.clear();
+        self.rule_saving = false;
         self.status = Some((message, false));
         cx.notify();
+    }
+
+    fn reset_rule_editor(&mut self, cx: &mut Context<Self>) {
+        self.rule_editor_mode = None;
+        self.rule_editor_account_id = None;
+        self.rule_match_mode = MatchMode::All;
+        self.rule_condition_rows.clear();
+        self.rule_action_rows.clear();
+        self.rule_next_key = 1;
+        self.rule_saving = false;
+        self.rule_name_input
+            .update(cx, |input, cx| input.set_value("", cx));
+    }
+
+    fn start_new_rule_editor(
+        &mut self,
+        account_id: String,
+        folders: Vec<Folder>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reset_rule_editor(cx);
+        self.rule_editor_mode = Some(SettingsRuleEditorMode::New);
+        self.rule_editor_account_id = Some(account_id);
+        self.rule_match_mode = MatchMode::All;
+        let condition_id = self.next_rule_condition_id();
+        self.add_rule_condition(new_advanced_condition(condition_id), cx);
+        self.add_rule_action("mark_read".to_string(), None, folders, cx);
+        self.status = None;
+        cx.notify();
+    }
+
+    fn start_edit_rule_editor(
+        &mut self,
+        account_id: String,
+        rule: RuleDto,
+        folders: Vec<Folder>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reset_rule_editor(cx);
+        self.rule_editor_mode = Some(SettingsRuleEditorMode::Edit(rule.id));
+        self.rule_editor_account_id = Some(account_id);
+        self.rule_name_input
+            .update(cx, |input, cx| input.set_value(rule.name, cx));
+        self.rule_match_mode = match rule.match_mode.as_str() {
+            "any" => MatchMode::Any,
+            _ => MatchMode::All,
+        };
+
+        for condition in rule.conditions {
+            let field = parse_condition_field(&condition.field).unwrap_or(ConditionField::From);
+            let operator = parse_condition_operator(&condition.operator)
+                .unwrap_or(ConditionOperator::Contains);
+            self.add_rule_condition(
+                Condition {
+                    id: condition.id,
+                    field,
+                    operator,
+                    value: condition.value,
+                },
+                cx,
+            );
+        }
+        if self.rule_condition_rows.is_empty() {
+            let condition_id = self.next_rule_condition_id();
+            self.add_rule_condition(new_advanced_condition(condition_id), cx);
+        }
+
+        for action in rule.actions {
+            self.add_rule_action(action.action_type, action.action_value, folders.clone(), cx);
+        }
+        if self.rule_action_rows.is_empty() {
+            self.add_rule_action("mark_read".to_string(), None, folders, cx);
+        }
+        self.status = None;
+        cx.notify();
+    }
+
+    fn next_rule_key(&mut self) -> u64 {
+        let key = self.rule_next_key;
+        self.rule_next_key = self.rule_next_key.saturating_add(1);
+        key
+    }
+
+    fn next_rule_condition_id(&mut self) -> String {
+        format!("settings-rule-condition-{}", self.next_rule_key())
+    }
+
+    fn add_rule_condition(&mut self, condition: Condition, cx: &mut Context<Self>) {
+        let key = self.next_rule_key();
+        let condition_id = condition.id.clone();
+        let initial_value = condition.value.clone();
+        let modal_entity = cx.entity();
+        let value_input = cx.new(move |_| {
+            TextInput::new()
+                .value(initial_value.clone())
+                .placeholder("Value")
+                .on_change({
+                    let modal_entity = modal_entity.clone();
+                    let condition_id = condition_id.clone();
+                    move |value, app_cx| {
+                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                            modal.set_rule_condition_value(&condition_id, value.to_string());
+                            cx.notify();
+                        });
+                    }
+                })
+        });
+        let field_condition_id = condition.id.clone();
+        let field_modal = cx.entity();
+        let field_selected = condition_field_value(&condition.field);
+        let field_dropdown = cx.new(move |_| {
+            rule_condition_field_dropdown(
+                ("settings-rule-field", key),
+                field_selected,
+                field_modal.clone(),
+                field_condition_id.clone(),
+            )
+        });
+        let operator_condition_id = condition.id.clone();
+        let operator_modal = cx.entity();
+        let operator_selected = condition_operator_value(&condition.operator);
+        let operator_dropdown = cx.new(move |_| {
+            rule_condition_operator_dropdown(
+                ("settings-rule-op", key),
+                operator_selected,
+                operator_modal.clone(),
+                operator_condition_id.clone(),
+            )
+        });
+        let bool_condition_id = condition.id.clone();
+        let bool_modal = cx.entity();
+        let bool_selected = if condition.value.trim() == "false" {
+            "false"
+        } else {
+            "true"
+        };
+        let bool_dropdown = cx.new(move |_| {
+            rule_boolean_dropdown(
+                ("settings-rule-bool", key),
+                bool_selected,
+                bool_modal.clone(),
+                bool_condition_id.clone(),
+            )
+        });
+        self.rule_condition_rows.push(SettingsRuleConditionRow {
+            key,
+            condition,
+            value_input,
+            field_dropdown,
+            operator_dropdown,
+            bool_dropdown,
+        });
+    }
+
+    fn remove_rule_condition(&mut self, condition_id: &str, cx: &mut Context<Self>) {
+        self.rule_condition_rows
+            .retain(|row| row.condition.id != condition_id);
+        if self.rule_condition_rows.is_empty() {
+            let id = self.next_rule_condition_id();
+            self.add_rule_condition(new_advanced_condition(id), cx);
+        }
+        cx.notify();
+    }
+
+    fn set_rule_condition_field(
+        &mut self,
+        condition_id: &str,
+        field: ConditionField,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(row) = self
+            .rule_condition_rows
+            .iter_mut()
+            .find(|row| row.condition.id == condition_id)
+        {
+            row.condition.field = field;
+            row.condition.operator = ConditionOperator::Contains;
+            row.condition.value = default_condition_value(&row.condition.field).to_string();
+            let value = row.condition.value.clone();
+            let operator = row.condition.operator.clone();
+            let bool_value = if row.condition.value == "false" {
+                "false"
+            } else {
+                "true"
+            };
+            row.value_input.update(cx, |input, cx| {
+                input.set_value(value, cx);
+            });
+            row.operator_dropdown.update(cx, |dropdown, cx| {
+                dropdown.set_selected(condition_operator_value(&operator), cx);
+            });
+            row.bool_dropdown.update(cx, |dropdown, cx| {
+                dropdown.set_selected(bool_value, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn set_rule_condition_operator(&mut self, condition_id: &str, operator: ConditionOperator) {
+        if let Some(row) = self
+            .rule_condition_rows
+            .iter_mut()
+            .find(|row| row.condition.id == condition_id)
+        {
+            row.condition.operator = operator;
+        }
+    }
+
+    fn set_rule_condition_value(&mut self, condition_id: &str, value: String) {
+        if let Some(row) = self
+            .rule_condition_rows
+            .iter_mut()
+            .find(|row| row.condition.id == condition_id)
+        {
+            row.condition.value = value;
+        }
+    }
+
+    fn add_rule_action(
+        &mut self,
+        action_type: String,
+        action_value: Option<String>,
+        folders: Vec<Folder>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = self.next_rule_key();
+        let modal_entity = cx.entity();
+        let action_dropdown = cx.new({
+            let action_type = action_type.clone();
+            let modal_entity = modal_entity.clone();
+            move |_| {
+                rule_action_type_dropdown(
+                    ("settings-rule-action-type", key),
+                    action_type.as_str(),
+                    modal_entity.clone(),
+                    key,
+                )
+            }
+        });
+        let folder_dropdown = cx.new({
+            let selected = action_value.clone();
+            let modal_entity = cx.entity();
+            move |_| {
+                rule_action_folder_dropdown(
+                    ("settings-rule-action-folder", key),
+                    selected.clone(),
+                    folders.clone(),
+                    modal_entity.clone(),
+                    key,
+                )
+            }
+        });
+        self.rule_action_rows.push(SettingsRuleActionRow {
+            key,
+            action_type,
+            action_value,
+            action_dropdown,
+            folder_dropdown,
+        });
+        cx.notify();
+    }
+
+    fn remove_rule_action(&mut self, key: u64, cx: &mut Context<Self>) {
+        if self.rule_action_rows.len() <= 1 {
+            cx.notify();
+            return;
+        }
+        self.rule_action_rows.retain(|row| row.key != key);
+        cx.notify();
+    }
+
+    fn set_rule_action_type(&mut self, key: u64, action_type: String) {
+        if let Some(row) = self.rule_action_rows.iter_mut().find(|row| row.key == key) {
+            row.action_type = action_type;
+            if row.action_type != "move_to_folder" {
+                row.action_value = None;
+            }
+        }
+    }
+
+    fn set_rule_action_value(&mut self, key: u64, action_value: Option<String>) {
+        if let Some(row) = self.rule_action_rows.iter_mut().find(|row| row.key == key) {
+            row.action_value = action_value;
+        }
+    }
+
+    fn set_rule_match_mode(&mut self, match_mode: MatchMode) {
+        self.rule_match_mode = match_mode;
     }
 
     fn apply_webhooks(
@@ -2553,10 +3027,15 @@ impl SettingsModal {
 }
 
 impl Render for SettingsModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx).clone();
         if !state.modals.settings_open {
+            self.focused_on_open = false;
             return div();
+        }
+        if !self.focused_on_open {
+            window.focus(&self.focus_handle);
+            self.focused_on_open = true;
         }
 
         let theme = cx.theme();
@@ -2569,10 +3048,28 @@ impl Render for SettingsModal {
             .absolute()
             .inset_0()
             .size_full()
+            .tab_index(0)
+            .key_context("SettingsModal")
+            .track_focus(&self.focus_handle)
             .flex()
             .items_center()
             .justify_center()
             .bg(backdrop)
+            .on_key_down({
+                let state_entity = self.state.clone();
+                let modal_entity = modal_entity.clone();
+                move |ev: &KeyDownEvent, _, app_cx| {
+                    if handle_settings_modal_key(
+                        &state_entity,
+                        &modal_entity,
+                        ev.keystroke.key.as_str(),
+                        ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform,
+                        app_cx,
+                    ) {
+                        app_cx.stop_propagation();
+                    }
+                }
+            })
             .on_mouse_down(MouseButton::Left, {
                 let state_entity = self.state.clone();
                 move |_, _, app_cx| close_settings_modal(&state_entity, app_cx)
@@ -3149,6 +3646,13 @@ fn settings_rules_body(
         .find(|account| account.id == account_id)
         .map(|account| account.name.clone())
         .unwrap_or_else(|| "Account".to_string());
+    let folders = state
+        .folders_by_account
+        .get(account_id)
+        .cloned()
+        .unwrap_or_default();
+    let editor_open = modal.rule_editor_mode.is_some()
+        && modal.rule_editor_account_id.as_deref() == Some(account_id);
 
     let mut rule_list = div().flex().flex_col().gap(px(6.0));
     if modal.rules_loading {
@@ -3175,6 +3679,7 @@ fn settings_rules_body(
     } else {
         for rule in &modal.rules {
             let rule_id = rule.id.clone();
+            let edit_rule = rule.clone();
             let busy = modal.rule_busy_ids.contains(&rule.id);
             rule_list = rule_list.child(
                 div()
@@ -3233,6 +3738,31 @@ fn settings_rules_body(
                     )
                     .child(
                         Button::new(SharedString::from(format!(
+                            "settings-rule-edit-{}",
+                            rule.id
+                        )))
+                        .label("Edit")
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(busy || modal.rules_loading)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let modal_entity = modal_entity.clone();
+                            let account_id = account_id.to_string();
+                            let edit_rule = edit_rule.clone();
+                            move |_, _, app_cx| {
+                                start_settings_rule_edit(
+                                    &state_entity,
+                                    &modal_entity,
+                                    account_id.clone(),
+                                    edit_rule.clone(),
+                                    app_cx,
+                                );
+                            }
+                        }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
                             "settings-rule-delete-{}",
                             rule.id
                         )))
@@ -3260,30 +3790,363 @@ fn settings_rules_body(
         }
     }
 
-    div()
+    let mut body = div()
         .flex()
         .flex_col()
         .gap(px(16.0))
-        .child(settings_section_title("Rules", cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(settings_section_title("Rules", cx))
+                .when(!editor_open, |row| {
+                    row.child(
+                        Button::new("settings-new-rule")
+                            .label("New rule")
+                            .appearance(ButtonAppearance::Accent)
+                            .size(ButtonSize::Compact)
+                            .disabled(modal.rules_loading)
+                            .on_click({
+                                let state_entity = state_entity.clone();
+                                let modal_entity = modal_entity.clone();
+                                let account_id = account_id.to_string();
+                                move |_, _, app_cx| {
+                                    start_settings_rule_new(
+                                        &state_entity,
+                                        &modal_entity,
+                                        account_id.clone(),
+                                        app_cx,
+                                    );
+                                }
+                            }),
+                    )
+                }),
+        )
         .child(
             div()
                 .text_size(px(typography.caption.size))
                 .text_color(colors.on_subtle)
                 .child(account_label),
+        );
+
+    if editor_open {
+        body = body.child(settings_rule_editor_body(modal_entity, modal, folders, cx));
+    } else {
+        body = body.child(rule_list);
+    }
+
+    body.when_some(status, |body, (message, ok)| {
+        body.child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(if ok {
+                    colors.status_success
+                } else {
+                    colors.status_error
+                })
+                .child(message),
         )
-        .child(rule_list)
-        .when_some(status, |body, (message, ok)| {
-            body.child(
-                div()
-                    .text_size(px(typography.caption.size))
-                    .text_color(if ok {
-                        colors.status_success
-                    } else {
-                        colors.status_error
-                    })
-                    .child(message),
-            )
-        })
+    })
+}
+
+fn settings_rule_editor_body(
+    modal_entity: &Entity<SettingsModal>,
+    modal: &SettingsModal,
+    folders: Vec<Folder>,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let state_entity = modal.state.clone();
+    let modal_entity_for_rows = modal_entity.clone();
+    let title = match modal.rule_editor_mode {
+        Some(SettingsRuleEditorMode::New) => "New rule",
+        Some(SettingsRuleEditorMode::Edit(_)) => "Edit rule",
+        None => "Rule",
+    };
+
+    let mut condition_rows = div().flex().flex_col().gap(px(8.0));
+    for row in modal.rule_condition_rows.clone() {
+        condition_rows = condition_rows.child(settings_rule_condition_row(
+            row,
+            modal_entity_for_rows.clone(),
+            cx,
+        ));
+    }
+
+    let mut action_rows = div().flex().flex_col().gap(px(8.0));
+    let can_remove_action = modal.rule_action_rows.len() > 1;
+    for row in modal.rule_action_rows.clone() {
+        action_rows = action_rows.child(settings_rule_action_row(
+            row,
+            modal_entity.clone(),
+            can_remove_action,
+            cx,
+        ));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(
+            div()
+                .text_size(px(typography.body.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.on_neutral)
+                .child(title),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Name", cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(240.0))
+                        .child(modal.rule_name_input.clone()),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Match", cx))
+                .child(
+                    Button::new("settings-rule-match-all")
+                        .label("All")
+                        .appearance(if modal.rule_match_mode == MatchMode::All {
+                            ButtonAppearance::Neutral
+                        } else {
+                            ButtonAppearance::Subtle
+                        })
+                        .size(ButtonSize::Compact)
+                        .on_click({
+                            let modal_entity = modal_entity.clone();
+                            move |_, _, app_cx| {
+                                let _ = modal_entity.update(app_cx, |modal, cx| {
+                                    modal.set_rule_match_mode(MatchMode::All);
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("settings-rule-match-any")
+                        .label("Any")
+                        .appearance(if modal.rule_match_mode == MatchMode::Any {
+                            ButtonAppearance::Neutral
+                        } else {
+                            ButtonAppearance::Subtle
+                        })
+                        .size(ButtonSize::Compact)
+                        .on_click({
+                            let modal_entity = modal_entity.clone();
+                            move |_, _, app_cx| {
+                                let _ = modal_entity.update(app_cx, |modal, cx| {
+                                    modal.set_rule_match_mode(MatchMode::Any);
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(typography.caption.size))
+                        .text_color(colors.on_subtle)
+                        .child("of the following conditions"),
+                ),
+        )
+        .child(settings_section_title("Conditions", cx))
+        .child(condition_rows)
+        .child(
+            Button::new("settings-rule-add-condition")
+                .label("Add condition")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(modal.rule_saving)
+                .on_click({
+                    let modal_entity = modal_entity.clone();
+                    move |_, _, app_cx| {
+                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                            let id = modal.next_rule_condition_id();
+                            modal.add_rule_condition(new_advanced_condition(id), cx);
+                        });
+                    }
+                }),
+        )
+        .child(settings_section_title("Actions", cx))
+        .child(action_rows)
+        .child(
+            Button::new("settings-rule-add-action")
+                .label("Add action")
+                .appearance(ButtonAppearance::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(modal.rule_saving)
+                .on_click({
+                    let modal_entity = modal_entity.clone();
+                    let folders = folders.clone();
+                    move |_, _, app_cx| {
+                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                            modal.add_rule_action(
+                                "mark_read".to_string(),
+                                None,
+                                folders.clone(),
+                                cx,
+                            );
+                        });
+                    }
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(div().flex_1())
+                .child(
+                    Button::new("settings-rule-cancel")
+                        .label("Cancel")
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(modal.rule_saving)
+                        .on_click({
+                            let modal_entity = modal_entity.clone();
+                            move |_, _, app_cx| {
+                                cancel_settings_rule_editor(&modal_entity, app_cx);
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("settings-rule-save")
+                        .label(if modal.rule_saving {
+                            "Saving..."
+                        } else {
+                            "Save rule"
+                        })
+                        .appearance(ButtonAppearance::Accent)
+                        .size(ButtonSize::Compact)
+                        .disabled(modal.rule_saving || modal.rules_loading)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            let modal_entity = modal_entity.clone();
+                            move |_, _, app_cx| {
+                                start_settings_rule_save(&state_entity, &modal_entity, app_cx);
+                            }
+                        }),
+                ),
+        )
+}
+
+fn settings_rule_condition_row(
+    row: SettingsRuleConditionRow,
+    modal_entity: Entity<SettingsModal>,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let field_type = condition_field_type(&row.condition.field);
+    let condition_id = row.condition.id.clone();
+    let mut line = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(div().w(px(170.0)).child(row.field_dropdown.clone()));
+
+    match field_type {
+        ConditionFieldType::Text => {
+            line = line
+                .child(div().w(px(170.0)).child(row.operator_dropdown.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(180.0))
+                        .child(row.value_input.clone()),
+                );
+        }
+        ConditionFieldType::Boolean => {
+            line = line
+                .child(div().w(px(170.0)).child(row.bool_dropdown.clone()))
+                .child(div().flex_1());
+        }
+        ConditionFieldType::Date => {
+            line = line
+                .child(
+                    div()
+                        .w(px(170.0))
+                        .text_size(px(theme.typography.caption.size))
+                        .text_color(colors.on_subtle)
+                        .child("YYYY-MM-DD"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(180.0))
+                        .child(row.value_input.clone()),
+                );
+        }
+    }
+
+    line.child(
+        Button::new(("settings-rule-remove-condition", row.key))
+            .label("Remove")
+            .appearance(ButtonAppearance::Subtle)
+            .size(ButtonSize::Compact)
+            .on_click({
+                let modal_entity = modal_entity.clone();
+                move |_, _, app_cx| {
+                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal.remove_rule_condition(&condition_id, cx);
+                    });
+                }
+            }),
+    )
+}
+
+fn settings_rule_action_row(
+    row: SettingsRuleActionRow,
+    modal_entity: Entity<SettingsModal>,
+    can_remove: bool,
+    _cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
+    let key = row.key;
+    let mut line = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(div().w(px(190.0)).child(row.action_dropdown.clone()));
+
+    if rule_action_needs_folder(&row.action_type) {
+        line = line.child(
+            div()
+                .flex_1()
+                .min_w(px(220.0))
+                .child(row.folder_dropdown.clone()),
+        );
+    } else {
+        line = line.child(div().flex_1());
+    }
+
+    line.child(
+        Button::new(("settings-rule-remove-action", key))
+            .label("Remove")
+            .appearance(ButtonAppearance::Subtle)
+            .size(ButtonSize::Compact)
+            .disabled(!can_remove)
+            .on_click({
+                let modal_entity = modal_entity.clone();
+                move |_, _, app_cx| {
+                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal.remove_rule_action(key, cx);
+                    });
+                }
+            }),
+    )
 }
 
 fn settings_webhooks_body(
@@ -3574,6 +4437,48 @@ fn close_settings_modal(state_entity: &Entity<NativeAppState>, app_cx: &mut App)
         state.modals.settings_open = false;
         cx.notify();
     });
+}
+
+fn handle_settings_modal_key(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    key: &str,
+    command: bool,
+    app_cx: &mut App,
+) -> bool {
+    match key {
+        "escape" => {
+            let editor_open = modal_entity.read(app_cx).rule_editor_mode.is_some();
+            if editor_open {
+                cancel_settings_rule_editor(modal_entity, app_cx);
+            } else {
+                close_settings_modal(state_entity, app_cx);
+            }
+            true
+        }
+        "enter" | "return" => {
+            let active = {
+                let modal = modal_entity.read(app_cx);
+                (modal.active_tab.clone(), modal.rule_editor_mode.is_some())
+            };
+            match active {
+                (SettingsTab::Rules(_), true) => {
+                    start_settings_rule_save(state_entity, modal_entity, app_cx);
+                    true
+                }
+                (SettingsTab::Webhooks, _) => {
+                    start_settings_webhook_create(state_entity, modal_entity, app_cx);
+                    true
+                }
+                (SettingsTab::Account(account_id), _) if command => {
+                    start_settings_save(state_entity, modal_entity, account_id, app_cx);
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 fn select_settings_account(
@@ -3957,6 +4862,154 @@ fn start_settings_rule_delete(
     );
 }
 
+fn start_settings_rule_new(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    app_cx: &mut App,
+) {
+    let folders = state_entity
+        .read(app_cx)
+        .folders_by_account
+        .get(&account_id)
+        .cloned()
+        .unwrap_or_default();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.start_new_rule_editor(account_id, folders, cx);
+    });
+}
+
+fn start_settings_rule_edit(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    account_id: String,
+    rule: RuleDto,
+    app_cx: &mut App,
+) {
+    let folders = state_entity
+        .read(app_cx)
+        .folders_by_account
+        .get(&account_id)
+        .cloned()
+        .unwrap_or_default();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.start_edit_rule_editor(account_id, rule, folders, cx);
+    });
+}
+
+fn cancel_settings_rule_editor(modal_entity: &Entity<SettingsModal>, app_cx: &mut App) {
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.reset_rule_editor(cx);
+        modal.status = None;
+        cx.notify();
+    });
+}
+
+fn start_settings_rule_save(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<SettingsModal>,
+    app_cx: &mut App,
+) {
+    let (saving, mode, account_id, name_input, match_mode, conditions, actions) = {
+        let modal = modal_entity.read(app_cx);
+        (
+            modal.rule_saving,
+            modal.rule_editor_mode.clone(),
+            modal.rule_editor_account_id.clone(),
+            modal.rule_name_input.clone(),
+            modal.rule_match_mode.clone(),
+            modal
+                .rule_condition_rows
+                .iter()
+                .map(|row| row.condition.clone())
+                .collect::<Vec<_>>(),
+            modal
+                .rule_action_rows
+                .iter()
+                .map(|row| SettingsRuleActionDraft {
+                    action_type: row.action_type.clone(),
+                    action_value: row.action_value.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    if saving {
+        return;
+    }
+    let name = name_input.read(app_cx).text().to_string();
+    let request = match build_settings_rule_save_request(
+        mode, account_id, name, match_mode, conditions, actions,
+    ) {
+        Ok(request) => request,
+        Err(message) => {
+            let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal.status = Some((message.clone(), false));
+                modal.rule_saving = false;
+                cx.notify();
+            });
+            state_entity.update(app_cx, |state, cx| {
+                state.last_error = Some(message);
+                cx.notify();
+            });
+            return;
+        }
+    };
+
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let account_id = request.account_id.clone();
+    let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal.rule_saving = true;
+        modal.status = None;
+        cx.notify();
+    });
+    state_entity.update(app_cx, |state, cx| {
+        state.last_error = None;
+        cx.notify();
+    });
+
+    let requested_account_id = account_id.clone();
+    let task = app_cx.background_executor().spawn(async move {
+        mutate_settings_rules(base_url, account_id, SettingsRuleMutation::Save(request))
+    });
+    let state_entity = state_entity.clone();
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let error_message = result.as_ref().err().map(|err| err.to_string());
+
+                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                    Ok(rules) => {
+                        modal.apply_rules(
+                            &requested_account_id,
+                            rules,
+                            Some(("Rule saved".to_string(), true)),
+                            cx,
+                        );
+                        modal.reset_rule_editor(cx);
+                    }
+                    Err(err) => {
+                        modal.fail_rules(&requested_account_id, err.to_string(), cx);
+                    }
+                }) {
+                    tracing::warn!("failed to apply native rule save: {err}");
+                }
+
+                if let Some(message) = error_message {
+                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                        state.last_error = Some(message);
+                        cx.notify();
+                    }) {
+                        tracing::warn!("failed to apply native rule save error: {err}");
+                    }
+                }
+            }
+        })
+        .detach();
+}
+
 fn start_settings_rule_mutation(
     state_entity: &Entity<NativeAppState>,
     modal_entity: &Entity<SettingsModal>,
@@ -4259,6 +5312,34 @@ fn mutate_settings_rules(
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         match mutation {
+            SettingsRuleMutation::Save(request) => match request.mode {
+                SettingsRuleEditorMode::New => {
+                    client
+                        .create_rule(
+                            &request.account_id,
+                            &request.name,
+                            Some(&request.match_mode),
+                            Some(request.conditions),
+                            Some(request.actions),
+                        )
+                        .await
+                        .with_context(|| format!("create rule for {}", request.account_id))?;
+                }
+                SettingsRuleEditorMode::Edit(rule_id) => {
+                    client
+                        .update_rule(
+                            &rule_id,
+                            &UpdateRuleBody {
+                                name: Some(request.name),
+                                match_mode: Some(request.match_mode),
+                                conditions: Some(request.conditions),
+                                actions: Some(request.actions),
+                            },
+                        )
+                        .await
+                        .with_context(|| format!("update rule {rule_id}"))?;
+                }
+            },
             SettingsRuleMutation::Toggle { rule_id } => {
                 client
                     .toggle_rule(&rule_id)
@@ -4385,6 +5466,116 @@ fn build_create_webhook_request(
         events: Some(events),
         account_id: None,
     })
+}
+
+fn build_settings_rule_save_request(
+    mode: Option<SettingsRuleEditorMode>,
+    account_id: Option<String>,
+    name: String,
+    match_mode: MatchMode,
+    conditions: Vec<Condition>,
+    actions: Vec<SettingsRuleActionDraft>,
+) -> std::result::Result<SettingsRuleSaveRequest, String> {
+    let mode = mode.ok_or_else(|| "Open a rule editor first.".to_string())?;
+    let account_id = account_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "Rule account not found.".to_string())?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Enter a rule name.".to_string());
+    }
+    if actions.is_empty() {
+        return Err("Add at least one rule action.".to_string());
+    }
+
+    let conditions = conditions
+        .into_iter()
+        .map(|condition| {
+            let value = if condition_field_type(&condition.field) == ConditionFieldType::Boolean {
+                if condition.value.trim() == "false" {
+                    "false".to_string()
+                } else {
+                    "true".to_string()
+                }
+            } else {
+                condition.value.trim().to_string()
+            };
+            ConditionInput {
+                field: condition_field_value(&condition.field).to_string(),
+                operator: condition_operator_value(&condition.operator).to_string(),
+                value,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut request_actions = Vec::with_capacity(actions.len());
+    for action in actions {
+        let action_type = action.action_type.trim().to_string();
+        if !is_supported_rule_action(&action_type) {
+            return Err("Choose a supported rule action.".to_string());
+        }
+
+        let action_value = if rule_action_needs_folder(&action_type) {
+            let value = action.action_value.unwrap_or_default().trim().to_string();
+            if value.is_empty() {
+                return Err("Choose a folder for move actions.".to_string());
+            }
+            Some(value)
+        } else {
+            None
+        };
+
+        request_actions.push(ActionInput {
+            action_type,
+            action_value,
+        });
+    }
+
+    Ok(SettingsRuleSaveRequest {
+        mode,
+        account_id,
+        name,
+        match_mode: match_mode_value(&match_mode).to_string(),
+        conditions,
+        actions: request_actions,
+    })
+}
+
+fn match_mode_value(match_mode: &MatchMode) -> &'static str {
+    match match_mode {
+        MatchMode::All => "all",
+        MatchMode::Any => "any",
+    }
+}
+
+fn is_supported_rule_action(value: &str) -> bool {
+    rule_action_label(value).is_some()
+}
+
+fn rule_action_needs_folder(value: &str) -> bool {
+    value == "move_to_folder"
+}
+
+fn rule_action_label(value: &str) -> Option<&'static str> {
+    match value {
+        "mark_read" => Some("Mark as read"),
+        "mark_unread" => Some("Mark as unread"),
+        "flag" => Some("Flag message"),
+        "unflag" => Some("Unflag message"),
+        "archive" => Some("Archive"),
+        "delete" => Some("Delete"),
+        "move_to_folder" => Some("Move to folder"),
+        _ => None,
+    }
+}
+
+fn rule_folder_option_label(folder: &Folder) -> String {
+    if folder.full_path.trim().is_empty() {
+        folder.name.clone()
+    } else {
+        folder.full_path.clone()
+    }
 }
 
 fn rule_counts_text(rule: &RuleDto) -> String {
@@ -7541,6 +8732,141 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "Choose a supported webhook event set.");
+    }
+
+    #[test]
+    fn rule_save_request_builds_new_rule_payload() {
+        let request = build_settings_rule_save_request(
+            Some(SettingsRuleEditorMode::New),
+            Some(" account ".to_string()),
+            "  Move Ada reports  ".to_string(),
+            MatchMode::Any,
+            vec![
+                Condition {
+                    id: "condition-1".to_string(),
+                    field: ConditionField::Subject,
+                    operator: ConditionOperator::StartsWith,
+                    value: " Report ".to_string(),
+                },
+                Condition {
+                    id: "condition-2".to_string(),
+                    field: ConditionField::IsFlagged,
+                    operator: ConditionOperator::Contains,
+                    value: "".to_string(),
+                },
+            ],
+            vec![SettingsRuleActionDraft {
+                action_type: "move_to_folder".to_string(),
+                action_value: Some(" archive ".to_string()),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(request.mode, SettingsRuleEditorMode::New);
+        assert_eq!(request.account_id, "account");
+        assert_eq!(request.name, "Move Ada reports");
+        assert_eq!(request.match_mode, "any");
+        assert_eq!(
+            request.conditions,
+            vec![
+                ConditionInput {
+                    field: "subject".to_string(),
+                    operator: "starts_with".to_string(),
+                    value: "Report".to_string(),
+                },
+                ConditionInput {
+                    field: "is_flagged".to_string(),
+                    operator: "contains".to_string(),
+                    value: "true".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            request.actions,
+            vec![ActionInput {
+                action_type: "move_to_folder".to_string(),
+                action_value: Some("archive".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn rule_save_request_builds_edit_payload_and_clears_non_move_values() {
+        let request = build_settings_rule_save_request(
+            Some(SettingsRuleEditorMode::Edit("rule-1".to_string())),
+            Some("account".to_string()),
+            "Mark read".to_string(),
+            MatchMode::All,
+            vec![Condition {
+                id: "condition-1".to_string(),
+                field: ConditionField::From,
+                operator: ConditionOperator::Contains,
+                value: "ada@example.test".to_string(),
+            }],
+            vec![SettingsRuleActionDraft {
+                action_type: "mark_read".to_string(),
+                action_value: Some("ignored-folder".to_string()),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.mode,
+            SettingsRuleEditorMode::Edit("rule-1".to_string())
+        );
+        assert_eq!(request.match_mode, "all");
+        assert_eq!(
+            request.actions,
+            vec![ActionInput {
+                action_type: "mark_read".to_string(),
+                action_value: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn rule_save_request_rejects_invalid_values() {
+        let err = build_settings_rule_save_request(
+            Some(SettingsRuleEditorMode::New),
+            Some("account".to_string()),
+            " ".to_string(),
+            MatchMode::All,
+            vec![new_advanced_condition("condition-1".to_string())],
+            vec![SettingsRuleActionDraft {
+                action_type: "mark_read".to_string(),
+                action_value: None,
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err, "Enter a rule name.");
+
+        let err = build_settings_rule_save_request(
+            Some(SettingsRuleEditorMode::New),
+            Some("account".to_string()),
+            "Move".to_string(),
+            MatchMode::All,
+            vec![new_advanced_condition("condition-1".to_string())],
+            vec![SettingsRuleActionDraft {
+                action_type: "move_to_folder".to_string(),
+                action_value: None,
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err, "Choose a folder for move actions.");
+
+        let err = build_settings_rule_save_request(
+            Some(SettingsRuleEditorMode::New),
+            Some("account".to_string()),
+            "Unsupported".to_string(),
+            MatchMode::All,
+            vec![new_advanced_condition("condition-1".to_string())],
+            vec![SettingsRuleActionDraft {
+                action_type: "bounce".to_string(),
+                action_value: None,
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err, "Choose a supported rule action.");
     }
 
     #[test]

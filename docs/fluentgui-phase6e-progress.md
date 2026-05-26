@@ -13,13 +13,11 @@ Last updated: 2026-05-26
 
 ## Remaining Gaps
 
-- Rule creation remains pending.
-- Rule editing remains pending, including name editing, condition builder
-  plumbing, action editor, folder selector for move actions, save/cancel states,
-  and error handling.
+- Rule creation and editing were completed in Phase 6f.
 - Add-account/setup remains tracked in the startup/account setup section rather
   than the settings modal.
-- Keyboard polish for Settings modal Escape/Enter handling remains pending.
+- Settings modal Escape/Enter handling was added in Phase 6f; broader focus
+  management still needs manual UI walkthrough with account setup.
 
 ## Verification
 
