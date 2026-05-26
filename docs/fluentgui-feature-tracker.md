@@ -93,7 +93,7 @@ Status values:
 | Label add dropdown lists labels not already on the message. | Same. | Current audited; pending native. | Uses label APIs. |
 | Header context menu: reply, forward, archive, delete, read/unread, copy sender email. | Same. | Native implemented; cargo check. | Right-click message header opens native menu; sender-email resolution is covered. |
 | Attachment indicator. | Same current level. | Current audited; product gap. | No current attachment download/open UI. |
-| HTML body shown in sandboxed iframe when available; text fallback otherwise. | Native rich document viewer with safe rendering and text fallback. | Current audited; pending native. | Largest migration risk. |
+| HTML body shown in sandboxed iframe when available; text fallback otherwise. | Native rich document viewer with safe rendering and text fallback. | Native implemented; automated tests. | Native uses a lossy safe `RichDocument` renderer; manual visual fidelity pass remains. |
 | Quick reply textarea, send button, sending/error states. | Same. | Native implemented; automated tests. | Sends via `/api/v1/messages`; request defaults and errors covered. |
 | Shortcuts e, #, u, Escape. | Same. | Native implemented; automated tests. | Ignored while quick-reply inputs or snooze picker are focused. |
 

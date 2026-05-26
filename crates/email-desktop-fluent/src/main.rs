@@ -10560,6 +10560,59 @@ mod tests {
     }
 
     #[test]
+    fn selected_document_prefers_safe_html_body() {
+        let mut full = full_message("message", "inbox", true, false);
+        full.body = Some(MessageBody {
+            html_body: Some(
+                "<h1>Hello</h1><style>.x{}</style><script>alert(1)</script><p>Body &amp; more</p>"
+                    .to_string(),
+            ),
+            text_body: Some("Text fallback".to_string()),
+        });
+        let state = NativeAppState {
+            selected_full_message: Some(full),
+            ..NativeAppState::default()
+        };
+
+        let text = selected_document(&state).to_plain_text();
+        assert!(text.contains("Hello"));
+        assert!(text.contains("Body & more"));
+        assert!(!text.contains("alert"));
+        assert!(!text.contains("Text fallback"));
+    }
+
+    #[test]
+    fn selected_document_falls_back_to_text_and_preview() {
+        let mut full = full_message("message", "inbox", true, false);
+        full.preview = Some("Preview fallback".to_string());
+        full.body = Some(MessageBody {
+            html_body: Some("   ".to_string()),
+            text_body: Some("Text body".to_string()),
+        });
+        let mut state = NativeAppState {
+            selected_full_message: Some(full),
+            ..NativeAppState::default()
+        };
+
+        assert_eq!(selected_document(&state).to_plain_text(), "Text body");
+
+        let mut full = full_message("message", "inbox", true, false);
+        full.preview = Some("Preview fallback".to_string());
+        state.selected_full_message = Some(full);
+        assert_eq!(
+            selected_document(&state).to_plain_text(),
+            "Preview fallback"
+        );
+
+        state.selected_full_message = None;
+        state.selected_message = Some("summary".to_string());
+        let mut summary = message("summary", "inbox", true);
+        summary.preview = Some("Summary preview".to_string());
+        state.messages = vec![summary];
+        assert_eq!(selected_document(&state).to_plain_text(), "Summary preview");
+    }
+
+    #[test]
     fn sync_updates_track_folder_progress() {
         let mut status = NativeSyncStatus::default();
 
