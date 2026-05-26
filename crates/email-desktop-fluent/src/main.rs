@@ -13,11 +13,11 @@ use chrono::{
 use email_client::EmailClient;
 use email_server::{run_server, Config};
 use email_types::{
-    Account, AccountSettings, ActionInput, BulkAction, BulkRequest, CalendarEvent, Condition,
-    ConditionField, ConditionGroup, ConditionInput, ConditionOperator, CreateAccount,
-    CreateWebhook, EventLink, Folder, FullMessage, Label, MatchMode, Message, PatchFolder,
-    PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount,
-    UpdateRuleBody, UpdateWebhook, Webhook,
+    Account, AccountSettings, ActionInput, BulkAction, BulkRequest, CalendarEvent,
+    CalendarSearchResult, Condition, ConditionField, ConditionGroup, ConditionInput,
+    ConditionOperator, CreateAccount, CreateWebhook, EventLink, Folder, FullMessage, Label,
+    MatchMode, Message, PatchFolder, PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest,
+    SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 use fluent_app::{FluentApp, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
@@ -736,6 +736,7 @@ struct NativeAppState {
     calendar_event_links: Vec<EventLink>,
     calendar_event_links_resource: AsyncResource<Vec<EventLink>, String>,
     search: SearchState,
+    search_event_results: Vec<CalendarSearchResult>,
     messages: Vec<Message>,
     messages_resource: AsyncResource<Vec<Message>, String>,
     accounts: Vec<Account>,
@@ -772,6 +773,7 @@ impl Default for NativeAppState {
             calendar_event_links: Vec::new(),
             calendar_event_links_resource: AsyncResource::new(),
             search: SearchState::default(),
+            search_event_results: Vec::new(),
             messages: Vec::new(),
             messages_resource: AsyncResource::new(),
             accounts: Vec::new(),
@@ -6560,6 +6562,7 @@ fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeApp
     let calendar_event_links = state.calendar_event_links.clone();
     let calendar_event_links_resource = state.calendar_event_links_resource.clone();
     let search = state.search.clone();
+    let search_event_results = state.search_event_results.clone();
     let messages = state.messages.clone();
     let messages_resource = state.messages_resource.clone();
     let palette = state.palette.clone();
@@ -6586,6 +6589,7 @@ fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeApp
         loaded.calendar_event_links = calendar_event_links;
         loaded.calendar_event_links_resource = calendar_event_links_resource;
         loaded.search = search;
+        loaded.search_event_results = search_event_results;
         loaded.messages = messages;
         loaded.messages_resource = messages_resource;
     } else {
@@ -7313,6 +7317,7 @@ impl NativeMessageSource {
 #[derive(Clone, Debug)]
 struct LoadedMessageCollection {
     messages: Vec<Message>,
+    calendar_events: Vec<CalendarSearchResult>,
     selected_message: Option<String>,
     selected_full_message: Option<FullMessage>,
     selected_message_labels: Vec<Label>,
@@ -7621,6 +7626,7 @@ fn begin_message_collection_load(
     state.selected_message_resource.reset();
     state.selected_message_labels.clear();
     state.selected_message_labels_resource.reset();
+    state.search_event_results.clear();
     state.last_error = None;
     state.messages_resource.begin_load()
 }
@@ -7642,20 +7648,29 @@ async fn load_message_collection_with_client(
     source: NativeMessageSource,
     preferred_message_id: Option<String>,
 ) -> Result<LoadedMessageCollection> {
-    let mut messages = match &source {
-        NativeMessageSource::Folder(folder_id) => client.list_folder_messages(folder_id).await,
-        NativeMessageSource::Label(label_id) => client.list_label_messages(label_id).await,
-        NativeMessageSource::SmartFolder(kind) => client.list_smart_messages(kind).await,
+    let loaded = match &source {
+        NativeMessageSource::Folder(folder_id) => client
+            .list_folder_messages(folder_id)
+            .await
+            .map(|messages| (messages, Vec::<CalendarSearchResult>::new())),
+        NativeMessageSource::Label(label_id) => client
+            .list_label_messages(label_id)
+            .await
+            .map(|messages| (messages, Vec::<CalendarSearchResult>::new())),
+        NativeMessageSource::SmartFolder(kind) => client
+            .list_smart_messages(kind)
+            .await
+            .map(|messages| (messages, Vec::<CalendarSearchResult>::new())),
         NativeMessageSource::Search(query) => client
             .search(query, None)
             .await
-            .map(|results| results.messages),
+            .map(|results| (results.messages, results.events)),
         NativeMessageSource::AdvancedSearch(group) => client
             .advanced_search(group)
             .await
-            .map(|results| results.messages),
-    }
-    .with_context(|| source.load_context())?;
+            .map(|results| (results.messages, Vec::<CalendarSearchResult>::new())),
+    };
+    let (mut messages, calendar_events) = loaded.with_context(|| source.load_context())?;
 
     let selected_message = preferred_message_id
         .filter(|message_id| messages.iter().any(|message| message.id == *message_id))
@@ -7682,6 +7697,7 @@ async fn load_message_collection_with_client(
 
     Ok(LoadedMessageCollection {
         messages,
+        calendar_events,
         selected_message,
         selected_full_message,
         selected_message_labels,
@@ -7701,6 +7717,7 @@ fn apply_loaded_message_collection(
     }
 
     state.messages = loaded.messages;
+    state.search_event_results = loaded.calendar_events;
     retain_existing_message_selection(state);
     state.selected_message = loaded
         .selected_message
@@ -7740,6 +7757,7 @@ fn reject_message_collection_load(
     state.selected_message_resource.reset();
     state.selected_message_labels.clear();
     state.selected_message_labels_resource.reset();
+    state.search_event_results.clear();
     state.last_error = Some(message);
     true
 }
@@ -9366,6 +9384,18 @@ mod tests {
         }
     }
 
+    fn calendar_search_result(id: &str, start_at: &str) -> CalendarSearchResult {
+        CalendarSearchResult {
+            id: id.to_string(),
+            title: "Planning".to_string(),
+            description: None,
+            start_at: start_at.to_string(),
+            end_at: "2026-05-26T15:00:00Z".to_string(),
+            location: Some("Room 1".to_string()),
+            is_all_day: false,
+        }
+    }
+
     #[test]
     fn native_window_title_uses_folder_unread_counts() {
         let mut state = NativeAppState::default();
@@ -9744,6 +9774,56 @@ mod tests {
     }
 
     #[test]
+    fn calendar_search_result_selection_targets_event_week() {
+        let mut state = NativeAppState {
+            selected_view: SelectedView::Mail,
+            selected_message_ids: vec!["message".to_string()],
+            calendar_event_links_event: Some("old-event".to_string()),
+            calendar_event_links: vec![event_link("old-link", "old-event", "message")],
+            calendar_event_links_resource: AsyncResource::ready(vec![event_link(
+                "old-link",
+                "old-event",
+                "message",
+            )]),
+            ..NativeAppState::default()
+        };
+
+        apply_calendar_search_result_selection(
+            &mut state,
+            "event".to_string(),
+            "2026-05-31T23:30:00Z",
+        )
+        .expect("valid event start");
+
+        assert_eq!(state.selected_view, SelectedView::Calendar);
+        assert_eq!(
+            state.calendar_week_start,
+            calendar_week_start_from_iso("2026-05-31T23:30:00Z").expect("week")
+        );
+        assert_eq!(state.selected_event.as_deref(), Some("event"));
+        assert!(state.selected_message_ids.is_empty());
+        assert!(state.calendar_event_links.is_empty());
+        assert!(state.calendar_event_links_resource.is_idle());
+    }
+
+    #[test]
+    fn calendar_search_result_labels_format_time_and_fallback() {
+        let event = calendar_search_result("event", "2026-05-26T02:00:00Z");
+        assert!(calendar_search_result_time_label(&event).contains("May 26"));
+        assert!(calendar_search_result_time_label(&event).contains("M"));
+
+        let mut invalid = event.clone();
+        invalid.start_at = "not-a-date".to_string();
+        assert_eq!(calendar_search_result_time_label(&invalid), "not-a-date");
+        assert!(apply_calendar_search_result_selection(
+            &mut NativeAppState::default(),
+            "event".to_string(),
+            "not-a-date"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn applying_calendar_events_tracks_selection_and_stale_requests() {
         let mut state = NativeAppState {
             selected_event: Some("keep".to_string()),
@@ -9979,6 +10059,7 @@ mod tests {
                     message("newer", "inbox", true),
                     message("selected", "inbox", true),
                 ],
+                calendar_events: Vec::new(),
                 selected_message: Some("selected".to_string()),
                 selected_full_message: Some(full_message("selected", "inbox", true, false)),
                 selected_message_labels: vec![label("important")],
@@ -10011,6 +10092,7 @@ mod tests {
             labels: Vec::new(),
             messages: Some(LoadedMessageCollection {
                 messages: vec![message("new", "inbox", true)],
+                calendar_events: Vec::new(),
                 selected_message: Some("new".to_string()),
                 selected_full_message: Some(full_message("new", "inbox", true, false)),
                 selected_message_labels: Vec::new(),
@@ -10045,6 +10127,7 @@ mod tests {
         state.selected_full_message = Some(full_message("old", "inbox", false, false));
         state.selected_message_labels = vec![label("old-label")];
         state.selected_message_labels_resource = AsyncResource::ready(vec![label("old-label")]);
+        state.search_event_results = vec![calendar_search_result("event", "2026-05-26T14:00:00Z")];
 
         let request = begin_message_collection_load(
             &mut state,
@@ -10060,6 +10143,7 @@ mod tests {
         assert!(state.selected_message_resource.is_idle());
         assert!(state.selected_message_labels.is_empty());
         assert!(state.selected_message_labels_resource.is_idle());
+        assert!(state.search_event_results.is_empty());
         assert_eq!(state.messages_resource.current_request(), Some(request));
         assert!(state.messages_resource.is_loading());
     }
@@ -10078,6 +10162,10 @@ mod tests {
 
         let loaded = LoadedMessageCollection {
             messages: vec![message("stale", "inbox", false)],
+            calendar_events: vec![calendar_search_result(
+                "stale-event",
+                "2026-05-26T14:00:00Z",
+            )],
             selected_message: Some("stale".to_string()),
             selected_full_message: None,
             selected_message_labels: Vec::new(),
@@ -10102,6 +10190,7 @@ mod tests {
         );
         let loaded = LoadedMessageCollection {
             messages: vec![message("message", "inbox", false)],
+            calendar_events: vec![calendar_search_result("event", "2026-05-26T14:00:00Z")],
             selected_message: Some("message".to_string()),
             selected_full_message: Some(full_message("message", "inbox", true, true)),
             selected_message_labels: vec![label("work")],
@@ -10115,6 +10204,7 @@ mod tests {
         assert!(state.messages[0].is_flagged);
         assert_eq!(state.selected_message_labels, vec![label("work")]);
         assert!(state.selected_message_labels_resource.is_ready());
+        assert_eq!(state.search_event_results.len(), 1);
         assert_eq!(total_unread_count(&state), 0);
     }
 
@@ -11455,6 +11545,54 @@ fn open_calendar_link_message(
     );
 }
 
+fn open_calendar_search_result(
+    state_entity: &Entity<NativeAppState>,
+    event_id: String,
+    start_at: String,
+    app_cx: &mut App,
+) {
+    let selected_event =
+        state_entity.update(
+            app_cx,
+            |state, cx| match apply_calendar_search_result_selection(
+                state,
+                event_id.clone(),
+                &start_at,
+            ) {
+                Ok(()) => {
+                    cx.notify();
+                    Some(event_id.clone())
+                }
+                Err(message) => {
+                    state.last_error = Some(message);
+                    cx.notify();
+                    None
+                }
+            },
+        );
+
+    if let Some(event_id) = selected_event {
+        start_calendar_events_load(state_entity, app_cx);
+        start_calendar_event_links_load(state_entity, event_id, app_cx);
+    }
+}
+
+fn apply_calendar_search_result_selection(
+    state: &mut NativeAppState,
+    event_id: String,
+    start_at: &str,
+) -> std::result::Result<(), String> {
+    let week_start = calendar_week_start_from_iso(start_at)
+        .ok_or_else(|| format!("Invalid calendar event start time: {start_at}"))?;
+    state.selected_view = SelectedView::Calendar;
+    state.calendar_week_start = week_start;
+    state.selected_event = Some(event_id);
+    state.selected_message_ids.clear();
+    clear_calendar_event_links(state);
+    state.last_error = None;
+    Ok(())
+}
+
 fn sync_status_strip(status: &NativeSyncStatus, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
     let theme = cx.theme();
     let colors = theme.colors.clone();
@@ -11966,6 +12104,7 @@ fn mail_message_list(
     }
 
     let messages = state.messages.clone();
+    let search_events = state.search_event_results.clone();
     let selected_id_for_rows = selected_id.clone();
     let selected_ids_for_rows = state
         .selected_message_ids
@@ -11974,32 +12113,165 @@ fn mail_message_list(
         .collect::<BTreeSet<_>>();
     let row_state = state_entity.clone();
     let list_entity = cx.entity();
-    root = root.child(
-        uniform_list(
-            "native-mail-message-rows",
-            messages.len(),
-            move |range, _, app_cx| {
-                range
-                    .map(|idx| {
-                        mail_message_row(
-                            idx,
-                            &messages[idx],
-                            selected_id_for_rows.as_deref() == Some(messages[idx].id.as_str()),
-                            selected_ids_for_rows.contains(&messages[idx].id),
-                            row_height,
-                            row_state.clone(),
-                            list_entity.clone(),
-                            app_cx,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .w_full()
-        .h_full(),
-    );
+    let mut list_body = div().flex_1().min_h_0().flex().flex_col();
+    if !search_events.is_empty() {
+        list_body = list_body.child(calendar_search_results_section(
+            state_entity,
+            &search_events,
+            cx,
+        ));
+    }
+    if !messages.is_empty() {
+        list_body = list_body.child(
+            uniform_list(
+                "native-mail-message-rows",
+                messages.len(),
+                move |range, _, app_cx| {
+                    range
+                        .map(|idx| {
+                            mail_message_row(
+                                idx,
+                                &messages[idx],
+                                selected_id_for_rows.as_deref() == Some(messages[idx].id.as_str()),
+                                selected_ids_for_rows.contains(&messages[idx].id),
+                                row_height,
+                                row_state.clone(),
+                                list_entity.clone(),
+                                app_cx,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            .w_full()
+            .flex_1()
+            .min_h_0(),
+        );
+    }
+    root = root.child(list_body);
 
     root
+}
+
+fn calendar_search_results_section(
+    state_entity: &Entity<NativeAppState>,
+    events: &[CalendarSearchResult],
+    cx: &mut Context<MessageListPlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let mut section = div()
+        .flex_none()
+        .border_b_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .bg(colors.surface)
+        .child(
+            div()
+                .px(px(12.0))
+                .pt(px(10.0))
+                .pb(px(5.0))
+                .text_size(px(typography.caption.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.on_subtle)
+                .child(format!(
+                    "Calendar result{}",
+                    if events.len() == 1 { "" } else { "s" }
+                )),
+        );
+
+    for (idx, event) in events.iter().enumerate() {
+        section = section.child(calendar_search_result_row(state_entity, idx, event, cx));
+    }
+
+    section
+}
+
+fn calendar_search_result_row(
+    state_entity: &Entity<NativeAppState>,
+    idx: usize,
+    event: &CalendarSearchResult,
+    cx: &mut Context<MessageListPlaceholder>,
+) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let event_id = event.id.clone();
+    let start_at = event.start_at.clone();
+    let title = event.title.clone();
+    let time = calendar_search_result_time_label(event);
+    let location = event
+        .location
+        .as_deref()
+        .map(str::trim)
+        .filter(|location| !location.is_empty())
+        .unwrap_or("Calendar event")
+        .to_string();
+
+    div()
+        .id(("calendar-search-result-row", idx as u64))
+        .mx(px(8.0))
+        .mb(px(6.0))
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .bg(colors.neutral)
+        .cursor_pointer()
+        .hover({
+            let hover = colors.neutral_hover;
+            move |style| style.bg(hover)
+        })
+        .on_click({
+            let state_entity = state_entity.clone();
+            move |_, _, app_cx| {
+                open_calendar_search_result(
+                    &state_entity,
+                    event_id.clone(),
+                    start_at.clone(),
+                    app_cx,
+                );
+            }
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    svg()
+                        .path("icons/list_tree.svg")
+                        .size(px(14.0))
+                        .text_color(colors.accent),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(typography.body.size))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.on_neutral)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .pt(px(2.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(typography.caption.size))
+                                .text_color(colors.on_subtle)
+                                .child(format!("{time} - {location}")),
+                        ),
+                ),
+        )
+        .into_any_element()
 }
 
 fn message_list_status(state: &NativeAppState) -> Option<(String, bool)> {
@@ -12011,7 +12283,7 @@ fn message_list_status(state: &NativeAppState) -> Option<(String, bool)> {
         return Some((format!("Messages failed to load: {error}"), true));
     }
 
-    if !state.messages.is_empty() {
+    if !state.messages.is_empty() || !state.search_event_results.is_empty() {
         return None;
     }
 
@@ -14402,6 +14674,12 @@ fn calendar_week_days(week_start: NaiveDate) -> Vec<NaiveDate> {
         .collect()
 }
 
+fn calendar_week_start_from_iso(value: &str) -> Option<NaiveDate> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|parsed| monday_of_date(parsed.with_timezone(&Local).date_naive()))
+}
+
 fn calendar_week_bounds_utc(
     week_start: NaiveDate,
 ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
@@ -14470,6 +14748,20 @@ fn calendar_hour_label(hour: u32) -> String {
 
 fn calendar_time_label(value: &chrono::DateTime<Utc>) -> String {
     value.with_timezone(&Local).format("%-I:%M %p").to_string()
+}
+
+fn calendar_search_result_time_label(event: &CalendarSearchResult) -> String {
+    let parsed = chrono::DateTime::parse_from_rfc3339(&event.start_at);
+    match parsed {
+        Ok(start) if event.is_all_day => {
+            start.with_timezone(&Local).format("%b %-d, %Y").to_string()
+        }
+        Ok(start) => start
+            .with_timezone(&Local)
+            .format("%b %-d, %-I:%M %p")
+            .to_string(),
+        Err(_) => event.start_at.clone(),
+    }
 }
 
 fn calendar_event_time_label(event: &CalendarEvent) -> String {
