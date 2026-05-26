@@ -69,7 +69,7 @@ Status values:
 | Current | Native | Verified | Notes |
 |---|---|---|---|
 | Fetch folder, label, smart-folder, search, and advanced-search result messages. | Same through `email-client`. | Native implemented; automated tests. | Advanced search source wired; backend gap logged. |
-| Debounced search results. | Same. | Current audited; pending native. | Current debounce is 300 ms. |
+| Debounced search results. | Same. | Native implemented; automated tests. | Native schedules basic search result loads after the same 300 ms debounce and drops stale/already-submitted queries. |
 | Header shows folder/search label, unread count, search count. | Same. | Native implemented; cargo check. | Native header uses current mailbox title and visible unread/result counts. |
 | Select-all checkbox with indeterminate state. | Same. | Native implemented; automated tests. | Selection helper covers checked/unchecked/indeterminate states. |
 | Bulk bar with Archive, Mark Read, Mark Unread, Delete, cancel. | Same. | Native implemented; cargo check. | Bulk actions reuse typed message mutation refresh. |

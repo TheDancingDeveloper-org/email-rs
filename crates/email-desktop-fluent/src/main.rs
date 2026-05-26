@@ -70,6 +70,7 @@ const DEFAULT_MESSAGE_LIST_WIDTH: u16 = 420;
 const MIN_MESSAGE_LIST_WIDTH: u16 = 320;
 const MAX_MESSAGE_LIST_WIDTH: u16 = 640;
 const SYNC_COMPLETE_VISIBLE_FOR: Duration = Duration::from_secs(3);
+const SEARCH_RESULTS_DEBOUNCE: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeKeyAction {
@@ -816,6 +817,7 @@ enum NativeSearchSuggestion {
 struct SearchState {
     query: String,
     submitted_query: Option<String>,
+    pending_query: Option<DebouncedSearch>,
     condition_group: Option<ConditionGroup>,
     previous_source: Option<NativeMessageSource>,
     suggestions_query: Option<String>,
@@ -823,6 +825,12 @@ struct SearchState {
     suggestions_open: bool,
     suggestions_resource: AsyncResource<Vec<NativeSearchSuggestion>, String>,
     suggestion_list: SuggestionListState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DebouncedSearch {
+    query: String,
+    due_at: Instant,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1050,8 +1058,18 @@ impl EmailDesktopApp {
                 false
             }
         });
+        let debounced_search = self.state.update(cx, |state, cx| {
+            let source = take_due_debounced_search(&mut state.search, Instant::now());
+            if source.is_some() {
+                cx.notify();
+            }
+            source
+        });
         if refresh_requested {
             start_sync_complete_refresh(&self.state, cx);
+        }
+        if let Some(source) = debounced_search {
+            start_message_collection_load(&self.state, source, cx);
         }
         if changed || expired {
             cx.notify();
@@ -10208,6 +10226,66 @@ mod tests {
     }
 
     #[test]
+    fn debounced_search_waits_for_due_time_and_submits_latest_query() {
+        let start = Instant::now();
+        let mut search = SearchState {
+            query: " plan ".to_string(),
+            ..SearchState::default()
+        };
+
+        schedule_debounced_search(&mut search, " plan ", start);
+
+        assert_eq!(
+            search.pending_query,
+            Some(DebouncedSearch {
+                query: "plan".to_string(),
+                due_at: start + SEARCH_RESULTS_DEBOUNCE,
+            })
+        );
+        assert_eq!(
+            take_due_debounced_search(
+                &mut search,
+                start + SEARCH_RESULTS_DEBOUNCE - Duration::from_millis(1),
+            ),
+            None
+        );
+        assert!(search.pending_query.is_some());
+        assert_eq!(
+            take_due_debounced_search(&mut search, start + SEARCH_RESULTS_DEBOUNCE),
+            Some(NativeMessageSource::Search("plan".to_string()))
+        );
+        assert!(search.pending_query.is_none());
+    }
+
+    #[test]
+    fn debounced_search_skips_stale_empty_and_already_submitted_queries() {
+        let start = Instant::now();
+        let mut search = SearchState {
+            query: "plan".to_string(),
+            ..SearchState::default()
+        };
+
+        schedule_debounced_search(&mut search, "plan", start);
+        search.query = "other".to_string();
+        assert_eq!(
+            take_due_debounced_search(&mut search, start + SEARCH_RESULTS_DEBOUNCE),
+            None
+        );
+        assert!(search.pending_query.is_none());
+
+        search.query = "other".to_string();
+        search.submitted_query = Some("other".to_string());
+        schedule_debounced_search(&mut search, "other", start);
+        assert_eq!(
+            take_due_debounced_search(&mut search, start + SEARCH_RESULTS_DEBOUNCE),
+            None
+        );
+
+        schedule_debounced_search(&mut search, " ", start);
+        assert!(search.pending_query.is_none());
+    }
+
+    #[test]
     fn sidebar_search_suggestion_items_format_message_and_event_metadata() {
         let suggestions = vec![
             NativeSearchSuggestion::Message(message_suggestion("message", "inbox")),
@@ -12600,6 +12678,7 @@ fn handle_sidebar_search_change(
         if !query.trim().is_empty() {
             state.search.condition_group = None;
         }
+        schedule_debounced_search(&mut state.search, &query, Instant::now());
         if !should_load_suggestions {
             clear_sidebar_search_suggestions(&mut state.search);
         }
@@ -12631,6 +12710,36 @@ fn handle_sidebar_search_change(
     if should_load_suggestions {
         start_sidebar_search_suggestions_load(state_entity, query.trim().to_string(), app_cx);
     }
+}
+
+fn schedule_debounced_search(search: &mut SearchState, query: &str, now: Instant) {
+    let query = query.trim();
+    search.pending_query = if query.is_empty() {
+        None
+    } else {
+        Some(DebouncedSearch {
+            query: query.to_string(),
+            due_at: now + SEARCH_RESULTS_DEBOUNCE,
+        })
+    };
+}
+
+fn take_due_debounced_search(
+    search: &mut SearchState,
+    now: Instant,
+) -> Option<NativeMessageSource> {
+    let pending = search.pending_query.as_ref()?;
+    if now < pending.due_at {
+        return None;
+    }
+
+    let query = pending.query.clone();
+    search.pending_query = None;
+    if search.query.trim() != query || search.submitted_query.as_deref() == Some(query.as_str()) {
+        return None;
+    }
+
+    Some(NativeMessageSource::Search(query))
 }
 
 fn submit_sidebar_search(state_entity: &Entity<NativeAppState>, query: String, app_cx: &mut App) {
