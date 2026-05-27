@@ -1,10 +1,18 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
+    http::{
+        header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+        HeaderMap, HeaderValue, StatusCode,
+    },
+    response::{IntoResponse, Response},
     Json,
 };
-use email_types::{BulkAction, BulkRequest, Message as MessageRow, PatchMessageRequest};
+use email_types::{
+    BulkAction, BulkRequest, Message as MessageRow, MessageAttachment, PatchMessageRequest,
+};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -380,6 +388,100 @@ pub async fn archive_message(
     Ok(Json(serde_json::json!({ "status": "archived" })))
 }
 
+pub async fn list_attachments(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<Vec<MessageAttachment>>> {
+    ensure_message_exists(&state.pool, &message_id).await?;
+    Ok(Json(
+        load_message_attachments(&state.pool, &message_id).await?,
+    ))
+}
+
+pub async fn download_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((message_id, attachment_id)): Path<(String, String)>,
+) -> Result<Response> {
+    let row = sqlx::query_as::<_, AttachmentContentRow>(
+        r#"SELECT filename, content_type, content
+           FROM attachments
+           WHERE id = ? AND message_id = ?"#,
+    )
+    .bind(&attachment_id)
+    .bind(&message_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("attachment {} not found", attachment_id)))?;
+
+    let content = row.content.ok_or_else(|| {
+        AppError::NotFound(format!("attachment {} content not cached", attachment_id))
+    })?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(&row.content_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    headers.insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_str(&attachment_content_disposition(&row.filename))
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"attachment\"")),
+    );
+
+    Ok((StatusCode::OK, headers, Body::from(content)).into_response())
+}
+
+async fn ensure_message_exists(pool: &sqlx::SqlitePool, message_id: &str) -> Result<()> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM messages WHERE id = ?")
+        .bind(message_id)
+        .fetch_optional(pool)
+        .await?;
+    exists
+        .map(|_| ())
+        .ok_or_else(|| AppError::NotFound(format!("message {} not found", message_id)))
+}
+
+async fn load_message_attachments(
+    pool: &sqlx::SqlitePool,
+    message_id: &str,
+) -> Result<Vec<MessageAttachment>> {
+    sqlx::query_as::<_, MessageAttachment>(
+        r#"SELECT id, message_id, filename, content_type, size_bytes
+           FROM attachments
+           WHERE message_id = ?
+           ORDER BY filename COLLATE NOCASE, id"#,
+    )
+    .bind(message_id)
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct AttachmentContentRow {
+    filename: String,
+    content_type: String,
+    content: Option<Vec<u8>>,
+}
+
+fn attachment_content_disposition(filename: &str) -> String {
+    let escaped = filename
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .flat_map(|ch| match ch {
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            _ => vec![ch],
+        })
+        .collect::<String>();
+    let filename = if escaped.trim().is_empty() {
+        "attachment".to_string()
+    } else {
+        escaped
+    };
+    format!("attachment; filename=\"{filename}\"")
+}
+
 #[derive(Debug, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageBodyRow {
@@ -576,6 +678,7 @@ pub async fn get_message(
         .execute(&state.pool)
         .await?;
     refresh_folder_counts(&state.pool, &msg.folder_id).await?;
+    let attachments = load_message_attachments(&state.pool, &message_id).await?;
 
     let result = serde_json::json!({
         "id": msg.id,
@@ -598,6 +701,7 @@ pub async fn get_message(
             "htmlBody": b.html_body,
             "textBody": b.text_body,
         })),
+        "attachments": attachments,
     });
 
     Ok(Json(result))
@@ -665,6 +769,33 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_attachment(
+        pool: &SqlitePool,
+        id: &str,
+        message_id: &str,
+        filename: &str,
+        content_type: &str,
+        content: Option<&[u8]>,
+    ) {
+        sqlx::query(
+            "INSERT INTO attachments (id, message_id, filename, content_type, size_bytes, content) VALUES (?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(message_id)
+        .bind(filename)
+        .bind(content_type)
+        .bind(content.map(|bytes| bytes.len() as i64).unwrap_or_default())
+        .bind(content)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE messages SET has_attachments = 1 WHERE id = ?")
+            .bind(message_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
     async fn folder_counts(pool: &SqlitePool, folder_id: &str) -> (i64, i64) {
         sqlx::query_as("SELECT unread_count, total_count FROM folders WHERE id = ?")
             .bind(folder_id)
@@ -694,6 +825,23 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, json)
+    }
+
+    async fn req_raw(
+        router: axum::Router,
+        method: &str,
+        uri: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(request).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, bytes.to_vec())
     }
 
     #[tokio::test]
@@ -889,6 +1037,137 @@ mod tests {
 
         let (_, body) = req(crate::api::router(state), "GET", "/messages/msg-ir", None).await;
         assert_eq!(body["isRead"], true);
+    }
+
+    #[tokio::test]
+    async fn get_message_includes_attachment_metadata() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "msg-attach", "acc1", "fld1").await;
+        seed_attachment(
+            &state.pool,
+            "att-2",
+            "msg-attach",
+            "zeta.txt",
+            "text/plain",
+            Some(b"zeta"),
+        )
+        .await;
+        seed_attachment(
+            &state.pool,
+            "att-1",
+            "msg-attach",
+            "alpha.pdf",
+            "application/pdf",
+            Some(b"alpha"),
+        )
+        .await;
+
+        let (status, body) = req(
+            crate::api::router(state),
+            "GET",
+            "/messages/msg-attach",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let attachments = body["attachments"].as_array().unwrap();
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0]["id"], "att-1");
+        assert_eq!(attachments[0]["filename"], "alpha.pdf");
+        assert_eq!(attachments[0]["contentType"], "application/pdf");
+        assert_eq!(attachments[0]["sizeBytes"], 5);
+    }
+
+    #[tokio::test]
+    async fn list_attachments_returns_metadata() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "msg-list-attach", "acc1", "fld1").await;
+        seed_attachment(
+            &state.pool,
+            "att-list",
+            "msg-list-attach",
+            "invoice.pdf",
+            "application/pdf",
+            Some(b"pdf"),
+        )
+        .await;
+
+        let (status, body) = req(
+            crate::api::router(state),
+            "GET",
+            "/messages/msg-list-attach/attachments",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let attachments = body.as_array().unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0]["id"], "att-list");
+        assert_eq!(attachments[0]["messageId"], "msg-list-attach");
+    }
+
+    #[tokio::test]
+    async fn download_attachment_returns_bytes_and_headers() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "msg-download-attach", "acc1", "fld1").await;
+        seed_attachment(
+            &state.pool,
+            "att-download",
+            "msg-download-attach",
+            "report.txt",
+            "text/plain",
+            Some(b"report body"),
+        )
+        .await;
+
+        let (status, headers, bytes) = req_raw(
+            crate::api::router(state),
+            "GET",
+            "/messages/msg-download-attach/attachments/att-download",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"report body");
+        assert_eq!(headers["content-type"], "text/plain");
+        assert_eq!(
+            headers["content-disposition"],
+            "attachment; filename=\"report.txt\""
+        );
+    }
+
+    #[tokio::test]
+    async fn download_missing_attachment_content_is_404() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "msg-empty-attach", "acc1", "fld1").await;
+        seed_attachment(
+            &state.pool,
+            "att-empty",
+            "msg-empty-attach",
+            "empty.bin",
+            "application/octet-stream",
+            None,
+        )
+        .await;
+
+        let (status, _, _) = req_raw(
+            crate::api::router(state),
+            "GET",
+            "/messages/msg-empty-attach/attachments/att-empty",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

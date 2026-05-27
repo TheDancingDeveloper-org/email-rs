@@ -3,8 +3,9 @@ use email_types::{
     Account, AccountSettings, ActionInput, AddLinkBody, AddLinkResponse, AuthorizeResponse,
     BulkRequest, CalendarEvent, ConditionField, ConditionGroup, Contact, CreateAccount,
     CreateLabelBody, CreateWebhook, EventLink, Folder, FullMessage, Label, MatchMode, Message,
-    PatchFolder, PatchMessageRequest, RuleDto, SearchResponse, SendRequest, SendResponse,
-    SnoozeRequest, SuggestResponse, SyncEvent, UpdateAccount, UpdateLabelBody, UpdateWebhook,
+    MessageAttachment, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse, SendRequest,
+    SendResponse, SnoozeRequest, SuggestResponse, SyncEvent, UpdateAccount, UpdateLabelBody,
+    UpdateWebhook,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Serialize};
@@ -166,6 +167,22 @@ impl EmailClient {
 
     pub async fn get_message(&self, message_id: &str) -> Result<FullMessage> {
         self.get(&format!("messages/{message_id}"), &[]).await
+    }
+
+    pub async fn list_attachments(&self, message_id: &str) -> Result<Vec<MessageAttachment>> {
+        self.get(&format!("messages/{message_id}/attachments"), &[])
+            .await
+    }
+
+    pub async fn download_attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>> {
+        self.bytes(&format!(
+            "messages/{message_id}/attachments/{attachment_id}"
+        ))
+        .await
     }
 
     pub async fn patch_message(
@@ -436,6 +453,17 @@ impl EmailClient {
             Err(api_error(response.status(), response.bytes().await?))
         }
     }
+
+    async fn bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let response = self.http.get(self.endpoint_url(path)).send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if status.is_success() {
+            Ok(bytes.to_vec())
+        } else {
+            Err(api_error(status, bytes))
+        }
+    }
 }
 
 async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<T> {
@@ -547,6 +575,17 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "http://localhost:8585/root/api/v1/search?q=hello+world&account_id=acc%2F1"
+        );
+    }
+
+    #[test]
+    fn attachment_download_url_uses_message_attachment_route() {
+        let client = EmailClient::new("http://localhost:8585").unwrap();
+        assert_eq!(
+            client
+                .endpoint_url("messages/msg-1/attachments/att-1")
+                .as_str(),
+            "http://localhost:8585/api/v1/messages/msg-1/attachments/att-1"
         );
     }
 

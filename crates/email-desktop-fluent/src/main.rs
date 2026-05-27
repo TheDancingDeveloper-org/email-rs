@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -16,15 +17,15 @@ use email_types::{
     Account, AccountSettings, ActionInput, BulkAction, BulkRequest, CalendarEvent,
     CalendarSearchResult, CalendarSuggestion, Condition, ConditionField, ConditionGroup,
     ConditionInput, ConditionOperator, Contact, CreateAccount, CreateWebhook, EventLink, Folder,
-    FullMessage, Label, MatchMode, Message, MessageSuggestion, PatchFolder, PatchMessageRequest,
-    RuleDto, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook,
-    Webhook,
+    FullMessage, Label, MatchMode, Message, MessageAttachment, MessageSuggestion, PatchFolder,
+    PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest, SyncEvent, UpdateAccount,
+    UpdateRuleBody, UpdateWebhook, Webhook,
 };
-use fluent_app::{FluentApp, WindowTitle};
+use fluent_app::{FluentApp, TitleBar, WindowTitle};
 use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
 use fluent_layout::{
     CommandPalette, ContextMenu, DockPanel, DockPosition, DocumentViewer, ModalHost, PaletteEntry,
-    Pane, PaneConstraints, PaneGroup, RichDocument, Workspace,
+    Pane, PaneConstraints, PaneGroup, RichDocument, RichDocumentBlock, Workspace,
 };
 use fluent_primitives::{
     Button, ButtonAppearance, ButtonSize, Checkbox, CheckboxState, DateTimePicker, DateTimeValue,
@@ -32,9 +33,9 @@ use fluent_primitives::{
     SuggestionListState, TextInput, Textarea, TokenInput, TokenInputSuggestion, TokenInputToken,
 };
 use gpui::{
-    actions, div, prelude::*, px, rgb, svg, uniform_list, App, ClipboardItem, Context, Entity,
-    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, SharedString, Window,
+    actions, div, prelude::*, px, relative, rgb, svg, uniform_list, App, ClipboardItem, Context,
+    Entity, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollHandle, SharedString, Window,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -59,6 +60,7 @@ actions!(
 
 const APP_TITLE: &str = "email-rs FluentGUI";
 const APP_ID: &str = "org.email-rs.desktop.fluent";
+const APP_ICON_PATH: &str = "icons/email-rs.svg";
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const NATIVE_SETTINGS_ENV: &str = "EMAIL_RS_FLUENT_SETTINGS_PATH";
 const NATIVE_SETTINGS_FILE: &str = "fluentgui-settings.conf";
@@ -71,6 +73,28 @@ const MIN_MESSAGE_LIST_WIDTH: u16 = 320;
 const MAX_MESSAGE_LIST_WIDTH: u16 = 640;
 const SYNC_COMPLETE_VISIBLE_FOR: Duration = Duration::from_secs(3);
 const SEARCH_RESULTS_DEBOUNCE: Duration = Duration::from_millis(300);
+const CALENDAR_HOUR_HEIGHT: f32 = 48.0;
+const CALENDAR_DAY_HEIGHT: f32 = CALENDAR_HOUR_HEIGHT * 24.0;
+const CALENDAR_INITIAL_SCROLL_HOUR: usize = 8;
+const MIN_TIMED_EVENT_HEIGHT: f32 = 18.0;
+
+const APP_ICON_SVG: &[u8] = br##"<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path fill="#5b5fc7" d="M2 4.5A1.5 1.5 0 0 1 3.5 3h9A1.5 1.5 0 0 1 14 4.5v7a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/><path fill="#fff" d="M3.4 5.1 8 8.1l4.6-3 .6.9L8 9.4 2.8 6z"/></svg>"##;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeFluentAssets;
+
+impl gpui::AssetSource for NativeFluentAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        Ok((path == APP_ICON_PATH).then_some(Cow::Borrowed(APP_ICON_SVG)))
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        Ok((path == "icons")
+            .then_some(SharedString::from("email-rs.svg"))
+            .into_iter()
+            .collect())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeKeyAction {
@@ -122,13 +146,17 @@ fn main() -> Result<()> {
     wait_for_server(&bind_addr, &server_errors)?;
 
     let base_url = format!("http://localhost:{port}");
-    let mut initial_state = load_initial_state(&base_url)?;
+    let mut initial_state = NativeAppState {
+        api_base_url: base_url.clone(),
+        ..NativeAppState::default()
+    };
     let preferences = load_native_preferences();
     preferences.apply_to_state(&mut initial_state);
     let initial_layout = initial_state.layout;
 
     let fluent_app = FluentApp::new(native_window_title(&initial_state))
         .app_id(APP_ID)
+        .assets(NativeFluentAssets)
         .window_size(1280.0, 800.0)
         .window_min_size(800.0, 600.0)
         .window_status(native_window_status(&initial_state));
@@ -141,6 +169,7 @@ fn main() -> Result<()> {
         cx.bind_keys(native_key_bindings());
 
         let state_entity = cx.new(|_| initial_state.clone());
+        start_initial_account_load(&state_entity, cx);
 
         let modal_host = cx.new(ModalHost::new);
         let sidebar = cx.new({
@@ -197,9 +226,11 @@ fn main() -> Result<()> {
             let state = state_entity.clone();
             move |cx| StatusBar::new(cx, state.clone())
         });
+        let title_bar = cx.new(|cx| TitleBar::from_window_title(cx).icon(APP_ICON_PATH));
 
         let workspace = cx.new(|cx| {
             Workspace::new(cx)
+                .title_bar(title_bar.clone().into())
                 .left_dock(sidebar_dock.clone())
                 .content(pane.clone().into())
                 .modal_host(modal_host.clone())
@@ -240,25 +271,42 @@ fn init_tracing() {
 }
 
 fn should_run_headless() -> bool {
-    if std::env::var("EMAIL_RS_HEADLESS").is_ok() {
-        return true;
-    }
-
     #[cfg(target_os = "linux")]
     {
-        std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err()
+        headless_mode_for_environment(
+            std::env::var("EMAIL_RS_HEADLESS").is_ok(),
+            std::env::var("DISPLAY").is_ok(),
+            std::env::var("WAYLAND_DISPLAY").is_ok(),
+        )
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        false
+        headless_mode_for_environment(std::env::var("EMAIL_RS_HEADLESS").is_ok())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn headless_mode_for_environment(
+    forced: bool,
+    has_display: bool,
+    has_wayland_display: bool,
+) -> bool {
+    forced || (!has_display && !has_wayland_display)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn headless_mode_for_environment(forced: bool) -> bool {
+    forced
 }
 
 fn start_server_thread(cfg: Config) -> Receiver<String> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let rt = match tokio::runtime::Runtime::new() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(err) => {
                 tracing::error!("failed to create server runtime: {err:#}");
@@ -300,7 +348,10 @@ fn wait_for_server(bind_addr: &str, server_errors: &Receiver<String>) -> Result<
 
 fn start_sync_events_thread(base_url: String, updates: Sender<NativeSyncUpdate>) {
     thread::spawn(move || {
-        let rt = match tokio::runtime::Runtime::new() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(err) => {
                 let _ = updates.send(NativeSyncUpdate::Error(format!(
@@ -391,27 +442,68 @@ fn parse_sse_sync_event_block(block: &str) -> Option<Result<SyncEvent, String>> 
     Some(email_client::parse_sync_event(&data).map_err(|err| err.to_string()))
 }
 
-fn load_initial_state(base_url: &str) -> Result<NativeAppState> {
-    let client = EmailClient::new(base_url)?;
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async move {
-        let mut state = NativeAppState::default();
-        state.api_base_url = base_url.into();
+fn start_initial_account_load(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let (base_url, accounts_request, messages_request) =
+        state_entity.update(app_cx, |state, cx| {
+            state.accounts.clear();
+            state.folders_by_account.clear();
+            state.labels.clear();
+            state.messages.clear();
+            state.selected_folder = None;
+            state.selected_message = None;
+            state.selected_full_message = None;
+            state.selected_message_resource.reset();
+            state.attachment_busy = false;
+            state.attachment_notice = None;
+            state.attachment_error = None;
+            state.search_event_results.clear();
+            state.last_error = None;
+            let accounts_request = state.accounts_resource.begin_load();
+            let messages_request = state.messages_resource.begin_load();
+            cx.notify();
+            (
+                state.api_base_url.clone(),
+                accounts_request,
+                messages_request,
+            )
+        });
 
-        match load_accounts(&client).await {
-            Ok(mut loaded) => {
-                loaded.api_base_url = state.api_base_url;
-                Ok(loaded)
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { reload_accounts(base_url) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_initial_account_load(
+                                state,
+                                accounts_request,
+                                messages_request,
+                                loaded,
+                            );
+                        }
+                        Err(err) => {
+                            reject_initial_account_load(
+                                state,
+                                accounts_request,
+                                messages_request,
+                                err,
+                            );
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native initial account load: {err}");
+                }
             }
-            Err(err) => {
-                let message = err.to_string();
-                state.accounts_resource = AsyncResource::failed(message.clone());
-                state.messages_resource = AsyncResource::failed(message.clone());
-                state.last_error = Some(message);
-                Ok(state)
-            }
-        }
-    })
+        })
+        .detach();
 }
 
 async fn load_accounts(client: &EmailClient) -> Result<NativeAppState> {
@@ -878,6 +970,10 @@ struct NativeAppState {
     selected_message_resource: AsyncResource<FullMessage, String>,
     selected_message_labels: Vec<Label>,
     selected_message_labels_resource: AsyncResource<Vec<Label>, String>,
+    attachment_busy: bool,
+    attachment_notice: Option<String>,
+    attachment_error: Option<String>,
+    show_external_images: bool,
     selected_event: Option<String>,
     calendar_week_start: NaiveDate,
     calendar_events: Vec<CalendarEvent>,
@@ -917,6 +1013,10 @@ impl Default for NativeAppState {
             selected_message_resource: AsyncResource::new(),
             selected_message_labels: Vec::new(),
             selected_message_labels_resource: AsyncResource::new(),
+            attachment_busy: false,
+            attachment_notice: None,
+            attachment_error: None,
+            show_external_images: false,
             selected_event: None,
             calendar_week_start: current_calendar_week_start(),
             calendar_events: Vec::new(),
@@ -1402,7 +1502,12 @@ impl Render for SidebarPlaceholder {
             }
         }
 
-        if state.accounts.is_empty() {
+        if initial_accounts_loading(&state) {
+            account_list = account_list.child(sidebar_loading_accounts(
+                density.sidebar_row_height.max(28.0),
+                cx,
+            ));
+        } else if state.accounts.is_empty() {
             account_list = account_list.child(empty_sidebar_text("No accounts configured", cx));
         }
 
@@ -2033,14 +2138,17 @@ impl ReadingPanePlaceholder {
             return;
         }
 
+        // Use set_tokens_silent so programmatic resets don't fire on_change
+        // callbacks back into app state (avoids re-entrant state updates during
+        // render and fixes spurious Discard / Bcc no-op appearances).
         self.compose_to_input.update(cx, |input, cx| {
-            input.set_tokens(compose_tokens(&state.compose.to), cx);
+            input.set_tokens_silent(compose_tokens(&state.compose.to), cx);
         });
         self.compose_cc_input.update(cx, |input, cx| {
-            input.set_tokens(compose_tokens(&state.compose.cc), cx);
+            input.set_tokens_silent(compose_tokens(&state.compose.cc), cx);
         });
         self.compose_bcc_input.update(cx, |input, cx| {
-            input.set_tokens(compose_tokens(&state.compose.bcc), cx);
+            input.set_tokens_silent(compose_tokens(&state.compose.bcc), cx);
         });
         self.compose_subject_input.update(cx, |input, cx| {
             input.set_value(state.compose.subject.clone().unwrap_or_default(), cx);
@@ -2055,20 +2163,31 @@ impl ReadingPanePlaceholder {
 #[derive(Clone)]
 struct CalendarPlaceholder {
     state: Entity<NativeAppState>,
+    time_grid_scroll: ScrollHandle,
+    scrolled_time_grid_week: Option<NaiveDate>,
 }
 
 impl CalendarPlaceholder {
     fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        Self { state }
+        Self {
+            state,
+            time_grid_scroll: ScrollHandle::new(),
+            scrolled_time_grid_week: None,
+        }
     }
 }
 
 impl Render for CalendarPlaceholder {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx).clone();
-        calendar_placeholder(&self.state, &state, cx)
+        if self.scrolled_time_grid_week != Some(state.calendar_week_start) {
+            self.time_grid_scroll
+                .scroll_to_top_of_item(CALENDAR_INITIAL_SCROLL_HOUR);
+            self.scrolled_time_grid_week = Some(state.calendar_week_start);
+        }
+        calendar_placeholder(&self.state, &state, &self.time_grid_scroll, cx)
     }
 }
 
@@ -3033,7 +3152,7 @@ impl AccountSetupModal {
 impl Render for AccountSetupModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx).clone();
-        let first_run = state.accounts.is_empty();
+        let first_run = state.accounts_resource.is_ready() && state.accounts.is_empty();
         if !first_run && !state.modals.account_setup_open {
             self.focused_on_open = false;
             return div();
@@ -6226,7 +6345,9 @@ fn start_settings_account_delete(
 }
 
 fn authorize_account_setup(base_url: String, provider: AccountSetupProvider) -> Result<String> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         let response = match provider {
@@ -6273,8 +6394,288 @@ fn open_url_in_browser(url: &str) -> Result<()> {
     ))
 }
 
+fn open_path_with_system(path: &Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("open {}", path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("open {}", path.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("open {}", path.display()))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(anyhow!("opening files is not supported on this platform"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachmentAction {
+    Open,
+    Download,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SavedAttachment {
+    path: PathBuf,
+    filename: String,
+}
+
+fn start_attachment_open(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    attachment: MessageAttachment,
+    app_cx: &mut App,
+) {
+    start_attachment_action(
+        state_entity,
+        message_id,
+        attachment,
+        AttachmentAction::Open,
+        app_cx,
+    );
+}
+
+fn start_attachment_download(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    attachment: MessageAttachment,
+    app_cx: &mut App,
+) {
+    start_attachment_action(
+        state_entity,
+        message_id,
+        attachment,
+        AttachmentAction::Download,
+        app_cx,
+    );
+}
+
+fn start_attachment_action(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    attachment: MessageAttachment,
+    action: AttachmentAction,
+    app_cx: &mut App,
+) {
+    let message_id = message_id.to_string();
+    let Some(base_url) = state_entity.update(app_cx, |state, cx| {
+        if state.attachment_busy || state.selected_message.as_deref() != Some(message_id.as_str()) {
+            return None;
+        }
+        state.attachment_busy = true;
+        state.attachment_notice = Some(match action {
+            AttachmentAction::Open => format!("Opening {}...", attachment.filename),
+            AttachmentAction::Download => format!("Saving {}...", attachment.filename),
+        });
+        state.attachment_error = None;
+        state.last_error = None;
+        cx.notify();
+        Some(state.api_base_url.clone())
+    }) else {
+        return;
+    };
+
+    let task_message_id = message_id.clone();
+    let task_attachment = attachment.clone();
+    let task = app_cx.background_executor().spawn(async move {
+        run_attachment_action(base_url, task_message_id, task_attachment, action)
+    });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    if state.selected_message.as_deref() != Some(message_id.as_str()) {
+                        return;
+                    }
+                    state.attachment_busy = false;
+                    match result {
+                        Ok(saved) => {
+                            state.attachment_error = None;
+                            state.last_error = None;
+                            state.attachment_notice = Some(match action {
+                                AttachmentAction::Open => format!(
+                                    "Opened {} from {}",
+                                    saved.filename,
+                                    saved.path.display()
+                                ),
+                                AttachmentAction::Download => {
+                                    format!("Saved {} to {}", saved.filename, saved.path.display())
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            let message = match action {
+                                AttachmentAction::Open => {
+                                    format!("Attachment open failed: {err}")
+                                }
+                                AttachmentAction::Download => {
+                                    format!("Attachment download failed: {err}")
+                                }
+                            };
+                            state.attachment_notice = None;
+                            state.attachment_error = Some(message.clone());
+                            state.last_error = Some(message);
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native attachment action: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+fn run_attachment_action(
+    base_url: String,
+    message_id: String,
+    attachment: MessageAttachment,
+    action: AttachmentAction,
+) -> Result<SavedAttachment> {
+    let directory = match action {
+        AttachmentAction::Open => attachment_open_dir(&message_id, &attachment.id),
+        AttachmentAction::Download => attachment_download_dir(),
+    };
+    let saved = save_attachment_to_dir(base_url, &message_id, &attachment, directory)?;
+    if action == AttachmentAction::Open {
+        open_path_with_system(&saved.path)?;
+    }
+    Ok(saved)
+}
+
+fn save_attachment_to_dir(
+    base_url: String,
+    message_id: &str,
+    attachment: &MessageAttachment,
+    directory: PathBuf,
+) -> Result<SavedAttachment> {
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create {}", directory.display()))?;
+    let filename = safe_attachment_filename(&attachment.filename);
+    let path = unique_attachment_path(&directory, &filename);
+    let bytes = download_attachment_bytes(base_url, message_id, &attachment.id)?;
+    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+    Ok(SavedAttachment { path, filename })
+}
+
+fn download_attachment_bytes(
+    base_url: String,
+    message_id: &str,
+    attachment_id: &str,
+) -> Result<Vec<u8>> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .download_attachment(message_id, attachment_id)
+            .await
+            .with_context(|| format!("download attachment {attachment_id}"))
+    })
+}
+
+fn attachment_open_dir(message_id: &str, attachment_id: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("email-rs-attachments")
+        .join(safe_attachment_filename(message_id))
+        .join(safe_attachment_filename(attachment_id))
+}
+
+fn attachment_download_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Downloads"))
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn unique_attachment_path(directory: &Path, filename: &str) -> PathBuf {
+    let initial = directory.join(filename);
+    if !initial.exists() {
+        return initial;
+    }
+
+    let path = Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("attachment");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    for index in 1..1000 {
+        let candidate = match extension {
+            Some(extension) => directory.join(format!("{stem} ({index}).{extension}")),
+            None => directory.join(format!("{stem} ({index})")),
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    directory.join(format!("{stem} ({})", Utc::now().timestamp_millis()))
+}
+
+fn safe_attachment_filename(filename: &str) -> String {
+    let safe = filename
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    let safe = safe.trim_matches(|ch| ch == '.' || ch == ' ').trim();
+    if safe.is_empty() {
+        "attachment".to_string()
+    } else {
+        safe.to_string()
+    }
+}
+
+fn attachment_size_label(size_bytes: i64) -> String {
+    let bytes = size_bytes.max(0) as f64;
+    if bytes < 1024.0 {
+        format!("{} B", bytes as i64)
+    } else if bytes < 1024.0 * 1024.0 {
+        format!("{:.1} KB", bytes / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes / (1024.0 * 1024.0))
+    }
+}
+
 fn create_account_and_reload(base_url: String, request: CreateAccount) -> Result<NativeAppState> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client.create_account(&request).await.with_context(|| {
@@ -6292,7 +6693,9 @@ fn create_account_and_reload(base_url: String, request: CreateAccount) -> Result
 }
 
 fn reload_accounts(base_url: String) -> Result<NativeAppState> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         let mut loaded = load_accounts(&client).await.context("reload accounts")?;
@@ -6748,7 +7151,9 @@ fn start_folder_exclusion_toggle(
 }
 
 fn delete_account_and_reload(base_url: String, account_id: String) -> Result<NativeAppState> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -6764,7 +7169,9 @@ fn delete_account_and_reload(base_url: String, account_id: String) -> Result<Nat
 }
 
 fn load_settings_webhooks(base_url: String) -> Result<Vec<Webhook>> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client.list_webhooks().await.context("list webhooks")
@@ -6772,7 +7179,9 @@ fn load_settings_webhooks(base_url: String) -> Result<Vec<Webhook>> {
 }
 
 fn load_settings_rules(base_url: String, account_id: String) -> Result<Vec<RuleDto>> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -6787,7 +7196,9 @@ fn mutate_settings_rules(
     account_id: String,
     mutation: SettingsRuleMutation,
 ) -> Result<Vec<RuleDto>> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         match mutation {
@@ -6843,7 +7254,9 @@ fn mutate_settings_webhooks(
     base_url: String,
     mutation: SettingsWebhookMutation,
 ) -> Result<Vec<Webhook>> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         match mutation {
@@ -6885,6 +7298,7 @@ fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeApp
     let had_accounts = !state.accounts.is_empty();
     let theme = state.theme.clone();
     let density = state.density.clone();
+    let layout = state.layout;
     let selected_view = state.selected_view.clone();
     let selected_folder = state.selected_folder.clone();
     let selected_label = state.selected_label.clone();
@@ -6911,6 +7325,7 @@ fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeApp
 
     loaded.theme = theme;
     loaded.density = density;
+    loaded.layout = layout;
     if had_accounts {
         loaded.selected_view = selected_view;
         loaded.selected_folder = selected_folder;
@@ -6947,6 +7362,62 @@ fn apply_account_create_reload(state: &mut NativeAppState, mut loaded: NativeApp
     *state = loaded;
 }
 
+fn apply_initial_account_load(
+    state: &mut NativeAppState,
+    accounts_request: ResourceRequest,
+    messages_request: ResourceRequest,
+    mut loaded: NativeAppState,
+) -> bool {
+    if !state
+        .accounts_resource
+        .resolve(accounts_request, loaded.accounts.clone())
+    {
+        return false;
+    }
+    if !state
+        .messages_resource
+        .resolve(messages_request, loaded.messages.clone())
+    {
+        return false;
+    }
+
+    let theme = state.theme.clone();
+    let density = state.density.clone();
+    let layout = state.layout;
+    let palette = state.palette.clone();
+    let sync = state.sync.clone();
+
+    loaded.theme = theme;
+    loaded.density = density;
+    loaded.layout = layout;
+    loaded.palette = palette;
+    loaded.sync = sync;
+    loaded.last_error = None;
+    *state = loaded;
+    true
+}
+
+fn reject_initial_account_load(
+    state: &mut NativeAppState,
+    accounts_request: ResourceRequest,
+    messages_request: ResourceRequest,
+    err: anyhow::Error,
+) -> bool {
+    let message = err.to_string();
+    let accounts_rejected = state
+        .accounts_resource
+        .reject(accounts_request, message.clone());
+    let messages_rejected = state
+        .messages_resource
+        .reject(messages_request, message.clone());
+    if !accounts_rejected && !messages_rejected {
+        return false;
+    }
+
+    state.last_error = Some(message);
+    true
+}
+
 fn apply_account_delete_reload(
     state: &mut NativeAppState,
     deleted_account_id: &str,
@@ -6954,6 +7425,7 @@ fn apply_account_delete_reload(
 ) {
     let theme = state.theme.clone();
     let density = state.density.clone();
+    let layout = state.layout;
     let selected_view = state.selected_view.clone();
     let selected_event = state.selected_event.clone();
     let calendar_week_start = state.calendar_week_start;
@@ -6976,6 +7448,7 @@ fn apply_account_delete_reload(
 
     loaded.theme = theme;
     loaded.density = density;
+    loaded.layout = layout;
     loaded.selected_view = selected_view;
     loaded.selected_event = selected_event;
     loaded.calendar_week_start = calendar_week_start;
@@ -7264,7 +7737,9 @@ fn update_account_settings_and_refresh(
     request: UpdateAccount,
     refresh_request: NativeSyncRefreshRequest,
 ) -> Result<LoadedSyncRefresh> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -7281,7 +7756,9 @@ fn patch_folder_exclusion_and_refresh(
     next_excluded: bool,
     refresh_request: NativeSyncRefreshRequest,
 ) -> Result<LoadedSyncRefresh> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -7448,6 +7925,9 @@ fn native_window_title(state: &NativeAppState) -> String {
 }
 
 fn native_window_status(state: &NativeAppState) -> String {
+    if initial_accounts_loading(state) {
+        return "Loading accounts...".to_string();
+    }
     unread_status_text(total_unread_count(state))
 }
 
@@ -7801,7 +8281,9 @@ fn load_sidebar_search_suggestions(
     query: String,
 ) -> Result<Vec<NativeSearchSuggestion>> {
     thread::sleep(Duration::from_millis(150));
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         let response = client
@@ -7878,7 +8360,9 @@ fn load_calendar_events(
     from: chrono::DateTime<Utc>,
     to: chrono::DateTime<Utc>,
 ) -> Result<Vec<CalendarEvent>> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -7889,7 +8373,9 @@ fn load_calendar_events(
 }
 
 fn load_calendar_event_links(base_url: String, event_id: String) -> Result<Vec<EventLink>> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -7904,7 +8390,9 @@ fn remove_calendar_event_link(
     event_id: String,
     message_id: String,
 ) -> Result<Vec<EventLink>> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -8076,6 +8564,9 @@ fn begin_message_collection_load(
     state.selected_message_resource.reset();
     state.selected_message_labels.clear();
     state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
     state.search_event_results.clear();
     state.last_error = None;
     state.messages_resource.begin_load()
@@ -8086,7 +8577,9 @@ fn load_message_collection(
     source: NativeMessageSource,
     preferred_message_id: Option<String>,
 ) -> Result<LoadedMessageCollection> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         load_message_collection_with_client(&client, source, preferred_message_id).await
@@ -8177,6 +8670,9 @@ fn apply_loaded_message_collection(
     state.selected_message_resource.reset();
     state.selected_message_labels.clear();
     state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
 
     if let Some(full_message) = loaded.selected_full_message {
         state.selected_message = Some(full_message.id.clone());
@@ -8209,6 +8705,9 @@ fn reject_message_collection_load(
     state.selected_message_resource.reset();
     state.selected_message_labels.clear();
     state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
     state.search_event_results.clear();
     state.last_error = Some(message);
     true
@@ -8462,7 +8961,9 @@ fn load_sync_complete_refresh(
     base_url: String,
     request: NativeSyncRefreshRequest,
 ) -> Result<LoadedSyncRefresh> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         let tree = load_account_tree(&client).await?;
@@ -8489,7 +8990,9 @@ fn mark_folder_read_and_refresh(
     folder_id: String,
     request: NativeSyncRefreshRequest,
 ) -> Result<LoadedSyncRefresh> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -8520,7 +9023,9 @@ fn mutate_message_and_refresh(
     mutation: NativeMessageMutation,
     request: NativeSyncRefreshRequest,
 ) -> Result<LoadedSyncRefresh> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         let action_label = mutation.action_label();
@@ -8603,7 +9108,9 @@ fn bulk_message_action_and_refresh(
     action: BulkAction,
     request: NativeSyncRefreshRequest,
 ) -> Result<LoadedSyncRefresh> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         let action_label = bulk_action_label(&action);
@@ -8647,7 +9154,9 @@ fn mutate_message_label_and_reload(
     base_url: String,
     mutation: NativeLabelMutation,
 ) -> Result<Vec<Label>> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         match &mutation {
@@ -8790,12 +9299,18 @@ fn begin_full_message_load(
     state.selected_full_message = None;
     state.selected_message_labels.clear();
     state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
+    state.show_external_images = false;
     state.last_error = None;
     Some(state.selected_message_resource.begin_load())
 }
 
 fn load_full_message(base_url: String, message_id: String) -> Result<LoadedFullMessage> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         let message = client
@@ -8854,6 +9369,9 @@ fn reject_full_message_load(
     state.selected_full_message = None;
     state.selected_message_labels.clear();
     state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
     state.last_error = Some(message);
     true
 }
@@ -8880,6 +9398,8 @@ fn apply_full_message(state: &mut NativeAppState, full_message: FullMessage) {
     }
     state.selected_message = Some(full_message.id.clone());
     state.selected_full_message = Some(full_message);
+    state.attachment_notice = None;
+    state.attachment_error = None;
 }
 
 fn decrement_folder_unread(
@@ -9153,7 +9673,9 @@ fn start_compose_signature_load(
 }
 
 fn load_account_signature(base_url: String, account_id: String) -> Result<AccountSettings> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -9221,7 +9743,9 @@ fn start_recipient_suggestions_load(
 }
 
 fn load_recipient_suggestions(base_url: String, query: String) -> Result<Vec<Contact>> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client
@@ -9567,7 +10091,9 @@ fn send_quick_reply(base_url: String, request: SendRequest) -> Result<()> {
 }
 
 fn send_message_request(base_url: String, request: SendRequest) -> Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         client.send_message(&request).await?;
@@ -9933,6 +10459,7 @@ mod tests {
             has_attachments: false,
             preview: None,
             body: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -9957,6 +10484,61 @@ mod tests {
             attendees: Vec::new(),
             meet_link: None,
         }
+    }
+
+    fn local_calendar_event(
+        id: &str,
+        day: NaiveDate,
+        start_hour: u32,
+        start_minute: u32,
+        end_day_offset: i64,
+        end_hour: u32,
+        end_minute: u32,
+    ) -> CalendarEvent {
+        let end_day = day + ChronoDuration::days(end_day_offset);
+        CalendarEvent {
+            id: id.to_string(),
+            calendar_id: "primary".to_string(),
+            provider_event_id: None,
+            title: id.to_string(),
+            description: None,
+            start_at: Local
+                .with_ymd_and_hms(
+                    day.year(),
+                    day.month(),
+                    day.day(),
+                    start_hour,
+                    start_minute,
+                    0,
+                )
+                .single()
+                .expect("valid local start")
+                .with_timezone(&Utc),
+            end_at: Local
+                .with_ymd_and_hms(
+                    end_day.year(),
+                    end_day.month(),
+                    end_day.day(),
+                    end_hour,
+                    end_minute,
+                    0,
+                )
+                .single()
+                .expect("valid local end")
+                .with_timezone(&Utc),
+            location: None,
+            is_all_day: false,
+            recurrence_rule: None,
+            attendees: Vec::new(),
+            meet_link: None,
+        }
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "expected {actual} to be close to {expected}"
+        );
     }
 
     fn event_link(id: &str, event_id: &str, message_id: &str) -> EventLink {
@@ -10030,6 +10612,148 @@ mod tests {
 
         assert_eq!(native_window_title(&state), "email-rs FluentGUI");
         assert_eq!(native_window_status(&state), "No unread messages");
+    }
+
+    #[test]
+    fn native_app_assets_include_title_bar_icon() {
+        let icon = gpui::AssetSource::load(&NativeFluentAssets, APP_ICON_PATH)
+            .unwrap()
+            .unwrap();
+        let icon_text = std::str::from_utf8(&icon).unwrap();
+
+        assert!(icon_text.contains("<svg"));
+        assert!(icon_text.contains("#5b5fc7"));
+        assert_eq!(
+            gpui::AssetSource::list(&NativeFluentAssets, "icons").unwrap(),
+            vec![SharedString::from("email-rs.svg")]
+        );
+    }
+
+    #[test]
+    fn startup_loading_status_uses_account_loading_state() {
+        let mut state = NativeAppState::default();
+        let _ = state.accounts_resource.begin_load();
+
+        assert_eq!(native_window_status(&state), "Loading accounts...");
+        assert_eq!(
+            message_list_status(&state),
+            Some(("Loading accounts...".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn safe_attachment_filename_removes_path_and_control_characters() {
+        assert_eq!(
+            safe_attachment_filename("../bad/name:\n.pdf"),
+            "_bad_name__.pdf"
+        );
+        assert_eq!(safe_attachment_filename("..."), "attachment");
+        assert_eq!(safe_attachment_filename(" report.pdf "), "report.pdf");
+    }
+
+    #[test]
+    fn attachment_size_label_formats_common_units() {
+        assert_eq!(attachment_size_label(-1), "0 B");
+        assert_eq!(attachment_size_label(512), "512 B");
+        assert_eq!(attachment_size_label(1536), "1.5 KB");
+        assert_eq!(attachment_size_label(2 * 1024 * 1024), "2.0 MB");
+    }
+
+    #[test]
+    fn calendar_initial_scroll_targets_8am() {
+        assert_eq!(CALENDAR_INITIAL_SCROLL_HOUR, 8);
+    }
+
+    #[test]
+    fn timed_event_layout_preserves_duration() {
+        let day = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        let event = local_calendar_event("half-hour", day, 9, 0, 0, 9, 30);
+
+        let layouts = timed_event_layouts_for_day(&[event], day);
+
+        assert_eq!(layouts.len(), 1);
+        assert_close(layouts[0].top, 9.0 * CALENDAR_HOUR_HEIGHT);
+        assert_close(layouts[0].height, CALENDAR_HOUR_HEIGHT / 2.0);
+        assert_eq!(layouts[0].column, 0);
+        assert_eq!(layouts[0].column_count, 1);
+    }
+
+    #[test]
+    fn timed_event_layout_applies_minimum_height_for_short_events() {
+        let day = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        let event = local_calendar_event("short", day, 9, 0, 0, 9, 5);
+
+        let layouts = timed_event_layouts_for_day(&[event], day);
+
+        assert_eq!(layouts.len(), 1);
+        assert_close(layouts[0].height, MIN_TIMED_EVENT_HEIGHT);
+    }
+
+    #[test]
+    fn timed_event_layout_assigns_columns_for_overlaps() {
+        let day = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        let first = local_calendar_event("first", day, 9, 0, 0, 10, 0);
+        let second = local_calendar_event("second", day, 9, 30, 0, 10, 30);
+
+        let layouts = timed_event_layouts_for_day(&[first, second], day);
+
+        let first = layouts
+            .iter()
+            .find(|layout| layout.event.id == "first")
+            .unwrap();
+        let second = layouts
+            .iter()
+            .find(|layout| layout.event.id == "second")
+            .unwrap();
+        assert_eq!(first.column_count, 2);
+        assert_eq!(second.column_count, 2);
+        assert_ne!(first.column, second.column);
+    }
+
+    #[test]
+    fn timed_event_layout_reuses_column_for_back_to_back_events() {
+        let day = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        let first = local_calendar_event("first", day, 9, 0, 0, 10, 0);
+        let second = local_calendar_event("second", day, 10, 0, 0, 11, 0);
+
+        let layouts = timed_event_layouts_for_day(&[first, second], day);
+
+        assert_eq!(layouts.len(), 2);
+        assert!(layouts
+            .iter()
+            .all(|layout| layout.column == 0 && layout.column_count == 1));
+    }
+
+    #[test]
+    fn timed_event_layout_clips_multi_day_events_to_each_day() {
+        let day = NaiveDate::from_ymd_opt(2026, 5, 26).unwrap();
+        let event = local_calendar_event("overnight", day, 23, 30, 1, 1, 0);
+
+        let first_day = timed_event_layouts_for_day(std::slice::from_ref(&event), day);
+        let second_day = timed_event_layouts_for_day(&[event], day + ChronoDuration::days(1));
+
+        assert_eq!(first_day.len(), 1);
+        assert_eq!(second_day.len(), 1);
+        assert_close(first_day[0].top, 23.5 * CALENDAR_HOUR_HEIGHT);
+        assert_close(first_day[0].height, CALENDAR_HOUR_HEIGHT / 2.0);
+        assert_close(second_day[0].top, 0.0);
+        assert_close(second_day[0].height, CALENDAR_HOUR_HEIGHT);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_headless_mode_respects_display_and_override_envs() {
+        assert!(headless_mode_for_environment(true, true, true));
+        assert!(!headless_mode_for_environment(false, true, false));
+        assert!(!headless_mode_for_environment(false, false, true));
+        assert!(headless_mode_for_environment(false, false, false));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_headless_mode_only_uses_override_env() {
+        assert!(headless_mode_for_environment(true));
+        assert!(!headless_mode_for_environment(false));
     }
 
     #[test]
@@ -12437,6 +13161,40 @@ fn empty_sidebar_text(message: &'static str, cx: &mut Context<SidebarPlaceholder
         .child(message)
 }
 
+fn sidebar_loading_accounts(row_height: f32, cx: &mut Context<SidebarPlaceholder>) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let mut rows = div()
+        .px(px(8.0))
+        .py(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("Loading accounts..."),
+        );
+
+    for width in [0.82, 0.64, 0.74] {
+        rows = rows.child(
+            div()
+                .h(px((row_height * 0.58).max(18.0)))
+                .w(relative(width))
+                .rounded(px(3.0))
+                .bg(colors.neutral),
+        );
+    }
+
+    rows
+}
+
+fn initial_accounts_loading(state: &NativeAppState) -> bool {
+    state.accounts_resource.is_loading() && state.accounts.is_empty()
+}
+
 fn sync_searchbox_value(
     searchbox: &Entity<Searchbox>,
     query: &str,
@@ -14182,6 +14940,10 @@ fn calendar_search_result_row(
 }
 
 fn message_list_status(state: &NativeAppState) -> Option<(String, bool)> {
+    if initial_accounts_loading(state) {
+        return Some(("Loading accounts...".to_string(), false));
+    }
+
     if state.messages_resource.is_loading() && state.messages.is_empty() {
         return Some(("Loading messages...".to_string(), false));
     }
@@ -15101,6 +15863,181 @@ fn reading_badge(label: &'static str, cx: &mut Context<ReadingPanePlaceholder>) 
         .child(label)
 }
 
+fn reading_attachment_section(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    attachments: &[MessageAttachment],
+    busy: bool,
+    notice: Option<&str>,
+    error: Option<&str>,
+    cx: &mut Context<ReadingPanePlaceholder>,
+) -> gpui::Div {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let status = error
+        .map(|message| (message, true))
+        .or_else(|| notice.map(|message| (message, false)));
+    let mut section = div()
+        .border_t_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .px(px(20.0))
+        .py(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(typography.caption.size))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.on_subtle)
+                .child("Attachments"),
+        );
+
+    if attachments.is_empty() {
+        section = section.child(
+            div()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("Attachment metadata is not available for this message."),
+        );
+    } else {
+        for attachment in attachments {
+            section = section.child(reading_attachment_row(
+                state_entity,
+                message_id,
+                attachment,
+                busy,
+                cx,
+            ));
+        }
+    }
+
+    if let Some((message, is_error)) = status {
+        section = section.child(
+            div()
+                .text_size(px(typography.caption.size))
+                .text_color(if is_error {
+                    colors.status_error
+                } else {
+                    colors.on_subtle
+                })
+                .child(message.to_string()),
+        );
+    }
+
+    section
+}
+
+fn reading_attachment_row(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    attachment: &MessageAttachment,
+    busy: bool,
+    cx: &mut Context<ReadingPanePlaceholder>,
+) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let typography = theme.typography;
+    let meta = format!(
+        "{} - {}",
+        attachment.content_type,
+        attachment_size_label(attachment.size_bytes)
+    );
+    let open_attachment = attachment.clone();
+    let download_attachment = attachment.clone();
+    let open_message_id = message_id.to_string();
+    let download_message_id = message_id.to_string();
+
+    div()
+        .id(SharedString::from(format!(
+            "reading-attachment-row-{}",
+            attachment.id
+        )))
+        .px(px(9.0))
+        .py(px(8.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(colors.stroke_neutral_subtle)
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            svg()
+                .path("icons/download.svg")
+                .size(px(15.0))
+                .text_color(colors.on_subtle),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(typography.body.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_neutral)
+                        .child(attachment.filename.clone()),
+                )
+                .child(
+                    div()
+                        .pt(px(2.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(typography.caption.size))
+                        .text_color(colors.on_subtle)
+                        .child(meta),
+                ),
+        )
+        .child(
+            Button::new(SharedString::from(format!(
+                "reading-attachment-open-{}",
+                attachment.id
+            )))
+            .label(if busy { "Opening..." } else { "Open" })
+            .appearance(ButtonAppearance::Neutral)
+            .size(ButtonSize::Compact)
+            .disabled(busy)
+            .on_click({
+                let state_entity = state_entity.clone();
+                move |_, _, app_cx| {
+                    start_attachment_open(
+                        &state_entity,
+                        &open_message_id,
+                        open_attachment.clone(),
+                        app_cx,
+                    );
+                }
+            }),
+        )
+        .child(
+            Button::new(SharedString::from(format!(
+                "reading-attachment-download-{}",
+                attachment.id
+            )))
+            .label(if busy { "Saving..." } else { "Download" })
+            .appearance(ButtonAppearance::Subtle)
+            .size(ButtonSize::Compact)
+            .disabled(busy)
+            .on_click({
+                let state_entity = state_entity.clone();
+                move |_, _, app_cx| {
+                    start_attachment_download(
+                        &state_entity,
+                        &download_message_id,
+                        download_attachment.clone(),
+                        app_cx,
+                    );
+                }
+            }),
+        )
+        .into_any_element()
+}
+
 fn reading_snooze_controls(
     state_entity: &Entity<NativeAppState>,
     message_id: &str,
@@ -15711,6 +16648,11 @@ fn reading_placeholder(
     };
 
     if selected_id.is_none() {
+        let empty_text = if initial_accounts_loading(state) {
+            "Loading accounts..."
+        } else {
+            "Select a message to read it."
+        };
         return div()
             .size_full()
             .flex()
@@ -15730,7 +16672,7 @@ fn reading_placeholder(
                             .w(px(320.0))
                             .text_size(px(typography.body.size))
                             .text_color(colors.on_subtle)
-                            .child("Select a message to read it."),
+                            .child(empty_text),
                     ),
             );
     }
@@ -15748,9 +16690,14 @@ fn reading_placeholder(
     let has_attachments = state
         .selected_full_message
         .as_ref()
-        .map(|message| message.has_attachments)
+        .map(|message| message.has_attachments || !message.attachments.is_empty())
         .or_else(|| summary.map(|message| message.has_attachments))
         .unwrap_or(false);
+    let attachments = state
+        .selected_full_message
+        .as_ref()
+        .map(|message| message.attachments.clone())
+        .unwrap_or_default();
     let is_read = state
         .selected_full_message
         .as_ref()
@@ -15889,6 +16836,33 @@ fn reading_placeholder(
                                     }
                                 }),
                         )
+                        // (e) Copy body text to clipboard
+                        .child({
+                            let state_entity = state_entity.clone();
+                            Button::new("reading-copy-body")
+                                .label("Copy")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(move |_, _, app_cx| {
+                                    let text = state_entity
+                                        .read(app_cx)
+                                        .selected_full_message
+                                        .as_ref()
+                                        .and_then(|m| m.body.as_ref())
+                                        .and_then(|b| {
+                                            b.text_body.clone().or_else(|| {
+                                                b.html_body.as_ref().map(|h| {
+                                                    RichDocument::from_html_fragment_lossy(h)
+                                                        .to_plain_text()
+                                                })
+                                            })
+                                        })
+                                        .unwrap_or_default();
+                                    if !text.is_empty() {
+                                        app_cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    }
+                                })
+                        })
                         .child(
                             Button::new("reading-toggle-read")
                                 .label(if is_read { "Mark unread" } else { "Mark read" })
@@ -15976,6 +16950,39 @@ fn reading_placeholder(
                     .child(status),
             )
         })
+        // (d) Blocked-images banner — shown when the message contains external
+        // images that have been stripped pending user consent.
+        .when(document_has_blocked_images(state), |pane| {
+            let state_entity = state_entity.clone();
+            pane.child(
+                div()
+                    .mx(px(20.0))
+                    .mt(px(8.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .rounded(px(4.0))
+                    .bg(colors.neutral)
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(typography.caption.size))
+                            .text_color(colors.on_subtle)
+                            .child("External images are blocked."),
+                    )
+                    .child(
+                        Button::new("reading-show-images")
+                            .label("Show images")
+                            .appearance(ButtonAppearance::Subtle)
+                            .size(ButtonSize::Compact)
+                            .on_click(move |_, _, app_cx| {
+                                toggle_show_external_images(&state_entity, app_cx);
+                            }),
+                    ),
+            )
+        })
         .child(
             div()
                 .flex_1()
@@ -15984,6 +16991,17 @@ fn reading_placeholder(
                 .py(px(16.0))
                 .child(DocumentViewer::new(selected_document(state)).max_height(520.0)),
         )
+        .when(has_attachments, |pane| {
+            pane.child(reading_attachment_section(
+                state_entity,
+                &message_id,
+                &attachments,
+                state.attachment_busy,
+                state.attachment_notice.as_deref(),
+                state.attachment_error.as_deref(),
+                cx,
+            ))
+        })
         .child(
             div()
                 .border_t_1()
@@ -16056,6 +17074,7 @@ fn reading_placeholder(
 fn calendar_placeholder(
     state_entity: &Entity<NativeAppState>,
     state: &NativeAppState,
+    time_grid_scroll: &ScrollHandle,
     cx: &mut Context<CalendarPlaceholder>,
 ) -> gpui::Div {
     let theme = cx.theme();
@@ -16152,7 +17171,14 @@ fn calendar_placeholder(
                 state,
                 cx,
             ))
-            .child(calendar_time_grid(state_entity, &events, &days, state, cx)),
+            .child(calendar_time_grid(
+                state_entity,
+                &events,
+                &days,
+                state,
+                time_grid_scroll,
+                cx,
+            )),
     );
 
     if let Some(event) = selected_event {
@@ -16295,6 +17321,7 @@ fn calendar_time_grid(
     events: &[CalendarEvent],
     days: &[NaiveDate],
     state: &NativeAppState,
+    scroll_handle: &ScrollHandle,
     cx: &mut Context<CalendarPlaceholder>,
 ) -> gpui::AnyElement {
     let theme = cx.theme();
@@ -16302,28 +17329,18 @@ fn calendar_time_grid(
     let typography = theme.typography;
     let mut grid = div()
         .id("calendar-time-grid")
+        .relative()
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
+        .track_scroll(scroll_handle)
         .flex()
         .flex_col();
 
-    if events.is_empty() && !state.calendar_events_resource.is_loading() {
-        grid = grid.child(
-            div()
-                .h(px(46.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(typography.body.size))
-                .text_color(colors.on_subtle)
-                .child("No events this week."),
-        );
-    }
-
     for hour in 0..24 {
         let mut row = div()
-            .min_h(px(48.0))
+            .h(px(CALENDAR_HOUR_HEIGHT))
+            .flex_none()
             .flex()
             .border_b_1()
             .border_color(colors.stroke_neutral_subtle)
@@ -16338,44 +17355,253 @@ fn calendar_time_grid(
                     .child(calendar_hour_label(hour)),
             );
 
-        for day in days {
-            let hour_events = events
-                .iter()
-                .filter(|event| {
-                    !event.is_all_day
-                        && calendar_event_matches_day(event, *day)
-                        && calendar_event_local_hour(event) == hour
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut cell = div()
+        for _day in days {
+            let cell = div()
                 .flex_1()
                 .min_w(px(88.0))
-                .min_h(px(48.0))
-                .px(px(5.0))
-                .py(px(5.0))
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
+                .h_full()
                 .border_l_1()
                 .border_color(colors.stroke_neutral_subtle);
-
-            for event in hour_events {
-                cell = cell.child(calendar_event_chip(
-                    state_entity,
-                    event,
-                    state.selected_event.as_deref(),
-                    false,
-                    cx,
-                ));
-            }
             row = row.child(cell);
         }
 
         grid = grid.child(row);
     }
 
+    let mut event_layer = div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(CALENDAR_DAY_HEIGHT))
+        .flex()
+        .child(div().w(px(72.0)).flex_none());
+    for day in days {
+        let layouts = timed_event_layouts_for_day(events, *day);
+        let mut column = div().relative().h_full().flex_1().min_w(px(88.0));
+        for layout in layouts {
+            column = column.child(calendar_timed_event_chip(
+                state_entity,
+                layout,
+                state.selected_event.as_deref(),
+                cx,
+            ));
+        }
+        event_layer = event_layer.child(column);
+    }
+    grid = grid.child(event_layer);
+
+    if events.is_empty() && !state.calendar_events_resource.is_loading() {
+        grid = grid.child(
+            div()
+                .absolute()
+                .top(px(14.0))
+                .left(px(72.0))
+                .right_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(typography.body.size))
+                .text_color(colors.on_subtle)
+                .child("No events this week."),
+        );
+    }
+
     grid.into_any_element()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TimedEventLayout {
+    event: CalendarEvent,
+    day: NaiveDate,
+    top: f32,
+    height: f32,
+    column: usize,
+    column_count: usize,
+}
+
+#[derive(Clone, Debug)]
+struct TimedEventInterval {
+    event: CalendarEvent,
+    start_minute: i32,
+    end_minute: i32,
+}
+
+fn timed_event_layouts_for_day(events: &[CalendarEvent], day: NaiveDate) -> Vec<TimedEventLayout> {
+    let mut intervals = events
+        .iter()
+        .filter(|event| !event.is_all_day)
+        .filter_map(|event| {
+            timed_event_day_minutes(event, day).map(|(start_minute, end_minute)| {
+                TimedEventInterval {
+                    event: event.clone(),
+                    start_minute,
+                    end_minute,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    intervals.sort_by(|a, b| {
+        a.start_minute
+            .cmp(&b.start_minute)
+            .then(a.end_minute.cmp(&b.end_minute))
+            .then(a.event.id.cmp(&b.event.id))
+    });
+
+    let mut layouts = Vec::new();
+    let mut cluster = Vec::new();
+    let mut cluster_end = 0;
+    for interval in intervals {
+        if cluster.is_empty() || interval.start_minute < cluster_end {
+            cluster_end = cluster_end.max(interval.end_minute);
+            cluster.push(interval);
+        } else {
+            layouts.extend(layout_timed_event_cluster(
+                day,
+                std::mem::take(&mut cluster),
+            ));
+            cluster_end = interval.end_minute;
+            cluster.push(interval);
+        }
+    }
+    if !cluster.is_empty() {
+        layouts.extend(layout_timed_event_cluster(day, cluster));
+    }
+
+    layouts.sort_by(|a, b| {
+        a.top
+            .partial_cmp(&b.top)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.column.cmp(&b.column))
+            .then(a.event.id.cmp(&b.event.id))
+    });
+    layouts
+}
+
+fn layout_timed_event_cluster(
+    day: NaiveDate,
+    cluster: Vec<TimedEventInterval>,
+) -> Vec<TimedEventLayout> {
+    let mut column_end_minutes: Vec<i32> = Vec::new();
+    let mut assigned = Vec::with_capacity(cluster.len());
+    for interval in cluster {
+        let column = column_end_minutes
+            .iter()
+            .position(|end_minute| *end_minute <= interval.start_minute)
+            .unwrap_or_else(|| {
+                column_end_minutes.push(0);
+                column_end_minutes.len() - 1
+            });
+        column_end_minutes[column] = interval.end_minute;
+        assigned.push((interval, column));
+    }
+
+    let column_count = column_end_minutes.len().max(1);
+    assigned
+        .into_iter()
+        .map(|(interval, column)| {
+            let top = (interval.start_minute as f32 / 60.0) * CALENDAR_HOUR_HEIGHT;
+            let raw_height = ((interval.end_minute - interval.start_minute).max(1) as f32 / 60.0)
+                * CALENDAR_HOUR_HEIGHT;
+            let remaining = (CALENDAR_DAY_HEIGHT - top).max(1.0);
+            let height = raw_height.max(MIN_TIMED_EVENT_HEIGHT).min(remaining);
+            TimedEventLayout {
+                event: interval.event,
+                day,
+                top,
+                height,
+                column,
+                column_count,
+            }
+        })
+        .collect()
+}
+
+fn calendar_timed_event_chip(
+    state_entity: &Entity<NativeAppState>,
+    layout: TimedEventLayout,
+    selected_event_id: Option<&str>,
+    cx: &mut Context<CalendarPlaceholder>,
+) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let colors = theme.colors.clone();
+    let selected = selected_event_id == Some(layout.event.id.as_str());
+    let event_id = layout.event.id.clone();
+    let day = layout.day;
+    let title = layout.event.title.clone();
+    let time_label = calendar_event_time_label(&layout.event);
+    let width = 1.0 / layout.column_count.max(1) as f32;
+    let left = width * layout.column as f32;
+    let show_time = layout.height >= 30.0;
+
+    div()
+        .id(SharedString::from(format!(
+            "calendar-timed-event-{event_id}-{day}"
+        )))
+        .absolute()
+        .top(px(layout.top))
+        .left(relative(left))
+        .w(relative(width))
+        .h(px(layout.height))
+        .px(px(3.0))
+        .cursor_pointer()
+        .on_click({
+            let state_entity = state_entity.clone();
+            move |_, _, app_cx| {
+                toggle_calendar_event_selection(&state_entity, event_id.clone(), app_cx)
+            }
+        })
+        .child(
+            div()
+                .size_full()
+                .overflow_hidden()
+                .px(px(7.0))
+                .py(px(4.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(if selected {
+                    colors.stroke_accent
+                } else {
+                    colors.stroke_neutral_subtle
+                })
+                .bg(if selected {
+                    colors.accent
+                } else {
+                    colors.neutral
+                })
+                .text_color(if selected {
+                    colors.on_accent
+                } else {
+                    colors.on_neutral
+                })
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(theme.typography.caption.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .when(show_time, |chip| {
+                    chip.child(
+                        div()
+                            .pt(px(2.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(10.0))
+                            .text_color(if selected {
+                                colors.on_accent
+                            } else {
+                                colors.on_subtle
+                            })
+                            .child(time_label),
+                    )
+                }),
+        )
+        .into_any_element()
 }
 
 fn calendar_event_chip(
@@ -16813,11 +18039,65 @@ fn calendar_status_text(state: &NativeAppState) -> Option<(String, bool)> {
 }
 
 fn calendar_event_matches_day(event: &CalendarEvent, day: NaiveDate) -> bool {
-    event.start_at.with_timezone(&Local).date_naive() == day
+    calendar_event_overlaps_day(event, day)
 }
 
-fn calendar_event_local_hour(event: &CalendarEvent) -> u32 {
-    event.start_at.with_timezone(&Local).hour()
+fn calendar_event_overlaps_day(event: &CalendarEvent, day: NaiveDate) -> bool {
+    let Some((day_start, day_end)) = calendar_local_day_bounds(day) else {
+        return event.start_at.with_timezone(&Local).date_naive() == day;
+    };
+    let (start, end) = calendar_event_local_interval(event);
+    end > day_start && start < day_end
+}
+
+fn calendar_event_local_interval(
+    event: &CalendarEvent,
+) -> (chrono::DateTime<Local>, chrono::DateTime<Local>) {
+    let start = event.start_at.with_timezone(&Local);
+    let mut end = event.end_at.with_timezone(&Local);
+    if end <= start {
+        end = start
+            + if event.is_all_day {
+                ChronoDuration::days(1)
+            } else {
+                ChronoDuration::minutes(30)
+            };
+    }
+    (start, end)
+}
+
+fn calendar_local_day_bounds(
+    day: NaiveDate,
+) -> Option<(chrono::DateTime<Local>, chrono::DateTime<Local>)> {
+    let start = Local
+        .with_ymd_and_hms(day.year(), day.month(), day.day(), 0, 0, 0)
+        .earliest()?;
+    Some((start, start + ChronoDuration::days(1)))
+}
+
+fn timed_event_day_minutes(event: &CalendarEvent, day: NaiveDate) -> Option<(i32, i32)> {
+    let (day_start, day_end) = calendar_local_day_bounds(day)?;
+    let (start, end) = calendar_event_local_interval(event);
+    if end <= day_start || start >= day_end {
+        return None;
+    }
+
+    let clipped_start = if start < day_start { day_start } else { start };
+    let clipped_end = if end > day_end { day_end } else { end };
+    let start_minute = if clipped_start <= day_start {
+        0
+    } else {
+        (clipped_start.hour() * 60 + clipped_start.minute()) as i32
+    };
+    let mut end_minute = if clipped_end >= day_end {
+        24 * 60
+    } else {
+        (clipped_end.hour() * 60 + clipped_end.minute()) as i32
+    };
+    if end_minute <= start_minute {
+        end_minute = (start_minute + 30).min(24 * 60);
+    }
+    Some((start_minute, end_minute))
 }
 
 fn calendar_hour_label(hour: u32) -> String {
@@ -17006,7 +18286,11 @@ fn selected_document(state: &NativeAppState) -> RichDocument {
                 .as_ref()
                 .filter(|html| !html.trim().is_empty())
             {
-                return RichDocument::from_html_fragment_lossy(html);
+                let mut doc = RichDocument::from_html_fragment_lossy(html);
+                if !state.show_external_images {
+                    strip_external_images(&mut doc);
+                }
+                return doc;
             }
             if let Some(text) = body
                 .text_body
@@ -17031,6 +18315,42 @@ fn selected_document(state: &NativeAppState) -> RichDocument {
         .and_then(|message| message.preview.as_deref())
         .unwrap_or("Select a message to load its body.");
     RichDocument::from_plain_text(preview)
+}
+
+/// Returns true if the full message body contains external (http/https) images
+/// that are currently blocked.
+fn document_has_blocked_images(state: &NativeAppState) -> bool {
+    if state.show_external_images {
+        return false;
+    }
+    if let Some(message) = state.selected_full_message.as_ref() {
+        if let Some(body) = message.body.as_ref() {
+            if let Some(html) = body.html_body.as_ref() {
+                let doc = RichDocument::from_html_fragment_lossy(html);
+                return doc.blocks.iter().any(|block| {
+                    matches!(block, RichDocumentBlock::Image { src, .. }
+                        if src.starts_with("http://") || src.starts_with("https://"))
+                });
+            }
+        }
+    }
+    false
+}
+
+/// Removes external image blocks from the document in place so they are not
+/// rendered until the user explicitly requests them.
+fn strip_external_images(doc: &mut RichDocument) {
+    doc.blocks.retain(|block| {
+        !matches!(block, RichDocumentBlock::Image { src, .. }
+            if src.starts_with("http://") || src.starts_with("https://"))
+    });
+}
+
+fn toggle_show_external_images(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.show_external_images = true;
+        cx.notify();
+    });
 }
 
 fn default_snooze_value() -> DateTimeValue {

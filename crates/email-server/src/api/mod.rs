@@ -46,6 +46,14 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .patch(messages::patch_message)
                 .delete(messages::delete_message),
         )
+        .route(
+            "/messages/{id}/attachments",
+            get(messages::list_attachments),
+        )
+        .route(
+            "/messages/{id}/attachments/{attachment_id}",
+            get(messages::download_attachment),
+        )
         .route("/messages/{id}/archive", post(messages::archive_message))
         .route("/messages/{id}/labels", get(labels::get_message_labels))
         .route(

@@ -136,6 +136,17 @@ pub struct MessageBody {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(sqlx::FromRow))]
+#[serde(rename_all = "camelCase")]
+pub struct MessageAttachment {
+    pub id: String,
+    pub message_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FullMessage {
     pub id: String,
@@ -155,6 +166,8 @@ pub struct FullMessage {
     pub has_attachments: bool,
     pub preview: Option<String>,
     pub body: Option<MessageBody>,
+    #[serde(default)]
+    pub attachments: Vec<MessageAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

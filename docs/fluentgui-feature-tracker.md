@@ -1,6 +1,6 @@
 # FluentGUI Feature Tracker
 
-Last updated: 2026-05-26
+Last updated: 2026-05-27
 
 Status values:
 
@@ -13,20 +13,20 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Linux opens a WebKitGTK window automatically when display exists. | Linux opens a FluentGUI window automatically when display exists. | Current audited; pending native. | Keep display detection and readiness wait. |
-| Linux falls back to browser/server mode when headless. | Same. | Current audited; pending native. | Preserve `EMAIL_RS_HEADLESS=1`. |
+| Linux opens a WebKitGTK window automatically when display exists. | Linux opens a FluentGUI window automatically when display exists. | Native implemented; automated tests. | Display detection preserves X11/Wayland window launch path after readiness wait. |
+| Linux falls back to browser/server mode when headless. | Same. | Native implemented; automated tests. | `EMAIL_RS_HEADLESS=1` and no-display Linux environments run server-only. |
 | Windows uses Wry/WebView2. | Windows uses FluentGUI/GPUI. | Manual required. | Remove WebView2 only after parity. |
 | Windows enforces single instance and foregrounds existing window. | Same through FluentGUI lifecycle extension. | Manual required. | Blocking cutover item. |
 | Windows close button hides to tray, tray has Open and Quit. | Same. | Manual required. | Blocking cutover item. |
 | Window title is `email-rs`; browser title shows unread count. | Native title/status shows unread count. | Native implemented; automated tests. | Tray unread count remains tied to platform tray work. |
-| Default size 1280x800, Windows min 800x600, icon set. | Same window size/min/icon. | Current audited; pending native. | Needs FluentGUI min-size/icon support. |
+| Default size 1280x800, Windows min 800x600, icon set. | Same window size/min plus native shell title-bar icon. | Native implemented; automated tests. | FluentGUI builder sets size/min-size and the workspace mounts an app title bar with an email icon asset; Windows taskbar/package icon remains manual platform validation. |
 | Snap/WebKit-specific Linux environment workarounds. | Re-evaluate after GPUI. | Pending native. | Keep only if still needed for packages. |
 
 ## Startup And Account Setup
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| Blank while accounts load. | Native loading state or brief skeleton. | Current audited; pending native. | Native should improve clarity without changing behavior. |
+| Blank while accounts load. | Native loading state and brief skeleton. | Native implemented; automated tests. | Sidebar, message list, reading pane, and window status show account-loading state while the async initial load runs. |
 | First-run account setup screen. | Native setup modal shown automatically when no accounts exist. | Native implemented; automated tests. | Request builders and first-run reload/close behavior covered. |
 | Gmail OAuth start. | Fetch authorize URL and open system browser. | Manual required; native plumbing implemented. | Requires credentials; native exposes account refresh after browser callback. |
 | Microsoft 365 OAuth start. | Same. | Manual required; native plumbing implemented. | Requires credentials; native exposes account refresh after browser callback. |
@@ -38,7 +38,7 @@ Status values:
 
 | Current | Native | Verified | Notes |
 |---|---|---|---|
-| 3-pane mail layout: sidebar, message list, reading pane. | FluentGUI workspace with resizable sidebar and message-list split. | Current audited; pending native. | Requires generic split panels. |
+| 3-pane mail layout: sidebar, message list, reading pane. | FluentGUI workspace with resizable sidebar and message-list split. | Native implemented; automated tests. | Uses `Workspace`, left `DockPanel`, persisted sidebar width, and resizable message-list `PaneGroup`. |
 | Calendar replaces message list plus reading pane while sidebar remains. | Same view switch. | Native implemented; cargo check. | Calendar route owns the main content while sidebar remains mounted. |
 | Persist theme and density. | Persist native theme and density. | Native implemented; automated tests. | Native settings file persists these keys. |
 | Sidebar width and message-list width persist in localStorage. | Persist in native settings. | Native implemented; automated tests. | Native settings persist `email_sidebar_w` and `email_msglist_w`; message-list pixels are translated to the FluentGUI split ratio. |
@@ -92,7 +92,7 @@ Status values:
 | Message header: subject, flagged tag, labels, sender avatar/name/email, date. | Same. | Native implemented; cargo check. | Native header renders subject/sender/date, badges, and label row; avatar visual parity remains polish. |
 | Label add dropdown lists labels not already on the message. | Same. | Native implemented; cargo check. | Uses typed label APIs and hides labels already on the message. |
 | Header context menu: reply, forward, archive, delete, read/unread, copy sender email. | Same. | Native implemented; cargo check. | Right-click message header opens native menu; sender-email resolution is covered. |
-| Attachment indicator. | Same current level. | Current audited; product gap. | No current attachment download/open UI. |
+| Attachment indicator and download/open workflows. | Native attachment list with Open and Download actions. | Native implemented; automated tests. | Uses stored attachment metadata/content through typed API/client calls; provider extraction remains backend-dependent. |
 | HTML body shown in sandboxed iframe when available; text fallback otherwise. | Native rich document viewer with safe rendering and text fallback. | Native implemented; automated tests. | Native uses a lossy safe `RichDocument` renderer; manual visual fidelity pass remains. |
 | Quick reply textarea, send button, sending/error states. | Same. | Native implemented; automated tests. | Sends via `/api/v1/messages`; request defaults and errors covered. |
 | Shortcuts e, #, u, Escape. | Same. | Native implemented; automated tests. | Ignored while quick-reply inputs or snooze picker are focused. |
@@ -158,9 +158,9 @@ Status values:
 |---|---|---|---|
 | Week view Monday to Sunday. | Same. | Native implemented; automated tests. | Native week helpers preserve Monday start. |
 | Toolbar title, previous week, Today, next week, week range. | Same. | Native implemented; automated tests. | Native week range formatting covered. |
-| Scrolls to around 8am on mount. | Same. | Current audited; pending native. | Needs native scroll support. |
+| Scrolls to around 8am on mount. | Same. | Native implemented; automated tests. | Calendar time grid tracks a GPUI `ScrollHandle` and targets the 8am row when the week view mounts/changes. |
 | All-day event row when all-day events exist. | Same. | Native implemented; cargo check. | Native row renders per-day all-day chips. |
-| Timed grid with 24 hours and event chips. | Same. | Native implemented; cargo check. | Native grid groups chips by local day and start hour. |
+| Timed grid with 24 hours and event chips. | Same with duration and overlap fidelity. | Native implemented; automated tests. | Timed chips are positioned by clipped local-day duration and assigned overlap columns; back-to-back events share a column. |
 | Event selection toggles detail panel. | Same. | Native implemented; automated tests. | Calendar search-result navigation selects the matching event week. |
 | Detail shows title, time, location, meet link, description, attendees, linked emails. | Same. | Native implemented; cargo check. | Linked emails load for the selected event and stay scoped to current selection. |
 | Linked emails can navigate to message and unlink. | Same. | Native implemented; automated tests. | Current UI has no add-link control; native supports open-message and unlink flows. |
