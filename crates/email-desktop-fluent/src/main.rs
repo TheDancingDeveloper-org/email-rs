@@ -11345,6 +11345,10 @@ mod tests {
         );
         assert_eq!(reading_pane_key_action("e", false, true), None);
         assert_eq!(reading_pane_key_action("r", false, false), None);
+        assert_eq!(
+            reading_pane_key_action("c", false, true),
+            Some(ReadingPaneKeyAction::CopyBody)
+        );
     }
 
     #[test]
@@ -14999,6 +15003,7 @@ enum ReadingPaneKeyAction {
     Delete,
     ToggleRead,
     ClearSelection,
+    CopyBody,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15013,7 +15018,10 @@ fn reading_pane_key_action(key: &str, shift: bool, command: bool) -> Option<Read
         return Some(ReadingPaneKeyAction::ClearSelection);
     }
     if command {
-        return None;
+        return match key {
+            "c" => Some(ReadingPaneKeyAction::CopyBody),
+            _ => None,
+        };
     }
 
     match key {
@@ -15110,6 +15118,28 @@ fn handle_reading_pane_key(
         return true;
     }
 
+    if action == ReadingPaneKeyAction::CopyBody {
+        let text = {
+            let state = state_entity.read(app_cx);
+            state
+                .selected_full_message
+                .as_ref()
+                .and_then(|m| m.body.as_ref())
+                .and_then(|b| {
+                    b.text_body.clone().or_else(|| {
+                        b.html_body
+                            .as_ref()
+                            .map(|h| RichDocument::from_html_fragment_lossy(h).to_plain_text())
+                    })
+                })
+                .unwrap_or_default()
+        };
+        if !text.is_empty() {
+            app_cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+        return true;
+    }
+
     let (message_id, is_read, busy) = {
         let state = state_entity.read(app_cx);
         (
@@ -15150,6 +15180,8 @@ fn handle_reading_pane_key(
             app_cx,
         ),
         ReadingPaneKeyAction::ClearSelection => {}
+        // CopyBody is fully handled above before we fetch message_id.
+        ReadingPaneKeyAction::CopyBody => {}
     }
     true
 }
