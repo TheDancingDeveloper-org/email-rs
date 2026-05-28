@@ -217,7 +217,7 @@ fn main() -> Result<()> {
                 MainContentPlaceholder::new(cx, state.clone(), mail_split.clone(), calendar.clone())
             }
         });
-        let pane = cx.new(|cx| Pane::new(cx));
+        let pane = cx.new(Pane::new);
         pane.update(cx, |pane, cx| {
             pane.set_content(main_content.clone().into(), cx);
         });
@@ -2262,7 +2262,7 @@ impl AdvancedSearchModal {
                     let modal_entity = modal_entity.clone();
                     let condition_id = condition_id.clone();
                     move |value, app_cx| {
-                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal_entity.update(app_cx, |modal, cx| {
                             modal.set_condition_value(&condition_id, value.to_string());
                             cx.notify();
                         });
@@ -2524,11 +2524,10 @@ impl Render for AdvancedSearchModal {
                                             .on_click({
                                                 let modal_entity = modal_entity.clone();
                                                 move |_, _, app_cx| {
-                                                    let _ =
-                                                        modal_entity.update(app_cx, |modal, cx| {
-                                                            modal.set_match_mode(MatchMode::All);
-                                                            cx.notify();
-                                                        });
+                                                    modal_entity.update(app_cx, |modal, cx| {
+                                                        modal.set_match_mode(MatchMode::All);
+                                                        cx.notify();
+                                                    });
                                                 }
                                             }),
                                     )
@@ -2544,11 +2543,10 @@ impl Render for AdvancedSearchModal {
                                             .on_click({
                                                 let modal_entity = modal_entity.clone();
                                                 move |_, _, app_cx| {
-                                                    let _ =
-                                                        modal_entity.update(app_cx, |modal, cx| {
-                                                            modal.set_match_mode(MatchMode::Any);
-                                                            cx.notify();
-                                                        });
+                                                    modal_entity.update(app_cx, |modal, cx| {
+                                                        modal.set_match_mode(MatchMode::Any);
+                                                        cx.notify();
+                                                    });
                                                 }
                                             }),
                                     )
@@ -2568,7 +2566,7 @@ impl Render for AdvancedSearchModal {
                                     .on_click({
                                         let modal_entity = modal_entity.clone();
                                         move |_, _, app_cx| {
-                                            let _ = modal_entity.update(app_cx, |modal, cx| {
+                                            modal_entity.update(app_cx, |modal, cx| {
                                                 modal.add_blank_condition(cx);
                                             });
                                         }
@@ -2592,7 +2590,7 @@ impl Render for AdvancedSearchModal {
                                     .on_click({
                                         let modal_entity = modal_entity.clone();
                                         move |_, _, app_cx| {
-                                            let _ = modal_entity.update(app_cx, |modal, cx| {
+                                            modal_entity.update(app_cx, |modal, cx| {
                                                 modal.reset_to_group(None, cx);
                                             });
                                         }
@@ -2689,7 +2687,7 @@ fn advanced_condition_row(
             .on_click({
                 let modal_entity = modal_entity.clone();
                 move |_, _, app_cx| {
-                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                    modal_entity.update(app_cx, |modal, cx| {
                         modal.remove_condition(&condition_id, cx);
                     });
                 }
@@ -2717,10 +2715,10 @@ fn condition_field_dropdown(
         .option("date_after", "Date after")
         .option("date_before", "Date before")
         .on_select(move |value, app_cx| {
-            let Some(field) = parse_condition_field(&value.to_string()) else {
+            let Some(field) = parse_condition_field(value.as_ref()) else {
                 return;
             };
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.set_condition_field(&condition_id, field, cx);
             });
         })
@@ -2739,10 +2737,10 @@ fn condition_operator_dropdown(
         .option("equals", "equals")
         .option("starts_with", "starts with")
         .on_select(move |value, app_cx| {
-            let Some(operator) = parse_condition_operator(&value.to_string()) else {
+            let Some(operator) = parse_condition_operator(value.as_ref()) else {
                 return;
             };
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.set_condition_operator(&condition_id, operator);
                 cx.notify();
             });
@@ -2760,7 +2758,7 @@ fn boolean_dropdown(
         .option("true", "Yes")
         .option("false", "No")
         .on_select(move |value, app_cx| {
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.set_condition_value(&condition_id, value.to_string());
                 cx.notify();
             });
@@ -2787,10 +2785,10 @@ fn rule_condition_field_dropdown(
         .option("date_after", "Date after")
         .option("date_before", "Date before")
         .on_select(move |value, app_cx| {
-            let Some(field) = parse_condition_field(&value.to_string()) else {
+            let Some(field) = parse_condition_field(value.as_ref()) else {
                 return;
             };
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.set_rule_condition_field(&condition_id, field, cx);
             });
         })
@@ -2809,10 +2807,10 @@ fn rule_condition_operator_dropdown(
         .option("equals", "equals")
         .option("starts_with", "starts with")
         .on_select(move |value, app_cx| {
-            let Some(operator) = parse_condition_operator(&value.to_string()) else {
+            let Some(operator) = parse_condition_operator(value.as_ref()) else {
                 return;
             };
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.set_rule_condition_operator(&condition_id, operator);
                 cx.notify();
             });
@@ -2830,7 +2828,7 @@ fn rule_boolean_dropdown(
         .option("true", "Yes")
         .option("false", "No")
         .on_select(move |value, app_cx| {
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.set_rule_condition_value(&condition_id, value.to_string());
                 cx.notify();
             });
@@ -2857,7 +2855,7 @@ fn rule_action_type_dropdown(
             if !is_supported_rule_action(&action_type) {
                 return;
             }
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.set_rule_action_type(action_key, action_type);
                 cx.notify();
             });
@@ -2880,7 +2878,7 @@ fn rule_action_folder_dropdown(
     }
     dropdown.on_select(move |value, app_cx| {
         let selected = value.to_string();
-        let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal_entity.update(app_cx, |modal, cx| {
             modal.set_rule_action_value(action_key, Some(selected));
             cx.notify();
         });
@@ -3378,7 +3376,7 @@ fn account_setup_choice_body(
                 .on_click({
                     let modal_entity = modal_entity.clone();
                     move |_, _, app_cx| {
-                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal_entity.update(app_cx, |modal, cx| {
                             modal.show_mode(AccountSetupMode::MicrosoftAppPassword, cx);
                         });
                     }
@@ -3392,7 +3390,7 @@ fn account_setup_choice_body(
                 .on_click({
                     let modal_entity = modal_entity.clone();
                     move |_, _, app_cx| {
-                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal_entity.update(app_cx, |modal, cx| {
                             modal.show_mode(AccountSetupMode::ManualImap, cx);
                         });
                     }
@@ -3512,7 +3510,7 @@ fn account_setup_form_body(
                                 let modal_entity = modal_entity.clone();
                                 move |new_state, _, _, app_cx| {
                                     let same_password = matches!(new_state, CheckboxState::Checked);
-                                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                                    modal_entity.update(app_cx, |modal, cx| {
                                         modal.same_password = same_password;
                                         modal.status = None;
                                         cx.notify();
@@ -4004,7 +4002,7 @@ impl SettingsModal {
                     let modal_entity = modal_entity.clone();
                     let condition_id = condition_id.clone();
                     move |value, app_cx| {
-                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal_entity.update(app_cx, |modal, cx| {
                             modal.set_rule_condition_value(&condition_id, value.to_string());
                             cx.notify();
                         });
@@ -4365,7 +4363,7 @@ fn settings_tabs(
             {
                 let modal_entity = modal_entity.clone();
                 move |_, _, app_cx| {
-                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                    modal_entity.update(app_cx, |modal, cx| {
                         modal.active_tab = SettingsTab::General;
                         modal.status = None;
                         cx.notify();
@@ -5134,7 +5132,7 @@ fn settings_rule_editor_body(
                         .on_click({
                             let modal_entity = modal_entity.clone();
                             move |_, _, app_cx| {
-                                let _ = modal_entity.update(app_cx, |modal, cx| {
+                                modal_entity.update(app_cx, |modal, cx| {
                                     modal.set_rule_match_mode(MatchMode::All);
                                     cx.notify();
                                 });
@@ -5153,7 +5151,7 @@ fn settings_rule_editor_body(
                         .on_click({
                             let modal_entity = modal_entity.clone();
                             move |_, _, app_cx| {
-                                let _ = modal_entity.update(app_cx, |modal, cx| {
+                                modal_entity.update(app_cx, |modal, cx| {
                                     modal.set_rule_match_mode(MatchMode::Any);
                                     cx.notify();
                                 });
@@ -5178,7 +5176,7 @@ fn settings_rule_editor_body(
                 .on_click({
                     let modal_entity = modal_entity.clone();
                     move |_, _, app_cx| {
-                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal_entity.update(app_cx, |modal, cx| {
                             let id = modal.next_rule_condition_id();
                             modal.add_rule_condition(new_advanced_condition(id), cx);
                         });
@@ -5197,7 +5195,7 @@ fn settings_rule_editor_body(
                     let modal_entity = modal_entity.clone();
                     let folders = folders.clone();
                     move |_, _, app_cx| {
-                        let _ = modal_entity.update(app_cx, |modal, cx| {
+                        modal_entity.update(app_cx, |modal, cx| {
                             modal.add_rule_action(
                                 "mark_read".to_string(),
                                 None,
@@ -5305,7 +5303,7 @@ fn settings_rule_condition_row(
             .on_click({
                 let modal_entity = modal_entity.clone();
                 move |_, _, app_cx| {
-                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                    modal_entity.update(app_cx, |modal, cx| {
                         modal.remove_rule_condition(&condition_id, cx);
                     });
                 }
@@ -5346,7 +5344,7 @@ fn settings_rule_action_row(
             .on_click({
                 let modal_entity = modal_entity.clone();
                 move |_, _, app_cx| {
-                    let _ = modal_entity.update(app_cx, |modal, cx| {
+                    modal_entity.update(app_cx, |modal, cx| {
                         modal.remove_rule_action(key, cx);
                     });
                 }
@@ -5523,7 +5521,7 @@ fn settings_webhooks_body(
                         .on_click({
                             let modal_entity = modal_entity.clone();
                             move |_, _, app_cx| {
-                                let _ = modal_entity.update(app_cx, |modal, cx| {
+                                modal_entity.update(app_cx, |modal, cx| {
                                     modal.webhook_events = "new_message".to_string();
                                     cx.notify();
                                 });
@@ -5542,7 +5540,7 @@ fn settings_webhooks_body(
                         .on_click({
                             let modal_entity = modal_entity.clone();
                             move |_, _, app_cx| {
-                                let _ = modal_entity.update(app_cx, |modal, cx| {
+                                modal_entity.update(app_cx, |modal, cx| {
                                     modal.webhook_events = "all".to_string();
                                     cx.notify();
                                 });
@@ -5633,7 +5631,7 @@ fn open_account_setup_modal(
         state.modals.advanced_search_open = false;
         cx.notify();
     });
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.reset(cx);
     });
 }
@@ -5667,7 +5665,7 @@ fn handle_account_setup_key(
                 return true;
             }
             if mode != AccountSetupMode::Choice {
-                let _ = modal_entity.update(app_cx, |modal, cx| {
+                modal_entity.update(app_cx, |modal, cx| {
                     modal.show_mode(AccountSetupMode::Choice, cx);
                 });
                 return true;
@@ -5699,7 +5697,7 @@ fn cancel_account_setup_form(
     app_cx: &mut App,
 ) {
     if first_run {
-        let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal_entity.update(app_cx, |modal, cx| {
             modal.show_mode(AccountSetupMode::Choice, cx);
         });
     } else {
@@ -5718,7 +5716,7 @@ fn start_account_setup_oauth(
     }
 
     let base_url = state_entity.read(app_cx).api_base_url.clone();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.oauth_loading = Some(provider);
         modal.status = None;
         cx.notify();
@@ -5800,7 +5798,7 @@ fn start_account_setup_create(
     let request = match request {
         Ok(request) => request,
         Err(message) => {
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.set_status(Some((message.clone(), false)), cx);
             });
             state_entity.update(app_cx, |state, cx| {
@@ -5812,7 +5810,7 @@ fn start_account_setup_create(
     };
 
     let base_url = state_entity.read(app_cx).api_base_url.clone();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.submitting = true;
         modal.status = None;
         cx.notify();
@@ -5873,7 +5871,7 @@ fn start_account_setup_refresh(
     }
 
     let base_url = state_entity.read(app_cx).api_base_url.clone();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.refreshing = true;
         modal.status = None;
         cx.notify();
@@ -5949,7 +5947,7 @@ fn open_settings_modal(
         state.modals.advanced_search_open = false;
         cx.notify();
     });
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.reset(cx);
     });
 }
@@ -6025,14 +6023,14 @@ fn select_settings_account(
             state.last_error = Some(message.clone());
             cx.notify();
         });
-        let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal_entity.update(app_cx, |modal, cx| {
             modal.set_status(Some((message, false)), cx);
         });
         return;
     };
 
     let account_id = account.id.clone();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.select_account(&account, cx);
     });
 
@@ -6077,7 +6075,7 @@ fn select_settings_webhooks(
     app_cx: &mut App,
 ) {
     let base_url = state_entity.read(app_cx).api_base_url.clone();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.select_webhooks(cx);
     });
 
@@ -6120,7 +6118,7 @@ fn select_settings_rules(
     app_cx: &mut App,
 ) {
     let base_url = state_entity.read(app_cx).api_base_url.clone();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.select_rules(account_id.clone(), cx);
     });
 
@@ -6164,7 +6162,7 @@ fn confirm_settings_account_delete(
     account_id: String,
     app_cx: &mut App,
 ) {
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.confirm_delete_account = Some(account_id);
         modal.status = None;
         cx.notify();
@@ -6172,7 +6170,7 @@ fn confirm_settings_account_delete(
 }
 
 fn cancel_settings_account_delete(modal_entity: &Entity<SettingsModal>, app_cx: &mut App) {
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.confirm_delete_account = None;
         modal.status = None;
         cx.notify();
@@ -6197,7 +6195,7 @@ fn start_settings_save(
     let request = match build_account_settings_update_request(name, sync_days, signature) {
         Ok(request) => request,
         Err(message) => {
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.set_status(Some((message.clone(), false)), cx);
             });
             state_entity.update(app_cx, |state, cx| {
@@ -6214,7 +6212,7 @@ fn start_settings_save(
         cx.notify();
         (state.api_base_url.clone(), refresh_request)
     });
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.saving_account = true;
         modal.status = None;
         cx.notify();
@@ -6282,7 +6280,7 @@ fn start_settings_account_delete(
             .then(|| state.api_base_url.clone())
     }) else {
         let message = "Account not found.".to_string();
-        let _ = modal_entity.update(app_cx, |modal, cx| {
+        modal_entity.update(app_cx, |modal, cx| {
             modal.set_status(Some((message.clone(), false)), cx);
         });
         state_entity.update(app_cx, |state, cx| {
@@ -6292,7 +6290,7 @@ fn start_settings_account_delete(
         return;
     };
 
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.deleting_account = true;
         modal.status = None;
         cx.notify();
@@ -6756,7 +6754,7 @@ fn start_settings_rule_new(
         .get(&account_id)
         .cloned()
         .unwrap_or_default();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.start_new_rule_editor(account_id, folders, cx);
     });
 }
@@ -6774,13 +6772,13 @@ fn start_settings_rule_edit(
         .get(&account_id)
         .cloned()
         .unwrap_or_default();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.start_edit_rule_editor(account_id, rule, folders, cx);
     });
 }
 
 fn cancel_settings_rule_editor(modal_entity: &Entity<SettingsModal>, app_cx: &mut App) {
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.reset_rule_editor(cx);
         modal.status = None;
         cx.notify();
@@ -6824,7 +6822,7 @@ fn start_settings_rule_save(
     ) {
         Ok(request) => request,
         Err(message) => {
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.status = Some((message.clone(), false));
                 modal.rule_saving = false;
                 cx.notify();
@@ -6839,7 +6837,7 @@ fn start_settings_rule_save(
 
     let base_url = state_entity.read(app_cx).api_base_url.clone();
     let account_id = request.account_id.clone();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.rule_saving = true;
         modal.status = None;
         cx.notify();
@@ -6902,7 +6900,7 @@ fn start_settings_rule_mutation(
     app_cx: &mut App,
 ) {
     let base_url = state_entity.read(app_cx).api_base_url.clone();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.rule_busy_ids.insert(busy_id);
         modal.status = None;
         cx.notify();
@@ -6968,7 +6966,7 @@ fn start_settings_webhook_create(
     let request = match build_create_webhook_request(url, secret, events) {
         Ok(request) => request,
         Err(message) => {
-            let _ = modal_entity.update(app_cx, |modal, cx| {
+            modal_entity.update(app_cx, |modal, cx| {
                 modal.fail_webhooks(message.clone(), cx);
             });
             state_entity.update(app_cx, |state, cx| {
@@ -7040,7 +7038,7 @@ fn start_settings_webhook_mutation(
     app_cx: &mut App,
 ) {
     let base_url = state_entity.read(app_cx).api_base_url.clone();
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         if let Some(id) = busy_id.as_ref() {
             modal.webhook_busy_ids.insert(id.clone());
         } else {
@@ -7104,7 +7102,7 @@ fn start_folder_exclusion_toggle(
         cx.notify();
         (state.api_base_url.clone(), refresh_request)
     });
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.status = Some(("Updating folder...".to_string(), true));
         cx.notify();
     });
@@ -8620,7 +8618,7 @@ async fn load_message_collection_with_client(
         .or_else(|| messages.first().map(|message| message.id.clone()));
     let (selected_full_message, selected_message_labels) =
         if let Some(message_id) = selected_message.as_deref() {
-            match client.get_message(&message_id).await {
+            match client.get_message(message_id).await {
                 Ok(full_message) => {
                     update_summary_from_full_message(&mut messages, &full_message);
                     let labels = client
@@ -9243,9 +9241,7 @@ fn start_full_message_load(
 ) {
     let message_id = message_id.to_string();
     let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
-        let Some(request) = begin_full_message_load(state, &message_id) else {
-            return None;
-        };
+        let request = begin_full_message_load(state, &message_id)?;
         sync_window_title(state, cx);
         cx.notify();
         Some((state.api_base_url.clone(), request))
@@ -13018,7 +13014,7 @@ fn palette_entries(
             })
     }));
 
-    entries.extend(state.folders_by_account.iter().flat_map(|(_, folders)| {
+    entries.extend(state.folders_by_account.values().flat_map(|folders| {
         folders
             .iter()
             .filter(|folder| !folder.is_excluded)
@@ -13376,7 +13372,7 @@ fn open_advanced_search_modal(
         cx.notify();
         state.search.condition_group.clone()
     });
-    let _ = modal_entity.update(app_cx, |modal, cx| {
+    modal_entity.update(app_cx, |modal, cx| {
         modal.reset_to_group(group, cx);
     });
 }
@@ -13719,12 +13715,13 @@ fn native_search_suggestion_label(suggestion: &NativeSearchSuggestion) -> String
             .filter(|subject| !subject.is_empty())
             .unwrap_or("(no subject)")
             .to_string(),
-        NativeSearchSuggestion::Event(event) => event
-            .title
-            .trim()
-            .is_empty()
-            .then(|| "(untitled event)".to_string())
-            .unwrap_or_else(|| event.title.clone()),
+        NativeSearchSuggestion::Event(event) => {
+            if event.title.trim().is_empty() {
+                "(untitled event)".to_string()
+            } else {
+                event.title.clone()
+            }
+        }
     }
 }
 
@@ -14527,6 +14524,7 @@ struct MessageThreadGroup {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum MessageListRenderRow {
     Message {
         message: Message,
@@ -15447,6 +15445,7 @@ fn reading_header_context_menu(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mail_message_row(
     idx: usize,
     message: &Message,
@@ -16193,7 +16192,7 @@ fn reading_label_row(
         .filter(|label| {
             selected_account_id
                 .as_deref()
-                .map_or(true, |id| label.account_id == id)
+                .is_none_or(|id| label.account_id == id)
         })
         .filter(|label| !attached_ids.contains(label.id.as_str()))
         .cloned()
@@ -16275,6 +16274,7 @@ fn reading_label_row(
     row
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compose_placeholder(
     state_entity: &Entity<NativeAppState>,
     state: &NativeAppState,
@@ -18495,3 +18495,6 @@ fn push_recipient_suggestion(
     }
     suggestions.push(suggestion);
 }
+
+#[cfg(test)]
+mod gui_tests;
