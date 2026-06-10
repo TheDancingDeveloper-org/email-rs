@@ -1,0 +1,36 @@
+# Woodpecker CI — email-rs (full email client; deployed as myAIAgent's email engine).
+# push to main: build the server+SPA image and push :latest + :<sha> to the Forgejo
+# registry. The image is consumed by the prod-myaiagent Komodo stack (email-rs sidecar).
+# See ~/Working/CLAUDE.md for the deploy pattern + Woodpecker pitfalls.
+
+# Manual clone (default OAuth clone can 403; needs trusted.security=true on the repo).
+clone:
+  git:
+    image: alpine/git
+    environment:
+      GIT_AUTH_TOKEN:
+        from_secret: git_auth_token
+    commands:
+      - git init
+      - git remote add origin "https://git:$GIT_AUTH_TOKEN@repo.indexarr.net/indexarr/email-rs.git"
+      - git fetch --no-tags --depth=1 origin $CI_COMMIT_SHA
+      - git checkout FETCH_HEAD
+
+steps:
+  - name: build-and-push
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: repo.indexarr.net/indexarr/email-rs
+      registry: repo.indexarr.net
+      username:
+        from_secret: git_auth_token
+      password:
+        from_secret: git_auth_token
+      tags:
+        - latest
+        - ${CI_COMMIT_SHA}
+      context: .
+      dockerfile: Dockerfile
+    when:
+      - event: push
+        branch: main
