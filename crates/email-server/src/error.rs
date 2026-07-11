@@ -21,6 +21,9 @@ pub enum AppError {
     #[error("provider error: {0}")]
     Provider(String),
 
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+
     #[error("IMAP error: {0}")]
     Imap(String),
 
@@ -38,6 +41,7 @@ impl IntoResponse for AppError {
             AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Provider(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+            AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
             AppError::Imap(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::Smtp(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::Internal(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -80,6 +84,14 @@ mod tests {
         assert_eq!(
             status_of(AppError::Provider("x".into())),
             StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn payload_too_large_is_413() {
+        assert_eq!(
+            status_of(AppError::PayloadTooLarge("x".into())),
+            StatusCode::PAYLOAD_TOO_LARGE
         );
     }
 

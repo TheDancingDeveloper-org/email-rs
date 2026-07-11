@@ -81,13 +81,20 @@ mod tests {
     }
 
     async fn seed_message(pool: &sqlx::SqlitePool, id: &str, account_id: &str, folder_id: &str) {
+        let uid: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(uid), 0) + 1 FROM messages WHERE folder_id = ?",
+        )
+        .bind(folder_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO messages (id, account_id, folder_id, uid, message_id, subject, is_read) VALUES (?,?,?,?,?,?,?)",
         )
         .bind(id)
         .bind(account_id)
         .bind(folder_id)
-        .bind(1i64)
+        .bind(uid)
         .bind(format!("<{id}>"))
         .bind(format!("Subject of {id}"))
         .bind(false)

@@ -620,6 +620,7 @@ async fn seed_work_account(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_account(
     pool: &SqlitePool,
     id: &str,
@@ -697,6 +698,7 @@ async fn seed_standard_folders(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_folder(
     pool: &SqlitePool,
     id: &str,
@@ -806,13 +808,14 @@ async fn insert_attachment(
     content: &[u8],
 ) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO attachments (id, message_id, filename, content_type, size_bytes, content)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO attachments (id, message_id, filename, content_type, part_id, size_bytes, content)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id)
     .bind(message_id)
     .bind(filename)
     .bind(content_type)
+    .bind(id)
     .bind(content.len() as i64)
     .bind(content)
     .execute(pool)

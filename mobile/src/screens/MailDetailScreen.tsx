@@ -21,6 +21,8 @@ export function MailDetailScreen() {
   const { selectedMessage, setSelectedMessage, theme } = useAppStore();
   const [body, setBody] = useState<MessageBody | null>(null);
   const [loading, setLoading] = useState(true);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!selectedMessage) return;
@@ -53,13 +55,25 @@ export function MailDetailScreen() {
           <button className={styles.iconBtn} aria-label="Star">
             <img src={theme === 'dark' ? '/icons/star-dark.png' : '/icons/star-light.png'} alt="" width="20" height="20" />
           </button>
-          <button className={styles.iconBtn} aria-label="Trash" onClick={() => { api.trash(selectedMessage.id); setSelectedMessage(null); }}>
+          <button className={styles.iconBtn} aria-label="Trash" disabled={deleting} onClick={async () => {
+            setDeleting(true);
+            setActionError(null);
+            try {
+              await api.trash(selectedMessage.id);
+              setSelectedMessage(null);
+            } catch (cause) {
+              setActionError(cause instanceof Error ? cause.message : 'Unable to delete message');
+            } finally {
+              setDeleting(false);
+            }
+          }}>
             <img src={theme === 'dark' ? '/icons/trash-dark.png' : '/icons/trash-light.png'} alt="" width="20" height="20" />
           </button>
         </div>
       </header>
 
       <div className={`${styles.body} scroll`}>
+        {actionError && <div role="alert" style={{ color: 'var(--danger)', paddingBottom: 10 }}>{actionError}</div>}
         {/* Subject */}
         <h1 className={styles.subject}>
           {body?.subject ?? selectedMessage.subject ?? '(no subject)'}

@@ -207,6 +207,17 @@ impl MailProvider for GenericImapProvider {
         Ok(folders)
     }
 
+    async fn folder_uid_validity(&self, folder: &str) -> Result<Option<u32>> {
+        let mut session = self.connect().await?;
+        let mailbox = session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT failed: {}", e)))?;
+        let uid_validity = mailbox.uid_validity;
+        let _ = session.logout().await;
+        Ok(uid_validity)
+    }
+
     async fn fetch_messages(
         &self,
         folder: &str,
@@ -243,7 +254,7 @@ impl MailProvider for GenericImapProvider {
             .join(",");
 
         let fetch_stream = session
-            .uid_fetch(&uid_range, "(UID FLAGS RFC822.SIZE ENVELOPE)")
+            .uid_fetch(&uid_range, "(UID FLAGS RFC822.SIZE ENVELOPE BODYSTRUCTURE)")
             .await
             .map_err(|e| AppError::Imap(format!("UID FETCH failed: {}", e)))?;
 
@@ -333,6 +344,10 @@ impl MailProvider for GenericImapProvider {
                     .map(|s| s.chars().take(200).collect::<String>())
             });
 
+            let attachments = fetch
+                .bodystructure()
+                .map(super::bodystructure_attachments)
+                .unwrap_or_default();
             messages.push(Message {
                 id: Uuid::new_v4(),
                 uid,
@@ -347,13 +362,28 @@ impl MailProvider for GenericImapProvider {
                 is_read,
                 is_flagged,
                 is_draft,
-                has_attachments: false,
+                has_attachments: !attachments.is_empty(),
+                attachments,
                 preview,
             });
         }
 
         let _ = session.logout().await;
         Ok(messages)
+    }
+
+    async fn list_message_uids(&self, folder: &str) -> Result<Vec<u32>> {
+        let mut session = self.connect().await?;
+        session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT failed: {e}")))?;
+        let uids = session
+            .uid_search("ALL")
+            .await
+            .map_err(|e| AppError::Imap(format!("UID SEARCH ALL failed: {e}")))?;
+        let _ = session.logout().await;
+        Ok(uids.into_iter().collect())
     }
 
     async fn fetch_message_body(&self, folder: &str, uid: u32) -> Result<MessageBody> {
@@ -384,24 +414,32 @@ impl MailProvider for GenericImapProvider {
             .body()
             .ok_or_else(|| AppError::Imap("message had no RFC822 body".to_string()))?;
 
-        let parsed = mail_parser::MessageParser::default()
-            .parse(raw)
-            .ok_or_else(|| AppError::Imap("failed to parse message".to_string()))?;
-
-        let text_body = parsed.body_text(0).map(|s| s.to_string());
-        let html_body = parsed.body_html(0).map(|s| s.to_string());
-        let raw_headers = std::str::from_utf8(raw)
-            .ok()
-            .and_then(|s| s.split_once("\r\n\r\n").map(|(h, _)| h.to_string()));
-
+        let body = super::parse_message_body(uid, raw)?;
         let _ = session.logout().await;
+        Ok(body)
+    }
 
-        Ok(MessageBody {
-            message_id: uid.to_string(),
-            html_body,
-            text_body,
-            raw_headers,
-        })
+    async fn fetch_attachment(&self, folder: &str, uid: u32, part_id: &str) -> Result<Vec<u8>> {
+        if !super::valid_imap_part_id(part_id) {
+            return Err(AppError::Imap("invalid MIME part identifier".into()));
+        }
+        let mut session = self.connect().await?;
+        session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT failed: {e}")))?;
+        let stream = session
+            .uid_fetch(uid.to_string(), format!("(BODY.PEEK[{part_id}])"))
+            .await
+            .map_err(|e| AppError::Imap(format!("attachment UID FETCH failed: {e}")))?;
+        let fetches = stream.collect::<Vec<_>>().await;
+        let content = fetches
+            .into_iter()
+            .filter_map(|item| item.ok())
+            .find_map(|fetch| fetch.body().map(ToOwned::to_owned));
+        let _ = session.logout().await;
+        content
+            .ok_or_else(|| AppError::NotFound(format!("attachment part {part_id} is unavailable")))
     }
 
     async fn fetch_bodies_batch(
@@ -447,23 +485,10 @@ impl MailProvider for GenericImapProvider {
                     Some(b) => b,
                     None => continue,
                 };
-                let Some(parsed) = mail_parser::MessageParser::default().parse(raw) else {
+                let Ok(body) = super::parse_message_body(uid, raw) else {
                     continue;
                 };
-                let text_body = parsed.body_text(0).map(|s| s.to_string());
-                let html_body = parsed.body_html(0).map(|s| s.to_string());
-                let raw_headers = std::str::from_utf8(raw)
-                    .ok()
-                    .and_then(|s| s.split_once("\r\n\r\n").map(|(h, _)| h.to_string()));
-                results.push((
-                    uid,
-                    MessageBody {
-                        message_id: uid.to_string(),
-                        html_body,
-                        text_body,
-                        raw_headers,
-                    },
-                ));
+                results.push((uid, body));
             }
         }
 

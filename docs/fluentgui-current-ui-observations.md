@@ -1,5 +1,9 @@
 # FluentGUI Current UI Observations
 
+> Historical baseline captured before native implementation. It describes the
+> legacy React/WebKit desktop and is retained for parity comparison, not current
+> build or deployment instructions.
+
 Last updated: 2026-05-25
 
 These are structured observations of the current React/WebView desktop UI. They

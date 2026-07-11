@@ -10,10 +10,15 @@ permissions:
 
 jobs:
   linux-binary:
-    name: Linux binary
+    name: Linux server and Fluent desktop binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Fluent desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
       - name: Build frontend
         working-directory: frontend
@@ -21,8 +26,9 @@ jobs:
 
       - name: Build binary
         run: |
-          cargo build --release -p email-server
+          cargo build --release --locked -p email-server -p email-desktop-fluent
           cp target/release/email-server release/email-server
+          cp target/release/email-desktop-fluent release/email-desktop-fluent
           cd release && tar czf ../email-rs-linux-x86_64.tar.gz .
 
       - name: Upload to release

@@ -726,6 +726,7 @@ mod tests {
         Arc::new(crate::state::AppState::new(pool, has_fts && with_fts))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn seed(
         pool: &sqlx::SqlitePool,
         id: &str,
@@ -755,13 +756,20 @@ mod tests {
         .bind("INBOX")
         .execute(pool)
         .await;
+        let uid: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(uid), 0) + 1 FROM messages WHERE folder_id = ?",
+        )
+        .bind(folder_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO messages (id, account_id, folder_id, uid, subject, from_email, from_name, preview, message_id) VALUES (?,?,?,?,?,?,?,?,?)",
         )
         .bind(id)
         .bind(account_id)
         .bind(folder_id)
-        .bind(1i64)
+        .bind(uid)
         .bind(subject)
         .bind(from_email)
         .bind(from_name)
@@ -774,12 +782,13 @@ mod tests {
 
     async fn seed_attachment(pool: &sqlx::SqlitePool, message_id: &str, filename: &str) {
         sqlx::query(
-            "INSERT INTO attachments (id, message_id, filename, content_type, size_bytes) VALUES (?,?,?,?,?)",
+            "INSERT INTO attachments (id, message_id, filename, content_type, part_id, size_bytes) VALUES (?,?,?,?,?,?)",
         )
         .bind(format!("{message_id}-attachment"))
         .bind(message_id)
         .bind(filename)
         .bind("text/plain")
+        .bind(format!("{message_id}-part"))
         .bind(12i64)
         .execute(pool)
         .await

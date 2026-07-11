@@ -15,14 +15,14 @@ Built as a clean-UI replacement for Thunderbird/Outlook.
 - Background IMAP sync with pre-fetching
 - Full-text search (SQLite FTS5, BM25 ranked)
 - Advanced search with condition builder (AND/OR groups, all message fields)
-- Compose with To/Cc/Bcc, reply, reply-all, forward
+- Compose with To/Cc/Bcc, reply, and forward
 - Recipient autocomplete from contacts/history
 - Labels, snooze, smart folders
 - Rules engine — condition-based automatic actions on incoming mail
 - Mark read/unread, bulk mark-all-read
 
 **Calendar**
-- Google Calendar integration (read + write)
+- Google Calendar synchronization with week and event-detail views
 - Week view with event detail
 - Calendar events appear in search results
 
@@ -33,7 +33,7 @@ Built as a clean-UI replacement for Thunderbird/Outlook.
 - Unread count in browser tab title
 
 **Linux**
-- Native desktop app via WebKitGTK — opens as a window automatically when a display is available
+- Native FluentGUI desktop app backed by the same in-process Axum server
 - Falls back to browser-only server mode when running headless (no `$DISPLAY`/`$WAYLAND_DISPLAY`)
 - Set `EMAIL_RS_HEADLESS=1` to force server-only mode on a machine with a display
 
@@ -41,7 +41,10 @@ Built as a clean-UI replacement for Thunderbird/Outlook.
 - Native Windows app via WebView2 (single-instance, system tray, MSI installer)
 
 **Mobile**
-- Companion React Native / Capacitor app (`mobile/`) with inbox, search, compose, and folder navigation
+- Companion Capacitor app (`mobile/`) with inbox, search, compose, and folder navigation; secure server onboarding remains in progress
+
+Current implementation status and known gaps are tracked in
+[`docs/recovery-audit-2026-07-10.md`](docs/recovery-audit-2026-07-10.md).
 
 ---
 
@@ -49,11 +52,14 @@ Built as a clean-UI replacement for Thunderbird/Outlook.
 
 ```bash
 cp .env.example .env
-# Fill in your OAuth credentials — see .env.example for instructions
+# Set EMAIL_RS_BOOTSTRAP_PASSWORD to a new 12+ character secret.
+# Add OAuth credentials if you use Gmail or Microsoft accounts.
 docker compose up -d
 ```
 
-Open **http://localhost:8585**, then go to Settings → Add Account.
+Open **http://localhost:8585**, sign in with the bootstrap credentials, then go
+to Settings → Add Account. Remove `EMAIL_RS_BOOTSTRAP_PASSWORD` from `.env`
+after the first successful startup; the stored credential is an Argon2id hash.
 
 The backend hot-reloads via `cargo-watch`; the frontend via Vite HMR. The first start takes ~60s while Rust compiles inside the container.
 
@@ -74,6 +80,14 @@ All configuration is via environment variables (`.env` or `docker-compose.yml`).
 | `PORT` | Bind port | `8585` |
 | `FRONTEND_DIST` | Path to built frontend assets | auto-detected (see below) |
 | `EMAIL_RS_HEADLESS` | Set to `1` to disable the desktop window on Linux | unset |
+| `EMAIL_RS_BOOTSTRAP_USERNAME` | Initial single-user login name | `admin` |
+| `EMAIL_RS_BOOTSTRAP_PASSWORD` | Initial password secret (12+ characters; used only when no app user exists) | — |
+| `EMAIL_RS_PUBLIC_URL` | Required HTTPS URL for a non-loopback deployment | — |
+| `EMAIL_RS_ALLOWED_ORIGINS` | Comma-separated Capacitor/development origins allowed by CORS | — |
+| `EMAIL_RS_SESSION_TTL_SECS` | Browser/desktop cookie lifetime | `43200` (12 hours) |
+| `EMAIL_RS_BEARER_TTL_SECS` | Mobile bearer-token lifetime | `2592000` (30 days) |
+| `EMAIL_RS_ALLOW_INSECURE_HTTP` | Explicit non-loopback HTTP development override | unset |
+| `EMAIL_RS_DISABLE_AUTH` | Disable application auth for isolated development/tests only | unset |
 
 **Frontend asset resolution order (Linux/macOS):** executable directory → `/usr/local/share/email-rs/static` → `/usr/share/email-rs/static` → `crates/email-server/static` relative to the working directory.
 
@@ -96,38 +110,43 @@ Generic IMAP/SMTP accounts and app-password accounts do not require OAuth setup.
 
 ## Running natively on Linux
 
-**Install system dependencies (Ubuntu / Debian):**
+**Install native FluentGUI system dependencies (Ubuntu / Debian):**
 
 ```bash
-sudo apt install pkg-config libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev libglib2.0-dev
+sudo apt install pkg-config libssl-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 ```
 
 **Build and run:**
 
 ```bash
-# Build the frontend (output goes to crates/email-server/static/)
-cd frontend && npm install && npm run build && cd ..
-
-# Build and run
-cargo build --release --features desktop
-./target/release/email-server
+# Build and run the native FluentGUI desktop (it starts the server in-process)
+cargo build --release --locked -p email-desktop-fluent
+./target/release/email-desktop-fluent
 ```
 
-When `$DISPLAY` or `$WAYLAND_DISPLAY` is set the app opens as a native desktop window. Otherwise it runs as a background server — open **http://localhost:8585** in a browser.
+The native FluentGUI dependencies are pinned to an immutable upstream Git
+revision, so a sibling FluentGUI checkout is not required. Developers working
+on both repositories can use an untracked Cargo configuration patch locally;
+committed manifests must continue to use the pinned revision so clean clones,
+CI, and Docker builds remain reproducible.
+
+For browser/headless operation, build the frontend and run `cargo run -p email-server`.
 
 The database is created automatically at `~/.local/share/email-rs/email.db` on first run.
 
-**Dev mode (hot reload):**
+**Browser development mode (hot reload):**
 
 ```bash
 # Terminal 1 — backend
-cargo run -p email-server --features desktop
+EMAIL_RS_ALLOW_INSECURE_HTTP=true cargo run -p email-server
 
 # Terminal 2 — frontend with HMR
 cd frontend && npm run dev
 ```
 
 The Vite dev server runs on port 5173 and proxies `/api/*` to the backend.
+Set `EMAIL_RS_ALLOWED_ORIGINS=http://localhost:5173` when accessing the backend
+directly rather than through Vite's same-origin proxy.
 
 ---
 
@@ -136,21 +155,35 @@ The Vite dev server runs on port 5173 and proxies `/api/*` to the backend.
 ```bash
 docker build -t email-rs .
 docker run -d \
+  -e EMAIL_RS_BOOTSTRAP_USERNAME=admin \
+  -e EMAIL_RS_BOOTSTRAP_PASSWORD=... \
+  -e EMAIL_RS_PUBLIC_URL=https://mail.example.com \
   -e GOOGLE_CLIENT_ID=... \
   -e GOOGLE_CLIENT_SECRET=... \
   -e MICROSOFT_CLIENT_ID=... \
   -e MICROSOFT_CLIENT_SECRET=... \
   -e DATABASE_URL=sqlite:///data/email.db \
   -v email-data:/data \
-  -p 8585:3000 \
+  -p 127.0.0.1:3000:3000 \
   email-rs
 ```
+
+Put Caddy or another TLS reverse proxy in front of the loopback-published
+container port. Non-loopback production deployments must set
+`EMAIL_RS_PUBLIC_URL` to an `https://` URL. See
+[`docs/deployment-security.md`](docs/deployment-security.md) for Caddy,
+authentication bootstrap, CORS, and migration-backup guidance.
+
+Additional operational and developer documentation is indexed in
+[`docs/README.md`](docs/README.md).
 
 ---
 
 ## Linux CI release build
 
-The Woodpecker pipeline (`.woodpecker.yml`) cross-compiles a static release binary and packages it with the built frontend assets. The binary auto-detects assets and data paths at runtime — no installation step required.
+The GitHub and Woodpecker release workflows build the `email-server` browser/headless
+binary and `email-desktop-fluent` native binary explicitly, then package them
+with the browser assets. The Docker image builds only `email-server`.
 
 ---
 
@@ -177,7 +210,8 @@ cargo build --release --target x86_64-pc-windows-msvc -p email-server
 | Backend | Rust, Axum, SQLx, SQLite |
 | Frontend | React, TypeScript, Vite, Zustand |
 | Mobile | React, Capacitor |
-| Auth | OAuth2 (Google, Microsoft), IMAP basic/app-password |
+| Application auth | Argon2id single-user login; hashed cookie/bearer sessions |
+| Provider auth | OAuth2 (Google, Microsoft), IMAP basic/app-password |
 | Mail transport | async-imap, lettre |
 | Search | SQLite FTS5 with BM25 ranking |
 | Dev proxy | Caddy |

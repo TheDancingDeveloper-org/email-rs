@@ -1,15 +1,34 @@
 use chrono::{DateTime, Utc};
 use email_types::{
-    Account, AccountSettings, ActionInput, AddLinkBody, AddLinkResponse, AuthorizeResponse,
-    BulkRequest, CalendarEvent, ConditionField, ConditionGroup, Contact, CreateAccount,
-    CreateLabelBody, CreateWebhook, EventLink, Folder, FullMessage, Label, MatchMode, Message,
-    MessageAttachment, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse, SendRequest,
-    SendResponse, SnoozeRequest, SuggestResponse, SyncEvent, UpdateAccount, UpdateLabelBody,
+    Account, AccountSettings, ActionInput, AddLinkBody, AddLinkResponse, AuthClientKind,
+    AuthCredentials, AuthIdentity, AuthSession, AuthorizeResponse, BulkRequest, BulkResponse,
+    CalendarEvent, ConditionField, ConditionGroup, Contact, CreateAccount, CreateLabelBody,
+    CreateWebhook, EventLink, Folder, FullMessage, Label, MatchMode, Message, MessageAttachment,
+    PatchFolder, PatchMessageRequest, RuleDto, SearchResponse, SendRequest, SendResponse,
+    SnoozeRequest, StatusResponse, SuggestResponse, SyncEvent, UpdateAccount, UpdateLabelBody,
     UpdateWebhook,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Serialize};
+use std::sync::{OnceLock, RwLock};
 use thiserror::Error;
+
+static DEFAULT_BEARER_TOKEN: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+pub fn set_default_bearer_token(token: Option<String>) {
+    *DEFAULT_BEARER_TOKEN
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .expect("bearer token lock") = token;
+}
+
+fn default_bearer_token() -> Option<String> {
+    DEFAULT_BEARER_TOKEN
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .expect("bearer token lock")
+        .clone()
+}
 
 pub type Result<T> = std::result::Result<T, EmailClientError>;
 
@@ -29,6 +48,7 @@ pub enum EmailClientError {
 pub struct EmailClient {
     base_url: Url,
     http: reqwest::Client,
+    bearer_token: Option<String>,
 }
 
 impl EmailClient {
@@ -36,6 +56,7 @@ impl EmailClient {
         Ok(Self {
             base_url: Url::parse(base_url.as_ref())?,
             http: reqwest::Client::new(),
+            bearer_token: default_bearer_token(),
         })
     }
 
@@ -43,7 +64,56 @@ impl EmailClient {
         Ok(Self {
             base_url: Url::parse(base_url.as_ref())?,
             http,
+            bearer_token: default_bearer_token(),
         })
+    }
+
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(token.into());
+        self
+    }
+
+    pub fn bearer_token(&self) -> Option<&str> {
+        self.bearer_token.as_deref()
+    }
+
+    pub async fn login(&self, username: &str, password: &str) -> Result<AuthSession> {
+        self.auth_session(
+            Method::POST,
+            "app-auth/login",
+            &AuthCredentials {
+                username: username.to_string(),
+                password: password.to_string(),
+                client: AuthClientKind::Bearer,
+            },
+        )
+        .await
+    }
+
+    pub async fn bootstrap(&self, username: &str, password: &str) -> Result<AuthSession> {
+        self.auth_session(
+            Method::POST,
+            "app-auth/bootstrap",
+            &AuthCredentials {
+                username: username.to_string(),
+                password: password.to_string(),
+                client: AuthClientKind::Bearer,
+            },
+        )
+        .await
+    }
+
+    pub async fn identity(&self) -> Result<AuthIdentity> {
+        self.get("app-auth/me", &[]).await
+    }
+
+    pub async fn refresh_session(&self) -> Result<AuthSession> {
+        self.auth_session(Method::POST, "app-auth/refresh", &serde_json::json!({}))
+            .await
+    }
+
+    pub async fn logout(&self) -> Result<StatusResponse> {
+        self.request(Method::POST, "app-auth/logout").await
     }
 
     pub fn endpoint_url(&self, path: &str) -> Url {
@@ -204,7 +274,7 @@ impl EmailClient {
             .await
     }
 
-    pub async fn bulk_messages(&self, body: &BulkRequest) -> Result<serde_json::Value> {
+    pub async fn bulk_messages(&self, body: &BulkRequest) -> Result<BulkResponse> {
         self.json(Method::POST, "messages/bulk", body).await
     }
 
@@ -389,7 +459,10 @@ impl EmailClient {
     }
 
     pub async fn open_sync_events(&self) -> Result<reqwest::Response> {
-        let response = self.http.get(self.sync_events_url()).send().await?;
+        let response = self
+            .authorized(self.http.get(self.sync_events_url()))
+            .send()
+            .await?;
         if response.status().is_success() {
             Ok(response)
         } else {
@@ -399,14 +472,13 @@ impl EmailClient {
 
     async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
         let url = self.endpoint_url_with_query(path, query);
-        let response = self.http.get(url).send().await?;
+        let response = self.authorized(self.http.get(url)).send().await?;
         decode(response).await
     }
 
     async fn request<T: DeserializeOwned>(&self, method: Method, path: &str) -> Result<T> {
         let response = self
-            .http
-            .request(method, self.endpoint_url(path))
+            .authorized(self.http.request(method, self.endpoint_url(path)))
             .send()
             .await?;
         decode(response).await
@@ -419,8 +491,7 @@ impl EmailClient {
         body: &impl Serialize,
     ) -> Result<T> {
         let response = self
-            .http
-            .request(method, self.endpoint_url(path))
+            .authorized(self.http.request(method, self.endpoint_url(path)))
             .json(body)
             .send()
             .await?;
@@ -429,8 +500,7 @@ impl EmailClient {
 
     async fn json_empty(&self, method: Method, path: &str, body: &impl Serialize) -> Result<()> {
         let response = self
-            .http
-            .request(method, self.endpoint_url(path))
+            .authorized(self.http.request(method, self.endpoint_url(path)))
             .json(body)
             .send()
             .await?;
@@ -443,8 +513,7 @@ impl EmailClient {
 
     async fn empty(&self, method: Method, path: &str) -> Result<()> {
         let response = self
-            .http
-            .request(method, self.endpoint_url(path))
+            .authorized(self.http.request(method, self.endpoint_url(path)))
             .send()
             .await?;
         if response.status().is_success() {
@@ -455,7 +524,10 @@ impl EmailClient {
     }
 
     async fn bytes(&self, path: &str) -> Result<Vec<u8>> {
-        let response = self.http.get(self.endpoint_url(path)).send().await?;
+        let response = self
+            .authorized(self.http.get(self.endpoint_url(path)))
+            .send()
+            .await?;
         let status = response.status();
         let bytes = response.bytes().await?;
         if status.is_success() {
@@ -463,6 +535,22 @@ impl EmailClient {
         } else {
             Err(api_error(status, bytes))
         }
+    }
+
+    fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.bearer_token.as_deref() {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    }
+
+    async fn auth_session(
+        &self,
+        method: Method,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Result<AuthSession> {
+        self.json(method, path, body).await
     }
 }
 
@@ -576,6 +664,33 @@ mod tests {
             url.as_str(),
             "http://localhost:8585/root/api/v1/search?q=hello+world&account_id=acc%2F1"
         );
+    }
+
+    #[test]
+    fn bearer_token_is_attached_to_every_request_builder() {
+        let client = EmailClient::new("https://mail.example.test")
+            .unwrap()
+            .with_bearer_token("test-token");
+        let request = client
+            .authorized(client.http.get(client.endpoint_url("accounts")))
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer test-token"
+        );
+    }
+
+    #[test]
+    fn unauthenticated_client_does_not_invent_an_authorization_header() {
+        let client = EmailClient::new("https://mail.example.test").unwrap();
+        let request = client
+            .authorized(client.http.get(client.endpoint_url("accounts")))
+            .build()
+            .unwrap();
+        assert!(!request
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
     }
 
     #[test]

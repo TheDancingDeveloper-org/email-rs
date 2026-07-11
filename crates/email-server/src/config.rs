@@ -7,6 +7,8 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub frontend_dist: String,
+    pub public_url: Option<String>,
+    pub allow_insecure_http: bool,
 }
 
 impl Config {
@@ -67,12 +69,34 @@ impl Config {
                 .unwrap_or(8585),
             database_url,
             frontend_dist,
+            public_url: env::var("EMAIL_RS_PUBLIC_URL").ok(),
+            allow_insecure_http: env_flag("EMAIL_RS_ALLOW_INSECURE_HTTP"),
         }
     }
 
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
+
+    pub fn validate_security(&self) -> anyhow::Result<()> {
+        let loopback = matches!(self.host.as_str(), "127.0.0.1" | "::1" | "localhost");
+        let public_https = self
+            .public_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("https://"));
+        if !loopback && !public_https && !self.allow_insecure_http {
+            anyhow::bail!(
+                "non-loopback deployments require EMAIL_RS_PUBLIC_URL=https://...; set EMAIL_RS_ALLOW_INSECURE_HTTP=true only for explicit development"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
 fn exe_dir() -> PathBuf {

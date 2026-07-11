@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS folders (
     unread_count INTEGER NOT NULL DEFAULT 0,
     total_count  INTEGER NOT NULL DEFAULT 0,
     synced_at   TEXT,
+    uid_validity INTEGER NOT NULL DEFAULT 0,
     UNIQUE(account_id, full_path)
 );
 
@@ -28,7 +29,8 @@ CREATE TABLE IF NOT EXISTS messages (
     account_id      TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     folder_id       TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
     uid             INTEGER NOT NULL,
-    message_id      TEXT UNIQUE,
+    uid_validity    INTEGER NOT NULL DEFAULT 0,
+    message_id      TEXT,
     thread_id       TEXT,
     subject         TEXT,
     from_name       TEXT,
@@ -41,12 +43,14 @@ CREATE TABLE IF NOT EXISTS messages (
     is_draft        BOOLEAN NOT NULL DEFAULT 0,
     has_attachments BOOLEAN NOT NULL DEFAULT 0,
     preview         TEXT,
-    synced_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    synced_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(folder_id, uid_validity, uid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder_id);
 CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account_id);
 CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_rfc_message_id ON messages(message_id);
 
 CREATE TABLE IF NOT EXISTS message_bodies (
     message_id   TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
@@ -61,8 +65,11 @@ CREATE TABLE IF NOT EXISTS attachments (
     message_id   TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     filename     TEXT NOT NULL,
     content_type TEXT NOT NULL,
+    part_id      TEXT NOT NULL,
+    content_id   TEXT,
     size_bytes   INTEGER NOT NULL DEFAULT 0,
-    content      BLOB
+    content      BLOB,
+    UNIQUE(message_id, part_id)
 );
 
 CREATE TABLE IF NOT EXISTS calendar_events (

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod app;
 pub mod oauth2;
 
 use serde::{Deserialize, Serialize};

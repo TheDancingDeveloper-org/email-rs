@@ -46,10 +46,10 @@
       <ComponentGroupRef Id="Shortcuts"/>
     </Feature>
 
-    <!-- Server binary -->
+    <!-- Native Fluent desktop binary -->
     <ComponentGroup Id="Server">
       <Component Directory="INSTALLFOLDER" Id="EmailServerExe">
-        <File Id="EmailServerExeFile" Source="$(var.StagingDir)\email-server.exe" KeyPath="yes"/>
+        <File Id="EmailServerExeFile" Source="$(var.StagingDir)\email-desktop-fluent.exe" KeyPath="yes"/>
       </Component>
     </ComponentGroup>
 
@@ -59,7 +59,7 @@
         <Shortcut Id="AppShortcut"
                   Name="email-rs"
                   Description="Self-hosted email and calendar client"
-                  Target="[INSTALLFOLDER]email-server.exe"
+                  Target="[INSTALLFOLDER]email-desktop-fluent.exe"
                   WorkingDirectory="INSTALLFOLDER"/>
         <RemoveFolder Id="RemoveAppMenuDir" On="uninstall"/>
         <RegistryValue Root="HKCU" Key="Software\sprooty\email-rs" Name="Shortcut"

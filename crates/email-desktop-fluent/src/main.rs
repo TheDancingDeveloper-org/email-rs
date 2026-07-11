@@ -11,7 +11,7 @@ use anyhow::{anyhow, Context as _, Result};
 use chrono::{
     Datelike as _, Duration as ChronoDuration, Local, NaiveDate, TimeZone as _, Timelike as _, Utc,
 };
-use email_client::EmailClient;
+use email_client::{set_default_bearer_token, EmailClient};
 use email_server::{run_server, Config};
 use email_types::{
     Account, AccountSettings, ActionInput, BulkAction, BulkRequest, CalendarEvent,
@@ -64,6 +64,7 @@ const APP_ICON_PATH: &str = "icons/email-rs.svg";
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const NATIVE_SETTINGS_ENV: &str = "EMAIL_RS_FLUENT_SETTINGS_PATH";
 const NATIVE_SETTINGS_FILE: &str = "fluentgui-settings.conf";
+const NATIVE_AUTH_FILE: &str = "fluentgui-session.token";
 const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
 const DEFAULT_SIDEBAR_WIDTH: u16 = 280;
 const MIN_SIDEBAR_WIDTH: u16 = 80;
@@ -146,8 +147,11 @@ fn main() -> Result<()> {
     wait_for_server(&bind_addr, &server_errors)?;
 
     let base_url = format!("http://localhost:{port}");
+    let stored_token = load_native_auth_token();
+    set_default_bearer_token(stored_token.clone());
     let mut initial_state = NativeAppState {
         api_base_url: base_url.clone(),
+        auth_required: stored_token.is_none(),
         ..NativeAppState::default()
     };
     let preferences = load_native_preferences();
@@ -632,6 +636,31 @@ fn save_native_preferences(preferences: &NativePreferences) -> Result<()> {
     write_native_preferences(&native_settings_path(), preferences)
 }
 
+fn native_auth_path() -> PathBuf {
+    native_config_dir().join(NATIVE_AUTH_FILE)
+}
+
+fn load_native_auth_token() -> Option<String> {
+    std::fs::read_to_string(native_auth_path())
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn save_native_auth_token(token: &str) -> Result<()> {
+    let path = native_auth_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_file(&path);
+    write_private_attachment(&path, token.as_bytes())
+}
+
+fn clear_native_auth_token() {
+    let _ = std::fs::remove_file(native_auth_path());
+    set_default_bearer_token(None);
+}
+
 fn write_native_preferences(path: &Path, preferences: &NativePreferences) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -957,6 +986,7 @@ enum NativeSyncUpdate {
 #[allow(dead_code)]
 struct NativeAppState {
     api_base_url: String,
+    auth_required: bool,
     theme: ThemeMode,
     density: DensityTokens,
     layout: NativeLayoutPreferences,
@@ -973,6 +1003,7 @@ struct NativeAppState {
     attachment_busy: bool,
     attachment_notice: Option<String>,
     attachment_error: Option<String>,
+    pending_unsafe_attachment: Option<String>,
     show_external_images: bool,
     selected_event: Option<String>,
     calendar_week_start: NaiveDate,
@@ -1000,6 +1031,7 @@ impl Default for NativeAppState {
     fn default() -> Self {
         Self {
             api_base_url: String::new(),
+            auth_required: true,
             theme: ThemeMode::Dark,
             density: DensityTokens::default(),
             layout: NativeLayoutPreferences::default(),
@@ -1016,6 +1048,7 @@ impl Default for NativeAppState {
             attachment_busy: false,
             attachment_notice: None,
             attachment_error: None,
+            pending_unsafe_attachment: None,
             show_external_images: false,
             selected_event: None,
             calendar_week_start: current_calendar_week_start(),
@@ -1041,6 +1074,178 @@ impl Default for NativeAppState {
     }
 }
 
+struct NativeAuthModal {
+    state: Entity<NativeAppState>,
+    username: Entity<TextInput>,
+    password: Entity<TextInput>,
+    setup: bool,
+    busy: bool,
+    error: Option<String>,
+}
+
+impl NativeAuthModal {
+    fn new(cx: &mut Context<Self>, state: Entity<NativeAppState>) -> Self {
+        Self {
+            state,
+            username: cx.new(|_| TextInput::new().placeholder("Username")),
+            password: cx.new(|_| TextInput::new().placeholder("Password").masked(true)),
+            setup: false,
+            busy: false,
+            error: None,
+        }
+    }
+}
+
+impl Render for NativeAuthModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.state.read(cx).auth_required {
+            return div();
+        }
+        let colors = cx.theme().colors.clone();
+        let modal = cx.entity();
+        let state = self.state.clone();
+        div()
+            .absolute()
+            .inset_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(colors.surface_dim)
+            .child(
+                div()
+                    .w(px(420.0))
+                    .p(px(24.0))
+                    .rounded(px(8.0))
+                    .bg(colors.surface)
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .text_size(px(22.0))
+                            .font_weight(FontWeight::BOLD)
+                            .child(if self.setup {
+                                "Set up email-rs"
+                            } else {
+                                "Sign in to email-rs"
+                            }),
+                    )
+                    .child(self.username.clone())
+                    .child(self.password.clone())
+                    .when_some(self.error.clone(), |card, error| {
+                        card.child(div().text_color(colors.status_error).child(error))
+                    })
+                    .child(
+                        Button::new("native-auth-submit")
+                            .label(if self.busy {
+                                "Working..."
+                            } else if self.setup {
+                                "Create user"
+                            } else {
+                                "Sign in"
+                            })
+                            .appearance(ButtonAppearance::Accent)
+                            .disabled(self.busy)
+                            .on_click(move |_, _, app_cx| {
+                                start_native_auth(&modal, &state, app_cx)
+                            }),
+                    )
+                    .child(
+                        Button::new("native-auth-toggle")
+                            .label(if self.setup {
+                                "I already have a user"
+                            } else {
+                                "First-run setup"
+                            })
+                            .appearance(ButtonAppearance::Subtle)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|modal, _, _, cx| {
+                                modal.setup = !modal.setup;
+                                modal.error = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+}
+
+fn start_native_auth(
+    modal: &Entity<NativeAuthModal>,
+    state: &Entity<NativeAppState>,
+    app_cx: &mut App,
+) {
+    let (username, password, setup) = modal.update(app_cx, |modal, cx| {
+        modal.busy = true;
+        modal.error = None;
+        cx.notify();
+        (
+            modal.username.read(cx).text().trim().to_string(),
+            modal.password.read(cx).text().to_string(),
+            modal.setup,
+        )
+    });
+    if username.is_empty() || password.is_empty() {
+        modal.update(app_cx, |modal, cx| {
+            modal.busy = false;
+            modal.error = Some("Username and password are required".into());
+            cx.notify();
+        });
+        return;
+    }
+    let (base_url, accounts_request, messages_request) = state.update(app_cx, |state, _| {
+        (
+            state.api_base_url.clone(),
+            state.accounts_resource.begin_load(),
+            state.messages_resource.begin_load(),
+        )
+    });
+    let task = app_cx.background_executor().spawn(async move {
+        let client = EmailClient::new(&base_url)?;
+        let session = if setup {
+            client.bootstrap(&username, &password).await?
+        } else {
+            client.login(&username, &password).await?
+        };
+        let token = session
+            .token
+            .ok_or_else(|| anyhow!("server did not return a bearer token"))?;
+        set_default_bearer_token(Some(token.clone()));
+        save_native_auth_token(&token)?;
+        let loaded = reload_accounts(base_url)?;
+        Ok::<_, anyhow::Error>(loaded)
+    });
+    let modal_entity = modal.clone();
+    let state_entity = state.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let _ = modal_entity.update(&mut async_cx, |modal, cx| {
+                    modal.busy = false;
+                    if let Err(error) = &result {
+                        modal.error = Some(error.to_string());
+                    }
+                    cx.notify();
+                });
+                if let Ok(loaded) = result {
+                    let _ = state_entity.update(&mut async_cx, |state, cx| {
+                        state.auth_required = false;
+                        apply_initial_account_load(
+                            state,
+                            accounts_request,
+                            messages_request,
+                            loaded,
+                        );
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+}
+
 struct EmailDesktopApp {
     state: Entity<NativeAppState>,
     workspace: Entity<Workspace>,
@@ -1050,6 +1255,7 @@ struct EmailDesktopApp {
     account_setup_modal: Entity<AccountSetupModal>,
     advanced_search_modal: Entity<AdvancedSearchModal>,
     settings_modal: Entity<SettingsModal>,
+    auth_modal: Entity<NativeAuthModal>,
     sync_updates: Receiver<NativeSyncUpdate>,
     last_window_width: f32,
 }
@@ -1081,6 +1287,10 @@ impl EmailDesktopApp {
         let settings_modal = cx.new({
             let state = state.clone();
             move |cx| SettingsModal::new(cx, state.clone())
+        });
+        let auth_modal = cx.new({
+            let state = state.clone();
+            move |cx| NativeAuthModal::new(cx, state.clone())
         });
         cx.spawn(
             |app: gpui::WeakEntity<Self>, async_cx: &mut gpui::AsyncApp| {
@@ -1119,6 +1329,7 @@ impl EmailDesktopApp {
             account_setup_modal,
             advanced_search_modal,
             settings_modal,
+            auth_modal,
             sync_updates,
             last_window_width: DEFAULT_WINDOW_WIDTH,
         }
@@ -1279,6 +1490,7 @@ impl Render for EmailDesktopApp {
             self.last_window_width = window_width.max(1.0);
         }
 
+        let auth_required = self.state.read(cx).auth_required;
         div()
             .id("email-desktop-fluent-root")
             .size_full()
@@ -1370,11 +1582,12 @@ impl Render for EmailDesktopApp {
                     cx.notify();
                 }),
             )
-            .child(self.workspace.clone())
+            .when(!auth_required, |root| root.child(self.workspace.clone()))
             .child(self.palette.clone())
             .child(self.account_setup_modal.clone())
             .child(self.advanced_search_modal.clone())
             .child(self.settings_modal.clone())
+            .child(self.auth_modal.clone())
     }
 }
 
@@ -4476,7 +4689,7 @@ fn settings_body(
             .min_h_0()
             .overflow_y_scroll()
             .p(px(18.0))
-            .child(settings_general_body(state, cx))
+            .child(settings_general_body(state_entity, state, cx))
             .into_any_element(),
         SettingsTab::Account(account_id) => div()
             .id("settings-body-account")
@@ -4518,7 +4731,11 @@ fn settings_body(
     }
 }
 
-fn settings_general_body(state: &NativeAppState, cx: &mut Context<SettingsModal>) -> gpui::Div {
+fn settings_general_body(
+    state_entity: &Entity<NativeAppState>,
+    state: &NativeAppState,
+    cx: &mut Context<SettingsModal>,
+) -> gpui::Div {
     let theme = cx.theme();
     let colors = theme.colors.clone();
     let typography = theme.typography;
@@ -4583,6 +4800,41 @@ fn settings_general_body(state: &NativeAppState, cx: &mut Context<SettingsModal>
                         .on_click(|_, _, app_cx| app_cx.dispatch_action(&IncreaseDensity)),
                 ),
         )
+        .child(settings_section_title("Session", cx))
+        .child(
+            Button::new("settings-logout")
+                .label("Log out")
+                .appearance(ButtonAppearance::Subtle)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    move |_, _, app_cx| start_native_logout(&state_entity, app_cx)
+                }),
+        )
+}
+
+fn start_native_logout(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let task = app_cx.background_executor().spawn(async move {
+        let _ = EmailClient::new(base_url)?.logout().await;
+        Ok::<_, anyhow::Error>(())
+    });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let _ = task.await;
+                clear_native_auth_token();
+                let _ = state_entity.update(&mut async_cx, |state, cx| {
+                    state.auth_required = true;
+                    state.accounts.clear();
+                    state.messages.clear();
+                    state.modals.settings_open = false;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
 }
 
 fn settings_account_body(
@@ -6443,6 +6695,26 @@ fn start_attachment_open(
     attachment: MessageAttachment,
     app_cx: &mut App,
 ) {
+    if attachment_requires_confirmation(&attachment) {
+        let confirmed = state_entity.update(app_cx, |state, cx| {
+            if state.pending_unsafe_attachment.as_deref() == Some(attachment.id.as_str()) {
+                state.pending_unsafe_attachment = None;
+                true
+            } else {
+                state.pending_unsafe_attachment = Some(attachment.id.clone());
+                state.attachment_notice = Some(format!(
+                    "{} may be unsafe. Click Open again to confirm.",
+                    attachment.filename
+                ));
+                state.attachment_error = None;
+                cx.notify();
+                false
+            }
+        });
+        if !confirmed {
+            return;
+        }
+    }
     start_attachment_action(
         state_entity,
         message_id,
@@ -6450,6 +6722,13 @@ fn start_attachment_open(
         AttachmentAction::Open,
         app_cx,
     );
+}
+
+fn attachment_requires_confirmation(attachment: &MessageAttachment) -> bool {
+    let content_type = attachment.content_type.to_ascii_lowercase();
+    !(content_type == "application/pdf"
+        || content_type == "text/plain"
+        || content_type.starts_with("image/"))
 }
 
 fn start_attachment_download(
@@ -6571,11 +6850,31 @@ fn save_attachment_to_dir(
 ) -> Result<SavedAttachment> {
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("create {}", directory.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("secure {}", directory.display()))?;
+    }
     let filename = safe_attachment_filename(&attachment.filename);
     let path = unique_attachment_path(&directory, &filename);
     let bytes = download_attachment_bytes(base_url, message_id, &attachment.id)?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+    write_private_attachment(&path, &bytes)?;
     Ok(SavedAttachment { path, filename })
+}
+
+fn write_private_attachment(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    std::io::Write::write_all(&mut file, bytes).with_context(|| format!("write {}", path.display()))
 }
 
 fn download_attachment_bytes(
@@ -7413,6 +7712,14 @@ fn reject_initial_account_load(
     }
 
     state.last_error = Some(message);
+    if state
+        .last_error
+        .as_deref()
+        .is_some_and(|message| message.contains("API error 401"))
+    {
+        state.auth_required = true;
+        clear_native_auth_token();
+    }
     true
 }
 
@@ -8921,8 +9228,9 @@ fn start_bulk_message_action(
                 let result = task.await;
                 if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
                     match result {
-                        Ok(loaded) => {
-                            apply_loaded_sync_refresh(state, request, loaded);
+                        Ok(outcome) => {
+                            apply_loaded_sync_refresh(state, request, outcome.loaded);
+                            state.last_error = outcome.warning;
                         }
                         Err(err) => {
                             reject_sync_refresh(state, request, err);
@@ -9100,22 +9408,39 @@ fn mutate_message_and_refresh(
     })
 }
 
+struct BulkRefreshOutcome {
+    loaded: LoadedSyncRefresh,
+    warning: Option<String>,
+}
+
 fn bulk_message_action_and_refresh(
     base_url: String,
     ids: Vec<String>,
     action: BulkAction,
     request: NativeSyncRefreshRequest,
-) -> Result<LoadedSyncRefresh> {
+) -> Result<BulkRefreshOutcome> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         let action_label = bulk_action_label(&action);
-        client
+        let response = client
             .bulk_messages(&BulkRequest { ids, action })
             .await
             .with_context(|| format!("bulk {action_label}"))?;
+        let warning = (response.failed > 0).then(|| {
+            let details = response
+                .results
+                .iter()
+                .filter_map(|result| result.error.as_deref())
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "Bulk {action_label}: {} succeeded, {} failed: {details}",
+                response.processed, response.failed
+            )
+        });
 
         let tree = load_account_tree(&client)
             .await
@@ -9130,11 +9455,14 @@ fn bulk_message_action_and_refresh(
             None
         };
 
-        Ok(LoadedSyncRefresh {
-            accounts: tree.accounts,
-            folders_by_account: tree.folders_by_account,
-            labels: tree.labels,
-            messages,
+        Ok(BulkRefreshOutcome {
+            loaded: LoadedSyncRefresh {
+                accounts: tree.accounts,
+                folders_by_account: tree.folders_by_account,
+                labels: tree.labels,
+                messages,
+            },
+            warning,
         })
     })
 }
@@ -10645,6 +10973,41 @@ mod tests {
         );
         assert_eq!(safe_attachment_filename("..."), "attachment");
         assert_eq!(safe_attachment_filename(" report.pdf "), "report.pdf");
+    }
+
+    #[test]
+    fn attachment_open_requires_confirmation_for_unsafe_content() {
+        let mut attachment = MessageAttachment {
+            id: "a".into(),
+            message_id: "m".into(),
+            filename: "invoice.pdf".into(),
+            content_type: "application/pdf".into(),
+            size_bytes: 1,
+        };
+        assert!(!attachment_requires_confirmation(&attachment));
+        attachment.filename = "run.exe".into();
+        attachment.content_type = "application/x-msdownload".into();
+        assert!(attachment_requires_confirmation(&attachment));
+        attachment.filename = "page.html".into();
+        attachment.content_type = "text/html".into();
+        assert!(attachment_requires_confirmation(&attachment));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_attachments_are_user_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = std::env::temp_dir().join(format!(
+            "email-private-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        write_private_attachment(&path, b"secret").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -12175,6 +12538,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn forward_request_requires_a_recipient() {
         let mut state = NativeAppState::default();
         state.selected_message = Some("message".to_string());

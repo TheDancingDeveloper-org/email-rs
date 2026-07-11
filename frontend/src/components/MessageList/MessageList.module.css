@@ -72,6 +72,14 @@
   flex-shrink: 0;
 }
 
+.bulkError {
+  padding: 8px 12px;
+  color: var(--danger, #b42318);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
 .bulkCount {
   font-size: 13px;
   font-weight: 500;

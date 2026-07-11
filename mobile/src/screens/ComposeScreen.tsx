@@ -6,11 +6,13 @@ import { api } from '../api/client';
 interface Contact { name: string | null; email: string; }
 
 export function ComposeScreen() {
-  const { closeCompose } = useAppStore();
+  const { closeCompose, accounts } = useAppStore();
+  const [accountId, setAccountId] = useState(() => accounts[0]?.id ?? '');
   const [to, setTo] = useState('');
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const [suggestions, setSuggestions] = useState<Contact[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -41,17 +43,26 @@ export function ComposeScreen() {
   };
 
   const handleSend = async () => {
-    if (!to.trim() || sending) return;
+    if (!accountId || !to.trim() || sending) return;
     setSending(true);
+    setSendError(null);
     try {
-      await fetch('/api/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to, subject, body }),
+      await api.send({
+        accountId,
+        to: to.split(/[,;]/).map((value) => value.trim()).filter(Boolean),
+        cc: [],
+        bcc: [],
+        subject,
+        textBody: body || null,
+        htmlBody: null,
+        inReplyTo: null,
       });
-    } catch { /* ignore */ }
-    setSending(false);
-    closeCompose();
+      closeCompose();
+    } catch (cause) {
+      setSendError(cause instanceof Error ? cause.message : 'Unable to send message');
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -69,6 +80,13 @@ export function ComposeScreen() {
       </header>
 
       <div className={styles.fields}>
+        <div className={styles.field}>
+          <label className={styles.fieldLabel}>From</label>
+          <select className={styles.fieldInput} value={accountId} onChange={(event) => setAccountId(event.target.value)}>
+            {accounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.email}</option>)}
+          </select>
+        </div>
+        <div className={styles.divider} />
         <div className={styles.toFieldWrap}>
           <div className={styles.field}>
             <label className={styles.fieldLabel}>To</label>
@@ -115,6 +133,7 @@ export function ComposeScreen() {
           onChange={(e) => setBody(e.target.value)}
           placeholder="Write your message…"
         />
+        {sendError && <div role="alert" style={{ padding: '10px 16px', color: 'var(--danger)', fontSize: 13 }}>{sendError}</div>}
       </div>
     </div>
   );

@@ -11,7 +11,8 @@ use axum::{
     Json,
 };
 use email_types::{
-    BulkAction, BulkRequest, Message as MessageRow, MessageAttachment, PatchMessageRequest,
+    BulkAction, BulkRequest, BulkResponse, BulkResult, Message as MessageRow, MessageAttachment,
+    PatchMessageRequest,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -21,141 +22,43 @@ use chrono;
 pub async fn bulk_messages(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BulkRequest>,
-) -> crate::error::Result<Json<serde_json::Value>> {
+) -> crate::error::Result<Json<BulkResponse>> {
     let mut processed = 0usize;
+    let mut results = Vec::with_capacity(req.ids.len());
     let mut affected_folders = BTreeSet::new();
 
     for id in &req.ids {
-        match req.action {
-            BulkAction::MarkRead => {
-                if let Some(folder_id) = message_folder_id(&state.pool, id).await? {
-                    affected_folders.insert(folder_id);
-                }
-                sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
-                    .bind(id)
-                    .execute(&state.pool)
-                    .await?;
-
-                if let Ok(Some((info, provider))) = load_provider(&state, id).await {
-                    let uid = info.uid as u32;
-                    let folder = info.full_path.clone();
-                    let p = provider.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = p.mark_seen(&folder, uid).await {
-                            tracing::warn!("bulk mark_seen failed: {}", e);
-                        }
-                    });
-                }
+        match bulk_message(&state, id, &req.action, &mut affected_folders).await {
+            Ok(()) => {
+                processed += 1;
+                results.push(BulkResult {
+                    id: id.clone(),
+                    success: true,
+                    error: None,
+                });
             }
-            BulkAction::MarkUnread => {
-                if let Some(folder_id) = message_folder_id(&state.pool, id).await? {
-                    affected_folders.insert(folder_id);
-                }
-                sqlx::query("UPDATE messages SET is_read = 0 WHERE id = ?")
-                    .bind(id)
-                    .execute(&state.pool)
-                    .await?;
-
-                if let Ok(Some((info, provider))) = load_provider(&state, id).await {
-                    let uid = info.uid as u32;
-                    let folder = info.full_path.clone();
-                    let p = provider.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = p.mark_unseen(&folder, uid).await {
-                            tracing::warn!("bulk mark_unseen failed: {}", e);
-                        }
-                    });
-                }
-            }
-            BulkAction::Delete => {
-                if let Some(folder_id) = message_folder_id(&state.pool, id).await? {
-                    affected_folders.insert(folder_id);
-                }
-                if let Ok(Some((info, provider))) = load_provider(&state, id).await {
-                    let uid = info.uid as u32;
-                    let folder = info.full_path.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = provider.delete_message(&folder, uid).await {
-                            tracing::warn!("bulk IMAP delete failed: {}", e);
-                        }
-                    });
-                }
-                sqlx::query("DELETE FROM messages WHERE id = ?")
-                    .bind(id)
-                    .execute(&state.pool)
-                    .await?;
-            }
-            BulkAction::Archive => {
-                let source_folder_id = message_folder_id(&state.pool, id).await?;
-                let archive_folder: Option<String> = sqlx::query_scalar(
-                    r#"SELECT f.full_path FROM folders f
-                       JOIN messages m ON m.account_id = f.account_id
-                       WHERE m.id = ? AND f.special_use = 'archive'
-                       LIMIT 1"#,
-                )
-                .bind(id)
-                .fetch_optional(&state.pool)
-                .await?;
-
-                let archive_full_path =
-                    archive_folder.unwrap_or_else(|| "[Gmail]/All Mail".to_string());
-
-                let archive_folder_id: Option<String> = sqlx::query_scalar(
-                    r#"SELECT f.id FROM folders f
-                       JOIN messages m ON m.account_id = f.account_id
-                       WHERE m.id = ? AND f.special_use = 'archive'
-                       LIMIT 1"#,
-                )
-                .bind(id)
-                .fetch_optional(&state.pool)
-                .await?;
-
-                if let Ok(Some((info, provider))) = load_provider(&state, id).await {
-                    let uid = info.uid as u32;
-                    let src = info.full_path.clone();
-                    let dest = archive_full_path.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = provider.move_message(&src, uid, &dest).await {
-                            tracing::warn!("bulk IMAP archive failed: {}", e);
-                        }
-                    });
-                }
-
-                if let Some(folder_id) = archive_folder_id {
-                    sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
-                        .bind(&folder_id)
-                        .bind(id)
-                        .execute(&state.pool)
-                        .await?;
-                    if let Some(source_folder_id) = source_folder_id {
-                        affected_folders.insert(source_folder_id);
-                    }
-                    affected_folders.insert(folder_id);
-                } else {
-                    sqlx::query("DELETE FROM messages WHERE id = ?")
-                        .bind(id)
-                        .execute(&state.pool)
-                        .await?;
-                    if let Some(source_folder_id) = source_folder_id {
-                        affected_folders.insert(source_folder_id);
-                    }
-                }
-            }
+            Err(error) => results.push(BulkResult {
+                id: id.clone(),
+                success: false,
+                error: Some(error.to_string()),
+            }),
         }
-        processed += 1;
     }
 
     for folder_id in affected_folders {
         refresh_folder_counts(&state.pool, &folder_id).await?;
     }
 
-    Ok(Json(serde_json::json!({ "processed": processed })))
+    Ok(Json(BulkResponse {
+        processed,
+        failed: req.ids.len() - processed,
+        results,
+    }))
 }
 
-use crate::auth::oauth2::{OAuthConfig, StoredToken};
 use crate::error::{AppError, Result};
-use crate::providers::gmail::GmailProvider;
-use crate::providers::MailProvider;
+use crate::providers::factory::provider_for_message;
+use crate::providers::{MailProvider, ProviderAttachment};
 use crate::state::AppState;
 
 async fn message_folder_id(pool: &sqlx::SqlitePool, message_id: &str) -> Result<Option<String>> {
@@ -182,63 +85,93 @@ async fn refresh_folder_counts(pool: &sqlx::SqlitePool, folder_id: &str) -> Resu
     Ok(())
 }
 
-#[derive(Debug, sqlx::FromRow)]
-struct MessageActionInfo {
-    uid: i64,
-    full_path: String,
-    email: String,
-    provider_type: String,
-    oauth_token_json: Option<String>,
-}
-
 async fn load_provider(
     state: &AppState,
     message_id: &str,
-) -> Result<Option<(MessageActionInfo, GmailProvider)>> {
-    let info = sqlx::query_as::<_, MessageActionInfo>(
-        r#"SELECT m.uid, f.full_path, a.email, a.provider_type, a.oauth_token_json
-           FROM messages m
-           JOIN folders f ON m.folder_id = f.id
-           JOIN accounts a ON m.account_id = a.id
-           WHERE m.id = ?"#,
+) -> Result<(String, u32, Arc<dyn MailProvider>)> {
+    provider_for_message(&state.pool, message_id).await
+}
+
+async fn delete_remote(state: &AppState, message_id: &str) -> Result<()> {
+    let (source, uid, provider) = load_provider(state, message_id).await?;
+    let trash: Option<String> = sqlx::query_scalar(
+        r#"SELECT f.full_path FROM folders f
+           JOIN messages m ON m.account_id = f.account_id
+           WHERE m.id = ? AND f.special_use = 'trash' LIMIT 1"#,
     )
     .bind(message_id)
     .fetch_optional(&state.pool)
     .await?;
-
-    let Some(info) = info else { return Ok(None) };
-    if info.provider_type != "gmail" {
-        return Ok(None);
+    match trash {
+        Some(destination) if destination != source => {
+            provider.move_message(&source, uid, &destination).await
+        }
+        _ => provider.delete_message(&source, uid).await,
     }
+}
 
-    let token_json = info
-        .oauth_token_json
-        .as_deref()
-        .ok_or_else(|| AppError::Auth("account has no OAuth token".to_string()))?;
-    let mut stored: StoredToken = serde_json::from_str(token_json)
-        .map_err(|e| AppError::Auth(format!("parse token: {}", e)))?;
-    if stored.is_expired() {
-        let client_id = std::env::var("GOOGLE_CLIENT_ID")
-            .map_err(|_| AppError::Auth("GOOGLE_CLIENT_ID not set".to_string()))?;
-        let client_secret = std::env::var("GOOGLE_CLIENT_SECRET")
-            .map_err(|_| AppError::Auth("GOOGLE_CLIENT_SECRET not set".to_string()))?;
-        let redirect_uri = std::env::var("GOOGLE_REDIRECT_URI")
-            .unwrap_or_else(|_| "http://localhost:3000/api/v1/auth/gmail/callback".to_string());
-        let oauth = OAuthConfig::gmail(client_id, client_secret, redirect_uri);
-        let refresh = stored
-            .refresh_token
-            .as_deref()
-            .ok_or_else(|| AppError::Auth("no refresh token".to_string()))?;
-        stored = StoredToken::from_token_response(oauth.refresh_token(refresh).await?);
+async fn bulk_message(
+    state: &AppState,
+    id: &str,
+    action: &BulkAction,
+    affected_folders: &mut BTreeSet<String>,
+) -> Result<()> {
+    let source_folder_id = message_folder_id(&state.pool, id).await?;
+    match action {
+        BulkAction::MarkRead | BulkAction::MarkUnread => {
+            let (folder, uid, provider) = load_provider(state, id).await?;
+            let is_read = matches!(action, BulkAction::MarkRead);
+            if is_read {
+                provider.mark_seen(&folder, uid).await?;
+            } else {
+                provider.mark_unseen(&folder, uid).await?;
+            }
+            sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
+                .bind(is_read)
+                .bind(id)
+                .execute(&state.pool)
+                .await?;
+        }
+        BulkAction::Delete => {
+            delete_remote(state, id).await?;
+            sqlx::query("DELETE FROM messages WHERE id = ?")
+                .bind(id)
+                .execute(&state.pool)
+                .await?;
+        }
+        BulkAction::Archive => {
+            let archive_folder: Option<String> = sqlx::query_scalar(
+                r#"SELECT f.full_path FROM folders f
+                   JOIN messages m ON m.account_id = f.account_id
+                   WHERE m.id = ? AND f.special_use = 'archive'
+                   LIMIT 1"#,
+            )
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?;
+            let (source, uid, provider) = load_provider(state, id).await?;
+            let destination = match archive_folder {
+                Some(folder) => folder,
+                None if provider.provider_id() == "gmail" => "[Gmail]/All Mail".to_string(),
+                None => {
+                    return Err(AppError::Provider(
+                        "account has no archive folder".to_string(),
+                    ))
+                }
+            };
+            provider.move_message(&source, uid, &destination).await?;
+            // IMAP MOVE assigns a new destination UID. Remove the stale source
+            // occurrence and let the next sync discover the destination.
+            sqlx::query("DELETE FROM messages WHERE id = ?")
+                .bind(id)
+                .execute(&state.pool)
+                .await?;
+        }
     }
-
-    let account_id: String = sqlx::query_scalar("SELECT account_id FROM messages WHERE id = ?")
-        .bind(message_id)
-        .fetch_one(&state.pool)
-        .await?;
-
-    let provider = GmailProvider::new(account_id, info.email.clone(), stored.access_token.clone());
-    Ok(Some((info, provider)))
+    if let Some(folder_id) = source_folder_id {
+        affected_folders.insert(folder_id);
+    }
+    Ok(())
 }
 
 pub async fn patch_message(
@@ -247,6 +180,12 @@ pub async fn patch_message(
     Json(req): Json<PatchMessageRequest>,
 ) -> Result<Json<serde_json::Value>> {
     if let Some(is_read) = req.is_read {
+        let (folder, uid, provider) = load_provider(&state, &message_id).await?;
+        if is_read {
+            provider.mark_seen(&folder, uid).await?;
+        } else {
+            provider.mark_unseen(&folder, uid).await?;
+        }
         let folder_id = message_folder_id(&state.pool, &message_id).await?;
         sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
             .bind(is_read)
@@ -256,40 +195,16 @@ pub async fn patch_message(
         if let Some(folder_id) = folder_id {
             refresh_folder_counts(&state.pool, &folder_id).await?;
         }
-
-        if let Ok(Some((info, provider))) = load_provider(&state, &message_id).await {
-            let uid = info.uid as u32;
-            let folder = info.full_path.clone();
-            let p = provider.clone();
-            tokio::spawn(async move {
-                let result = if is_read {
-                    p.mark_seen(&folder, uid).await
-                } else {
-                    p.mark_unseen(&folder, uid).await
-                };
-                if let Err(e) = result {
-                    tracing::warn!("mark_seen/unseen failed: {}", e);
-                }
-            });
-        }
     }
 
     if let Some(is_flagged) = req.is_flagged {
+        let (folder, uid, provider) = load_provider(&state, &message_id).await?;
+        provider.set_flagged(&folder, uid, is_flagged).await?;
         sqlx::query("UPDATE messages SET is_flagged = ? WHERE id = ?")
             .bind(is_flagged)
             .bind(&message_id)
             .execute(&state.pool)
             .await?;
-
-        if let Ok(Some((info, provider))) = load_provider(&state, &message_id).await {
-            let uid = info.uid as u32;
-            let folder = info.full_path.clone();
-            tokio::spawn(async move {
-                if let Err(e) = provider.set_flagged(&folder, uid, is_flagged).await {
-                    tracing::warn!("set_flagged failed: {}", e);
-                }
-            });
-        }
     }
 
     Ok(Json(serde_json::json!({ "status": "ok" })))
@@ -301,16 +216,7 @@ pub async fn delete_message(
 ) -> Result<Json<serde_json::Value>> {
     let folder_id = message_folder_id(&state.pool, &message_id).await?;
 
-    // Fire IMAP delete in background.
-    if let Ok(Some((info, provider))) = load_provider(&state, &message_id).await {
-        let uid = info.uid as u32;
-        let folder = info.full_path.clone();
-        tokio::spawn(async move {
-            if let Err(e) = provider.delete_message(&folder, uid).await {
-                tracing::warn!("IMAP delete_message failed: {}", e);
-            }
-        });
-    }
+    delete_remote(&state, &message_id).await?;
 
     // Remove from local DB immediately.
     sqlx::query("DELETE FROM messages WHERE id = ?")
@@ -341,48 +247,23 @@ pub async fn archive_message(
     .fetch_optional(&state.pool)
     .await?;
 
-    let archive_full_path = archive_folder.unwrap_or_else(|| "[Gmail]/All Mail".to_string());
-
-    // Find the new folder_id for the archive folder in the DB.
-    let archive_folder_id: Option<String> = sqlx::query_scalar(
-        r#"SELECT f.id FROM folders f
-           JOIN messages m ON m.account_id = f.account_id
-           WHERE m.id = ? AND f.special_use = 'archive'
-           LIMIT 1"#,
-    )
-    .bind(&message_id)
-    .fetch_optional(&state.pool)
-    .await?;
-
-    if let Ok(Some((info, provider))) = load_provider(&state, &message_id).await {
-        let uid = info.uid as u32;
-        let src_folder = info.full_path.clone();
-        let dest = archive_full_path.clone();
-        tokio::spawn(async move {
-            if let Err(e) = provider.move_message(&src_folder, uid, &dest).await {
-                tracing::warn!("IMAP archive failed: {}", e);
-            }
-        });
-    }
-
-    if let Some(folder_id) = archive_folder_id {
-        sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
-            .bind(&folder_id)
-            .bind(&message_id)
-            .execute(&state.pool)
-            .await?;
-        if let Some(source_folder_id) = source_folder_id {
-            refresh_folder_counts(&state.pool, &source_folder_id).await?;
+    let (source, uid, provider) = load_provider(&state, &message_id).await?;
+    let destination = match archive_folder {
+        Some(folder) => folder,
+        None if provider.provider_id() == "gmail" => "[Gmail]/All Mail".to_string(),
+        None => {
+            return Err(AppError::Provider(
+                "account has no archive folder".to_string(),
+            ))
         }
-        refresh_folder_counts(&state.pool, &folder_id).await?;
-    } else {
-        sqlx::query("DELETE FROM messages WHERE id = ?")
-            .bind(&message_id)
-            .execute(&state.pool)
-            .await?;
-        if let Some(source_folder_id) = source_folder_id {
-            refresh_folder_counts(&state.pool, &source_folder_id).await?;
-        }
+    };
+    provider.move_message(&source, uid, &destination).await?;
+    sqlx::query("DELETE FROM messages WHERE id = ?")
+        .bind(&message_id)
+        .execute(&state.pool)
+        .await?;
+    if let Some(source_folder_id) = source_folder_id {
+        refresh_folder_counts(&state.pool, &source_folder_id).await?;
     }
 
     Ok(Json(serde_json::json!({ "status": "archived" })))
@@ -403,7 +284,7 @@ pub async fn download_attachment(
     Path((message_id, attachment_id)): Path<(String, String)>,
 ) -> Result<Response> {
     let row = sqlx::query_as::<_, AttachmentContentRow>(
-        r#"SELECT filename, content_type, content
+        r#"SELECT filename, content_type, content, part_id, size_bytes
            FROM attachments
            WHERE id = ? AND message_id = ?"#,
     )
@@ -413,9 +294,40 @@ pub async fn download_attachment(
     .await?
     .ok_or_else(|| AppError::NotFound(format!("attachment {} not found", attachment_id)))?;
 
-    let content = row.content.ok_or_else(|| {
-        AppError::NotFound(format!("attachment {} content not cached", attachment_id))
-    })?;
+    let download_limit = attachment_download_limit();
+    if row.size_bytes > download_limit as i64 {
+        return Err(AppError::PayloadTooLarge(format!(
+            "attachment exceeds the configured {} byte download limit",
+            download_limit
+        )));
+    }
+    let content = match row.content {
+        Some(content) => content,
+        None => {
+            let (folder, uid, provider) = load_provider(&state, &message_id).await?;
+            let content = tokio::time::timeout(
+                attachment_provider_timeout(),
+                provider.fetch_attachment(&folder, uid, &row.part_id),
+            )
+            .await
+            .map_err(|_| AppError::Provider("attachment provider request timed out".into()))??;
+            if content.len() > download_limit {
+                return Err(AppError::PayloadTooLarge(format!(
+                    "attachment exceeds the configured {} byte download limit",
+                    download_limit
+                )));
+            }
+            let cache_limit = attachment_cache_limit();
+            if content.len() <= cache_limit {
+                sqlx::query("UPDATE attachments SET content = ? WHERE id = ?")
+                    .bind(&content)
+                    .bind(&attachment_id)
+                    .execute(&state.pool)
+                    .await?;
+            }
+            content
+        }
+    };
     let mut headers = HeaderMap::new();
     headers.insert(
         CONTENT_TYPE,
@@ -462,6 +374,100 @@ struct AttachmentContentRow {
     filename: String,
     content_type: String,
     content: Option<Vec<u8>>,
+    part_id: String,
+    size_bytes: i64,
+}
+
+fn attachment_cache_limit() -> usize {
+    std::env::var("ATTACHMENT_CACHE_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(25 * 1024 * 1024)
+}
+
+fn attachment_download_limit() -> usize {
+    std::env::var("ATTACHMENT_DOWNLOAD_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(50 * 1024 * 1024)
+}
+
+fn attachment_provider_timeout() -> std::time::Duration {
+    let seconds = std::env::var("ATTACHMENT_PROVIDER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(30);
+    std::time::Duration::from_secs(seconds)
+}
+
+pub(crate) async fn cache_provider_attachments(
+    pool: &sqlx::SqlitePool,
+    message_id: &str,
+    attachments: &[ProviderAttachment],
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    cache_provider_attachments_tx(&mut tx, message_id, attachments).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn cache_provider_attachments_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    message_id: &str,
+    attachments: &[ProviderAttachment],
+) -> Result<()> {
+    let existing: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM attachments WHERE message_id = ?")
+            .bind(message_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    let cache_limit = attachment_cache_limit();
+    let mut desired = std::collections::HashSet::new();
+    for attachment in attachments {
+        let id = format!("{message_id}:{}", attachment.part_id);
+        desired.insert(id.clone());
+        let cached_content = attachment
+            .content
+            .as_deref()
+            .filter(|content| content.len() <= cache_limit);
+        sqlx::query(
+            r#"INSERT INTO attachments
+               (id, message_id, filename, content_type, part_id, content_id, size_bytes, content)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(message_id, part_id) DO UPDATE SET
+                   filename = excluded.filename,
+                   content_type = excluded.content_type,
+                   content_id = excluded.content_id,
+                   size_bytes = excluded.size_bytes,
+                   content = COALESCE(excluded.content, attachments.content)"#,
+        )
+        .bind(id)
+        .bind(message_id)
+        .bind(&attachment.filename)
+        .bind(&attachment.content_type)
+        .bind(&attachment.part_id)
+        .bind(&attachment.content_id)
+        .bind(attachment.size_bytes)
+        .bind(cached_content)
+        .execute(&mut **tx)
+        .await?;
+    }
+    for id in existing {
+        if !desired.contains(&id) {
+            sqlx::query("DELETE FROM attachments WHERE id = ?")
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
+    sqlx::query("UPDATE messages SET has_attachments = ? WHERE id = ?")
+        .bind(!attachments.is_empty())
+        .bind(message_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 fn attachment_content_disposition(filename: &str) -> String {
@@ -539,16 +545,6 @@ pub async fn list_messages(
     Ok(Json(rows))
 }
 
-/// Row type for the join query used during lazy body fetch.
-#[derive(Debug, sqlx::FromRow)]
-struct MessageFetchInfo {
-    uid: i64,
-    full_path: String,
-    email: String,
-    provider_type: String,
-    oauth_token_json: Option<String>,
-}
-
 pub async fn get_message(
     State(state): State<Arc<AppState>>,
     Path(message_id): Path<String>,
@@ -572,64 +568,16 @@ pub async fn get_message(
     .fetch_optional(&state.pool)
     .await?;
 
-    // Always load provider info — needed for both lazy body fetch and mark_seen.
-    let fetch_info = sqlx::query_as::<_, MessageFetchInfo>(
-        r#"SELECT m.uid, f.full_path, a.email, a.provider_type, a.oauth_token_json
-           FROM messages m
-           JOIN folders f ON m.folder_id = f.id
-           JOIN accounts a ON m.account_id = a.id
-           WHERE m.id = ?"#,
-    )
-    .bind(&message_id)
-    .fetch_optional(&state.pool)
-    .await?;
-
-    // Build provider from fetch_info (shared by body fetch + mark_seen).
-    let provider = if let Some(ref info) = fetch_info {
-        if info.provider_type == "gmail" {
-            let token_json = info
-                .oauth_token_json
-                .as_deref()
-                .ok_or_else(|| AppError::Auth("account has no OAuth token".to_string()))?;
-
-            let mut stored: StoredToken = serde_json::from_str(token_json)
-                .map_err(|e| AppError::Auth(format!("parse token: {}", e)))?;
-
-            if stored.is_expired() {
-                let client_id = std::env::var("GOOGLE_CLIENT_ID")
-                    .map_err(|_| AppError::Auth("GOOGLE_CLIENT_ID not set".to_string()))?;
-                let client_secret = std::env::var("GOOGLE_CLIENT_SECRET")
-                    .map_err(|_| AppError::Auth("GOOGLE_CLIENT_SECRET not set".to_string()))?;
-                let redirect_uri = std::env::var("GOOGLE_REDIRECT_URI").unwrap_or_else(|_| {
-                    "http://localhost:3000/api/v1/auth/gmail/callback".to_string()
-                });
-                let oauth = OAuthConfig::gmail(client_id, client_secret, redirect_uri);
-                let refresh = stored
-                    .refresh_token
-                    .as_deref()
-                    .ok_or_else(|| AppError::Auth("no refresh token".to_string()))?;
-                let new_resp = oauth.refresh_token(refresh).await?;
-                stored = StoredToken::from_token_response(new_resp);
-            }
-
-            Some(GmailProvider::new(
-                msg.account_id.clone(),
-                info.email.clone(),
-                stored.access_token.clone(),
-            ))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let provider = load_provider(&state, &message_id).await.ok();
 
     // Lazy-fetch body from IMAP on cache miss.
     if body.is_none() {
-        if let (Some(ref info), Some(ref p)) = (&fetch_info, &provider) {
+        if let Some((folder, uid, provider)) = &provider {
             info!("body cache miss for {}, fetching from IMAP", message_id);
-            match p.fetch_message_body(&info.full_path, info.uid as u32).await {
+            match provider.fetch_message_body(folder, *uid).await {
                 Ok(fetched) => {
+                    cache_provider_attachments(&state.pool, &message_id, &fetched.attachments)
+                        .await?;
                     sqlx::query(
                         r#"INSERT INTO message_bodies (message_id, html_body, text_body, raw_headers)
                            VALUES (?, ?, ?, ?)
@@ -661,14 +609,11 @@ pub async fn get_message(
         }
     }
 
-    // Fire-and-forget: set \Seen on the IMAP server (doesn't block the response).
     if !msg.is_read {
-        if let (Some(info), Some(p)) = (fetch_info, provider) {
-            tokio::spawn(async move {
-                if let Err(e) = p.mark_seen(&info.full_path, info.uid as u32).await {
-                    tracing::warn!("mark_seen failed: {}", e);
-                }
-            });
+        if let Some((folder, uid, provider)) = &provider {
+            if let Err(error) = provider.mark_seen(folder, *uid).await {
+                tracing::warn!("mark_seen failed: {}", error);
+            }
         }
     }
 
@@ -731,8 +676,8 @@ mod tests {
         .bind(id)
         .bind("T")
         .bind("t@t.com")
-        .bind("generic_imap")
-        .bind("password")
+        .bind("test")
+        .bind("test")
         .execute(pool)
         .await
         .unwrap();
@@ -754,13 +699,20 @@ mod tests {
     }
 
     async fn seed_message(pool: &SqlitePool, id: &str, account_id: &str, folder_id: &str) {
+        let uid: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(uid), 0) + 1 FROM messages WHERE folder_id = ?",
+        )
+        .bind(folder_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO messages (id, account_id, folder_id, uid, message_id, subject, is_read) VALUES (?,?,?,?,?,?,?)",
         )
         .bind(id)
         .bind(account_id)
         .bind(folder_id)
-        .bind(1i64)
+        .bind(uid)
         .bind(format!("<{id}>"))
         .bind(format!("Subject of {id}"))
         .bind(false)
@@ -778,12 +730,13 @@ mod tests {
         content: Option<&[u8]>,
     ) {
         sqlx::query(
-            "INSERT INTO attachments (id, message_id, filename, content_type, size_bytes, content) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO attachments (id, message_id, filename, content_type, part_id, size_bytes, content) VALUES (?,?,?,?,?,?,?)",
         )
         .bind(id)
         .bind(message_id)
         .bind(filename)
         .bind(content_type)
+        .bind(id)
         .bind(content.map(|bytes| bytes.len() as i64).unwrap_or_default())
         .bind(content)
         .execute(pool)
@@ -1171,6 +1124,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn declared_oversize_attachment_is_rejected_before_provider_fetch() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc-limit").await;
+        seed_folder(&state.pool, "fld-limit", "acc-limit", None).await;
+        seed_message(&state.pool, "msg-limit", "acc-limit", "fld-limit").await;
+        seed_attachment(
+            &state.pool,
+            "att-limit",
+            "msg-limit",
+            "huge.bin",
+            "application/octet-stream",
+            None,
+        )
+        .await;
+        sqlx::query("UPDATE attachments SET size_bytes = ? WHERE id='att-limit'")
+            .bind(50_i64 * 1024 * 1024 + 1)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let (status, _, _) = req_raw(
+            crate::api::router(state),
+            "GET",
+            "/messages/msg-limit/attachments/att-limit",
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
     async fn get_nonexistent_message_is_404() {
         let state = setup().await;
         let (status, _) = req(crate::api::router(state), "GET", "/messages/ghost", None).await;
@@ -1345,7 +1327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_with_archive_folder_moves_message() {
+    async fn archive_with_archive_folder_removes_stale_source_occurrence() {
         let state = setup().await;
         seed_account(&state.pool, "acc1").await;
         seed_folder(&state.pool, "fld-inbox", "acc1", Some("inbox")).await;
@@ -1361,14 +1343,16 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let folder_id: String =
-            sqlx::query_scalar("SELECT folder_id FROM messages WHERE id = 'mv-msg'")
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id = 'mv-msg'")
                 .fetch_one(&state.pool)
                 .await
                 .unwrap();
-        assert_eq!(folder_id, "fld-archive");
+        assert_eq!(remaining, 0);
         assert_eq!(folder_counts(&state.pool, "fld-inbox").await, (0, 0));
-        assert_eq!(folder_counts(&state.pool, "fld-archive").await, (1, 1));
+        // IMAP MOVE chooses a new destination UID. The next synchronization
+        // creates the destination occurrence with the correct mailbox identity.
+        assert_eq!(folder_counts(&state.pool, "fld-archive").await, (0, 0));
     }
 
     #[tokio::test]
@@ -1490,5 +1474,97 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["processed"], 0);
+        assert_eq!(body["failed"], 0);
+        assert_eq!(body["results"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn bulk_returns_per_message_success_and_failure() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "bulk-ok", "acc1", "fld1").await;
+
+        let (status, body) = req(
+            crate::api::router(state),
+            "POST",
+            "/messages/bulk",
+            Some(serde_json::json!({
+                "ids": ["missing", "bulk-ok"],
+                "action": "mark_read"
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["processed"], 1);
+        assert_eq!(body["failed"], 1);
+        assert_eq!(body["results"][0]["id"], "missing");
+        assert_eq!(body["results"][0]["success"], false);
+        assert!(body["results"][0]["error"].is_string());
+        assert_eq!(
+            body["results"][1],
+            serde_json::json!({
+                "id": "bulk-ok",
+                "success": true
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_mutation_failures_never_commit_local_read_flag_delete_or_archive() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc-fail").await;
+        sqlx::query("UPDATE accounts SET provider_type='test_fail' WHERE id='acc-fail'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        seed_folder(&state.pool, "inbox", "acc-fail", Some("inbox")).await;
+        seed_folder(&state.pool, "archive", "acc-fail", Some("archive")).await;
+        for id in ["read", "flag", "delete", "archive-msg"] {
+            seed_message(&state.pool, id, "acc-fail", "inbox").await;
+        }
+
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "PATCH",
+            "/messages/read",
+            Some(serde_json::json!({"isRead": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "PATCH",
+            "/messages/flag",
+            Some(serde_json::json!({"isFlagged": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "DELETE",
+            "/messages/delete",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/archive-msg/archive",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+        let rows: Vec<(String, bool, bool)> = sqlx::query_as(
+            "SELECT id, is_read, is_flagged FROM messages WHERE account_id='acc-fail' ORDER BY id",
+        )
+        .fetch_all(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|(_, read, flagged)| !read && !flagged));
     }
 }

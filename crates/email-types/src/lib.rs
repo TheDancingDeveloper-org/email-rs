@@ -2,6 +2,43 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthClientKind {
+    Cookie,
+    Bearer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthCredentials {
+    pub username: String,
+    pub password: String,
+    pub client: AuthClientKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthSession {
+    pub user_id: String,
+    pub session_id: String,
+    pub expires_at: i64,
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthIdentity {
+    pub user_id: String,
+    pub session_id: String,
+    pub client: AuthClientKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatusResponse {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -183,6 +220,21 @@ pub enum BulkAction {
 pub struct BulkRequest {
     pub ids: Vec<String>,
     pub action: BulkAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkResult {
+    pub id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkResponse {
+    pub processed: usize,
+    pub failed: usize,
+    pub results: Vec<BulkResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -467,6 +519,7 @@ pub struct AddLinkResponse {
 pub struct Webhook {
     pub id: String,
     pub url: String,
+    #[serde(skip_serializing)]
     pub secret: Option<String>,
     pub events: String,
     pub account_id: Option<String>,

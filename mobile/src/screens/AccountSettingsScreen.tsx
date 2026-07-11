@@ -36,14 +36,14 @@ export function AccountSettingsScreen({ accountId, onClose }: Props) {
   const setSyncDays = async (value: number | null) => {
     if (!settings) return;
     setSaving(true);
-    await api.updateAccount(accountId, { sync_days_limit: value });
+    await api.updateAccount(accountId, { syncDaysLimit: value });
     setSettings({ ...settings, syncDaysLimit: value });
     setSaving(false);
   };
 
   const toggleExclude = async (folder: Folder) => {
     const next = !folder.isExcluded;
-    await api.updateFolder(folder.id, { is_excluded: next });
+    await api.updateFolder(folder.id, { isExcluded: next });
     setFolders(folders.map((f) => f.id === folder.id ? { ...f, isExcluded: next } : f));
   };
 

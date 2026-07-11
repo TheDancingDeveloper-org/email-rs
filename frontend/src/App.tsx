@@ -19,6 +19,64 @@ const MIN_W = 140;
 const MAX_SIDEBAR_W = 480;
 const MAX_MSGLIST_W = 600;
 
+function AuthGate({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('');
+  const [firstRun, setFirstRun] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/v1/app-auth/${firstRun ? 'bootstrap' : 'login'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, client: 'cookie' }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || `${response.status} ${response.statusText}`);
+      }
+      onAuthenticated();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Authentication failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: 'var(--bg)' }}>
+      <form onSubmit={submit} style={{ width: 340, padding: 28, border: '1px solid var(--divider)', borderRadius: 10, background: 'var(--surface)' }}>
+        <h1 style={{ margin: '0 0 6px', fontSize: 22, color: 'var(--text)' }}>email-rs</h1>
+        <p style={{ margin: '0 0 22px', fontSize: 13, color: 'var(--text-dim)' }}>
+          {firstRun ? 'Create the single application user. This is allowed only from the server host.' : 'Sign in to your mail server.'}
+        </p>
+        <label style={{ display: 'block', marginBottom: 12, fontSize: 12, color: 'var(--text-mid)' }}>
+          Username
+          <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required
+            style={{ display: 'block', boxSizing: 'border-box', width: '100%', marginTop: 5, padding: '9px 10px', border: '1px solid var(--divider)', borderRadius: 5, background: 'var(--bg)', color: 'var(--text)' }} />
+        </label>
+        <label style={{ display: 'block', marginBottom: 12, fontSize: 12, color: 'var(--text-mid)' }}>
+          Password
+          <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={firstRun ? 'new-password' : 'current-password'} required minLength={firstRun ? 12 : undefined}
+            style={{ display: 'block', boxSizing: 'border-box', width: '100%', marginTop: 5, padding: '9px 10px', border: '1px solid var(--divider)', borderRadius: 5, background: 'var(--bg)', color: 'var(--text)' }} />
+        </label>
+        {error && <div role="alert" style={{ marginBottom: 12, fontSize: 12, color: 'var(--danger)' }}>{error}</div>}
+        <button type="submit" disabled={submitting} style={{ width: '100%', padding: '9px 12px', border: 0, borderRadius: 5, background: 'var(--accent)', color: 'white', cursor: 'pointer' }}>
+          {submitting ? 'Please wait…' : firstRun ? 'Create user' : 'Sign in'}
+        </button>
+        <button type="button" onClick={() => { setFirstRun(!firstRun); setError(null); }} style={{ width: '100%', marginTop: 10, border: 0, background: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 12 }}>
+          {firstRun ? 'Back to sign in' : 'First-run setup'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 function storedWidth(key: string, def: number): number {
   try {
     const v = localStorage.getItem(key);
@@ -71,6 +129,7 @@ const handleStyle: React.CSSProperties = {
 export function App() {
   const { theme, densityLevel, accounts, setAccounts, folders, compose, settingsOpen, openPalette, closePalette, paletteOpen, view } = useAppStore();
   const [accountsLoaded, setAccountsLoaded] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
 
   const sidebar = usePanelResize(SIDEBAR_W_KEY,  DEFAULT_SIDEBAR_W, MIN_W, MAX_SIDEBAR_W);
   const msglist = usePanelResize(MSGLIST_W_KEY,  DEFAULT_MSGLIST_W, MIN_W, MAX_MSGLIST_W);
@@ -97,8 +156,21 @@ export function App() {
 
   const fetchAccounts = () => {
     fetch('/api/v1/accounts')
-      .then((res) => res.json() as Promise<Account[]>)
-      .then((data) => { setAccounts(data); setAccountsLoaded(true); })
+      .then(async (res) => {
+        if (res.status === 401) {
+          setAuthRequired(true);
+          setAccountsLoaded(true);
+          return null;
+        }
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return res.json() as Promise<Account[]>;
+      })
+      .then((data) => {
+        if (!data) return;
+        setAuthRequired(false);
+        setAccounts(data);
+        setAccountsLoaded(true);
+      })
       .catch(() => { setAccounts([]); setAccountsLoaded(true); });
   };
 
@@ -110,6 +182,7 @@ export function App() {
   }, []);
 
   if (!accountsLoaded) return null;
+  if (authRequired) return <AuthGate onAuthenticated={fetchAccounts} />;
   if (accounts.length === 0) return <AccountSetup onAccountAdded={fetchAccounts} />;
 
   return (

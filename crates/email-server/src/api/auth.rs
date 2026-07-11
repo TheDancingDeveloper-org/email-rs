@@ -6,15 +6,16 @@ use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
-    Json,
+    Extension, Json,
 };
 use email_types::AuthorizeResponse;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::auth::app::AuthPrincipal;
 use crate::auth::oauth2::{OAuthConfig, StoredToken};
 use crate::error::{AppError, Result};
-use crate::state::AppState;
+use crate::state::{AppState, OAuthState};
 use crate::sync::SyncOrchestrator;
 
 // ── Query parameter structs ───────────────────────────────────────────────────
@@ -25,6 +26,12 @@ pub struct CallbackQuery {
     pub state: Option<String>,
     pub error: Option<String>,
     /// If provided, update this account's token instead of creating a new one.
+    pub account_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizeQuery {
     pub account_id: Option<String>,
 }
 
@@ -70,7 +77,7 @@ fn spawn_sync(
 async fn consume_state(
     app_state: &Arc<AppState>,
     state_val: &str,
-) -> std::result::Result<Option<String>, Response> {
+) -> std::result::Result<OAuthState, Response> {
     let mut map = app_state.oauth_states.lock().await;
     match map.remove(state_val) {
         None => Err((
@@ -80,6 +87,20 @@ async fn consume_state(
             .into_response()),
         Some(verifier) => Ok(verifier),
     }
+}
+
+pub(crate) async fn oauth_owner_is_active(app_state: &AppState, pending: &OAuthState) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM app_sessions WHERE id = ? AND user_id = ? AND expires_at > ?",
+    )
+    .bind(&pending.session_id)
+    .bind(&pending.user_id)
+    .bind(chrono::Utc::now().timestamp())
+    .fetch_optional(&app_state.pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
 }
 
 #[allow(clippy::result_large_err)]
@@ -204,7 +225,12 @@ fn gmail_redirect_uri(headers: &HeaderMap) -> String {
 }
 
 /// GET /api/v1/auth/gmail/authorize
-pub async fn gmail_authorize(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+pub async fn gmail_authorize(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Query(query): Query<AuthorizeQuery>,
+    headers: HeaderMap,
+) -> Response {
     let client_id = match crate::auth::google_client_id() {
         Some(id) => id,
         None => return not_configured("Google", "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET"),
@@ -218,7 +244,15 @@ pub async fn gmail_authorize(State(state): State<Arc<AppState>>, headers: Header
     let state_val = Uuid::new_v4().to_string();
     let (url, verifier) = oauth.authorization_url(&state_val);
 
-    state.oauth_states.lock().await.insert(state_val, verifier);
+    state.oauth_states.lock().await.insert(
+        state_val,
+        OAuthState {
+            user_id: principal.user_id,
+            session_id: principal.session_id,
+            verifier,
+            account_id: query.account_id,
+        },
+    );
     Json(AuthorizeResponse { url }).into_response()
 }
 
@@ -238,10 +272,17 @@ pub async fn gmail_callback(
         Err(r) => return r,
     };
 
-    let verifier = match consume_state(&app_state, state_val).await {
+    let pending = match consume_state(&app_state, state_val).await {
         Ok(v) => v,
         Err(r) => return r,
     };
+    if !oauth_owner_is_active(&app_state, &pending).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "OAuth session expired or was revoked" })),
+        )
+            .into_response();
+    }
 
     let client_id = match crate::auth::google_client_id() {
         Some(id) => id,
@@ -253,7 +294,7 @@ pub async fn gmail_callback(
     };
 
     let oauth = OAuthConfig::gmail(client_id, client_secret, gmail_redirect_uri(&headers));
-    let token_resp = match oauth.exchange_code(code, verifier.as_deref()).await {
+    let token_resp = match oauth.exchange_code(code, pending.verifier.as_deref()).await {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -268,7 +309,14 @@ pub async fn gmail_callback(
     let token_json = serde_json::to_string(&stored).unwrap();
     let token_expiry = stored.expires_at.map(|t| t.to_string());
 
-    if let Some(account_id) = q.account_id {
+    if q.account_id.is_some() && q.account_id != pending.account_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "OAuth account does not match initiating session" })),
+        )
+            .into_response();
+    }
+    if let Some(account_id) = pending.account_id {
         return update_account_token(&app_state, &account_id, &token_json, token_expiry).await;
     }
 
@@ -319,6 +367,8 @@ fn outlook_redirect_uri(headers: &HeaderMap) -> String {
 /// GET /api/v1/auth/microsoft/authorize
 pub async fn microsoft_authorize(
     State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Query(query): Query<AuthorizeQuery>,
     headers: HeaderMap,
 ) -> Response {
     let client_id = match crate::auth::microsoft_client_id() {
@@ -330,7 +380,15 @@ pub async fn microsoft_authorize(
     let state_val = Uuid::new_v4().to_string();
     let (url, verifier) = oauth.authorization_url(&state_val);
 
-    state.oauth_states.lock().await.insert(state_val, verifier);
+    state.oauth_states.lock().await.insert(
+        state_val,
+        OAuthState {
+            user_id: principal.user_id,
+            session_id: principal.session_id,
+            verifier,
+            account_id: query.account_id,
+        },
+    );
     Json(AuthorizeResponse { url }).into_response()
 }
 
@@ -350,10 +408,17 @@ pub async fn microsoft_callback(
         Err(r) => return r,
     };
 
-    let verifier = match consume_state(&app_state, state_val).await {
+    let pending = match consume_state(&app_state, state_val).await {
         Ok(v) => v,
         Err(r) => return r,
     };
+    if !oauth_owner_is_active(&app_state, &pending).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "OAuth session expired or was revoked" })),
+        )
+            .into_response();
+    }
 
     let client_id = match crate::auth::microsoft_client_id() {
         Some(id) => id,
@@ -361,7 +426,7 @@ pub async fn microsoft_callback(
     };
 
     let oauth = OAuthConfig::outlook(client_id, outlook_redirect_uri(&headers));
-    let token_resp = match oauth.exchange_code(code, verifier.as_deref()).await {
+    let token_resp = match oauth.exchange_code(code, pending.verifier.as_deref()).await {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -376,7 +441,14 @@ pub async fn microsoft_callback(
     let token_json = serde_json::to_string(&stored).unwrap();
     let token_expiry = stored.expires_at.map(|t| t.to_string());
 
-    if let Some(account_id) = q.account_id {
+    if q.account_id.is_some() && q.account_id != pending.account_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "OAuth account does not match initiating session" })),
+        )
+            .into_response();
+    }
+    if let Some(account_id) = pending.account_id {
         return update_account_token(&app_state, &account_id, &token_json, token_expiry).await;
     }
 

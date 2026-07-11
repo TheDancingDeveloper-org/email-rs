@@ -3,66 +3,34 @@ use std::sync::Arc;
 use axum::{extract::State, Json};
 use email_types::{SendRequest, SendResponse};
 
-use crate::auth::oauth2::{OAuthConfig, StoredToken};
+use crate::auth::oauth2::StoredToken;
 use crate::error::{AppError, Result};
 use crate::smtp::{self, OutboundMessage, SmtpConfig};
 use crate::state::AppState;
-
-#[derive(Debug, sqlx::FromRow)]
-struct AccountRow {
-    email: String,
-    provider_type: String,
-    auth_type: String,
-    oauth_token_json: Option<String>,
-    host: Option<String>,
-    port: Option<i64>,
-    password: Option<String>,
-    smtp_host: Option<String>,
-    smtp_port: Option<i64>,
-    smtp_password: Option<String>,
-}
 
 pub async fn send_message(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SendRequest>,
 ) -> Result<Json<SendResponse>> {
-    let account = sqlx::query_as::<_, AccountRow>(
-        "SELECT email, provider_type, auth_type, oauth_token_json, host, port, password, smtp_host, smtp_port, smtp_password FROM accounts WHERE id = ?",
-    )
-    .bind(&req.account_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("account {} not found", req.account_id)))?;
+    let account =
+        crate::providers::factory::load_account_config(&state.pool, &req.account_id).await?;
 
     let config = match account.provider_type.as_str() {
-        "gmail" => {
+        "gmail" | "microsoft365" if account.auth_type == "oauth2" => {
             let token_json = account
                 .oauth_token_json
                 .as_deref()
                 .ok_or_else(|| AppError::Auth("account has no OAuth token".to_string()))?;
 
-            let mut stored: StoredToken = serde_json::from_str(token_json)
+            let stored: StoredToken = serde_json::from_str(token_json)
                 .map_err(|e| AppError::Auth(format!("parse token: {}", e)))?;
-
-            if stored.is_expired() {
-                let client_id = crate::auth::google_client_id()
-                    .ok_or_else(|| AppError::Auth("GOOGLE_CLIENT_ID not configured".to_string()))?;
-                let client_secret = crate::auth::google_client_secret().ok_or_else(|| {
-                    AppError::Auth("GOOGLE_CLIENT_SECRET not configured".to_string())
-                })?;
-                let redirect_uri = std::env::var("GOOGLE_REDIRECT_URI").unwrap_or_else(|_| {
-                    "http://localhost:3000/api/v1/auth/gmail/callback".to_string()
-                });
-                let oauth = OAuthConfig::gmail(client_id, client_secret, redirect_uri);
-                let refresh = stored
-                    .refresh_token
-                    .as_deref()
-                    .ok_or_else(|| AppError::Auth("no refresh token".to_string()))?;
-                stored = StoredToken::from_token_response(oauth.refresh_token(refresh).await?);
-            }
-
             SmtpConfig {
-                host: "smtp.gmail.com".to_string(),
+                host: if account.provider_type == "gmail" {
+                    "smtp.gmail.com"
+                } else {
+                    "smtp.office365.com"
+                }
+                .to_string(),
                 port: 587,
                 username: account.email.clone(),
                 password: stored.access_token,

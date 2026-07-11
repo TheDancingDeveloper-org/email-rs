@@ -1,5 +1,10 @@
 # FluentGUI Desktop Migration Plan
 
+> Historical planning document. The native crate now exists and committed
+> manifests use immutable Git dependencies rather than the local paths proposed
+> below. Use [the feature tracker](fluentgui-feature-tracker.md) for UI parity and
+> [the recovery audit](recovery-audit-2026-07-10.md) for current release blockers.
+
 Last updated: 2026-05-25
 
 Target framework: `/home/sprooty/Working/Active/apps/FluentGUI`

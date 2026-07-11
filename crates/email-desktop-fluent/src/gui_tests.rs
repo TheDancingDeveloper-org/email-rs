@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default, clippy::redundant_closure)]
+
 /// GPUI-level end-to-end tests for email-desktop-fluent.
 ///
 /// These tests go beyond "renders without panic" and verify behavioural

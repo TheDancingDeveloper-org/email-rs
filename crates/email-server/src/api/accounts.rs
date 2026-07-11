@@ -282,8 +282,9 @@ mod tests {
     #[tokio::test]
     async fn delete_nonexistent_account_is_404() {
         let state = setup().await;
-        let (status, _) = req(crate::api::router(state), "DELETE", "/accounts/ghost", None).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, body) =
+            req(crate::api::router(state), "DELETE", "/accounts/ghost", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     }
 
     #[tokio::test]

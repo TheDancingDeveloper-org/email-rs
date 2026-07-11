@@ -2,6 +2,7 @@ import { useState } from 'react';
 import styles from './ProfileScreen.module.css';
 import { useAppStore } from '../store';
 import { AccountSettingsScreen } from './AccountSettingsScreen';
+import { logout } from '../api/client';
 
 function ChevronRight() {
   return (
@@ -72,6 +73,17 @@ export function ProfileScreen() {
               >Dark</button>
             </div>
           </div>
+        </div>
+
+        <div className={styles.group}>
+          <div className={styles.groupLabel}>Server</div>
+          <button className={styles.accountRow} onClick={async () => {
+            await logout().catch(() => undefined);
+            window.location.reload();
+          }}>
+            <span className={styles.accountName}>Log out or switch server</span>
+            <span className={styles.chevron}><ChevronRight /></span>
+          </button>
         </div>
 
         <div className={styles.group}>

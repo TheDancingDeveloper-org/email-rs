@@ -18,3 +18,4 @@ iconset
 msi-debug-status.md
 status.md
 .claude/
+/.cargo/config.toml

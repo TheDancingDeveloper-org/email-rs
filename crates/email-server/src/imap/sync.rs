@@ -8,10 +8,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::api::webhooks::fire_webhooks;
-use crate::auth::oauth2::{OAuthConfig, StoredToken};
 use crate::error::{AppError, Result};
-use crate::providers::generic_imap::GenericImapProvider;
-use crate::providers::gmail::GmailProvider;
+use crate::providers::factory::provider_for_account;
 use crate::providers::MailProvider;
 
 /// Background IMAP sync engine.
@@ -27,18 +25,8 @@ pub struct ImapSyncEngine {
 struct AccountRecord {
     #[allow(dead_code)]
     id: String,
-    email: String,
     provider_type: String,
-    auth_type: String,
-    oauth_token_json: Option<String>,
-    #[allow(dead_code)]
-    token_expiry: Option<String>,
-    host: Option<String>,
-    port: Option<i64>,
-    #[allow(dead_code)]
-    use_ssl: bool,
     sync_days_limit: Option<i64>,
-    password: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -49,6 +37,7 @@ struct FolderRecord {
     full_path: String,
     synced_at: Option<String>,
     is_excluded: bool,
+    uid_validity: i64,
 }
 
 // ── ImapSyncEngine ────────────────────────────────────────────────────────────
@@ -75,8 +64,7 @@ impl ImapSyncEngine {
 
         // 1. Load account from DB.
         let account = sqlx::query_as::<_, AccountRecord>(
-            r#"SELECT id, email, provider_type, auth_type, oauth_token_json,
-                      token_expiry, host, port, use_ssl, sync_days_limit, password
+            r#"SELECT id, provider_type, sync_days_limit
                FROM accounts WHERE id = ?"#,
         )
         .bind(account_id)
@@ -84,100 +72,18 @@ impl ImapSyncEngine {
         .await?
         .ok_or_else(|| AppError::NotFound(format!("account {} not found", account_id)))?;
 
-        // 2. Password-based accounts skip OAuth entirely.
-        if account.auth_type == "app_password" || account.auth_type == "basic" {
-            let password = account
-                .password
-                .as_deref()
-                .ok_or_else(|| AppError::Auth("account has no password configured".to_string()))?;
+        let provider = provider_for_account(&self.pool, account_id).await?;
+        self.sync_provider(account_id, provider, event_tx, account.sync_days_limit)
+            .await?;
 
-            let (imap_host, imap_port) = match account.provider_type.as_str() {
-                "microsoft365" => (
-                    account
-                        .host
-                        .as_deref()
-                        .unwrap_or("outlook.office365.com")
-                        .to_string(),
-                    account.port.unwrap_or(993) as u16,
-                ),
-                _ => {
-                    let host = account.host.as_deref().ok_or_else(|| {
-                        AppError::Auth("IMAP host not configured for account".to_string())
-                    })?;
-                    (host.to_string(), account.port.unwrap_or(993) as u16)
+        if account.provider_type == "gmail" {
+            let pool = self.pool.clone();
+            let aid = account_id.to_string();
+            tokio::spawn(async move {
+                if let Err(error) = crate::calendar::sync::sync_gmail_calendar(&pool, &aid).await {
+                    warn!("calendar sync failed for account {}: {}", aid, error);
                 }
-            };
-
-            let provider = GenericImapProvider::new(
-                account_id.to_string(),
-                account.email.clone(),
-                password.to_string(),
-                imap_host,
-                imap_port,
-            );
-            self.sync_provider(account_id, provider, event_tx, account.sync_days_limit)
-                .await?;
-            return Ok(());
-        }
-
-        // 3. OAuth2 path: build StoredToken from JSON.
-        let token_json = account
-            .oauth_token_json
-            .as_deref()
-            .ok_or_else(|| AppError::Auth("account has no OAuth token".to_string()))?;
-
-        let mut stored: StoredToken = serde_json::from_str(token_json)
-            .map_err(|e| AppError::Auth(format!("failed to parse token JSON: {}", e)))?;
-
-        // 4. Refresh if expired (or within 5-minute window).
-        info!(
-            "token expiry for {}: {:?} (expired={})",
-            account_id,
-            stored.expires_at,
-            stored.is_expired()
-        );
-        if stored.is_expired() {
-            info!(
-                "access token expired for account {}, refreshing",
-                account_id
-            );
-            stored = self.refresh_token(account_id, &stored).await?;
-        }
-
-        match account.provider_type.as_str() {
-            "gmail" => {
-                let provider = GmailProvider::new(
-                    account_id.to_string(),
-                    account.email.clone(),
-                    stored.access_token.clone(),
-                );
-                self.sync_provider(account_id, provider, event_tx, account.sync_days_limit)
-                    .await?;
-
-                // Sync Google Calendar after IMAP sync — best-effort, never fails the IMAP sync.
-                let token_json = account
-                    .oauth_token_json
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_string();
-                let pool = self.pool.clone();
-                let email = account.email.clone();
-                let aid = account_id.to_string();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::calendar::sync::sync_gmail_calendar(&pool, &aid, &email, &token_json)
-                            .await
-                    {
-                        warn!("calendar sync failed for account {}: {}", aid, e);
-                    }
-                });
-            }
-            other => {
-                warn!(
-                    "unsupported provider type '{}' for account {}",
-                    other, account_id
-                );
-            }
+            });
         }
 
         Ok(())
@@ -251,49 +157,11 @@ impl ImapSyncEngine {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    /// Refresh the OAuth token for an account, update DB, and return the new token.
-    async fn refresh_token(&self, account_id: &str, stored: &StoredToken) -> Result<StoredToken> {
-        let client_id = crate::auth::google_client_id()
-            .ok_or_else(|| AppError::Auth("GOOGLE_CLIENT_ID not configured".to_string()))?;
-        let client_secret = crate::auth::google_client_secret()
-            .ok_or_else(|| AppError::Auth("GOOGLE_CLIENT_SECRET not configured".to_string()))?;
-
-        let refresh = stored.refresh_token.as_deref().ok_or_else(|| {
-            AppError::Auth("no refresh token available for token refresh".to_string())
-        })?;
-
-        let redirect_uri = std::env::var("GOOGLE_REDIRECT_URI")
-            .unwrap_or_else(|_| "http://localhost:3000/api/v1/auth/gmail/callback".to_string());
-
-        let oauth = OAuthConfig::gmail(client_id, client_secret, redirect_uri);
-        let token_resp = oauth.refresh_token(refresh).await?;
-
-        let mut new_token = StoredToken::from_token_response(token_resp);
-        // Preserve existing refresh token if the new response doesn't include one.
-        if new_token.refresh_token.is_none() {
-            new_token.refresh_token = stored.refresh_token.clone();
-        }
-
-        let token_json = serde_json::to_string(&new_token)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("serialize token: {}", e)))?;
-
-        let expiry_str = new_token.expires_at.map(|t| t.to_string());
-
-        sqlx::query("UPDATE accounts SET oauth_token_json = ?, token_expiry = ? WHERE id = ?")
-            .bind(&token_json)
-            .bind(&expiry_str)
-            .bind(account_id)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(new_token)
-    }
-
     /// Sync folders and messages for a provider, fetching up to 4 folders in parallel.
-    async fn sync_provider<P: MailProvider + Clone + Send + Sync + 'static>(
+    async fn sync_provider(
         &self,
         account_id: &str,
-        provider: P,
+        provider: Arc<dyn MailProvider>,
         event_tx: Option<&broadcast::Sender<String>>,
         sync_days_limit: Option<i64>,
     ) -> Result<()> {
@@ -321,7 +189,7 @@ impl ImapSyncEngine {
 
         // Reload folder records so we have the actual DB ids; skip excluded folders.
         let db_folders: Vec<FolderRecord> = sqlx::query_as::<_, FolderRecord>(
-            "SELECT id, name, full_path, synced_at, is_excluded FROM folders WHERE account_id = ?",
+            "SELECT id, name, full_path, synced_at, is_excluded, uid_validity FROM folders WHERE account_id = ?",
         )
         .bind(account_id)
         .fetch_all(&self.pool)
@@ -377,18 +245,53 @@ impl ImapSyncEngine {
             error!("folder sync error: {}", e);
         }
 
+        if errors.is_empty() {
+            if let Err(error) = crate::db::mark_account_reconciled(&pool, &account_id).await {
+                warn!(
+                    "failed to record reconciliation completion for account {}: {}",
+                    account_id, error
+                );
+            }
+        }
+
         Ok(())
     }
 }
 
 /// Fetch and store all messages for a single folder. Runs in parallel with other folders.
-async fn sync_folder<P: MailProvider + Clone + Send + Sync + 'static>(
-    provider: P,
+async fn sync_folder(
+    provider: Arc<dyn MailProvider>,
     pool: SqlitePool,
     account_id: &str,
     db_folder: FolderRecord,
     sync_days_limit: Option<i64>,
 ) -> crate::error::Result<()> {
+    let remote_uid_validity = provider
+        .folder_uid_validity(&db_folder.full_path)
+        .await?
+        .map(i64::from)
+        .unwrap_or(db_folder.uid_validity);
+    let mailbox_reset = remote_uid_validity != db_folder.uid_validity;
+    if mailbox_reset {
+        info!(
+            "UIDVALIDITY changed for {} ({} -> {}), rebuilding folder cache",
+            db_folder.full_path, db_folder.uid_validity, remote_uid_validity
+        );
+        let mut tx = pool.begin().await?;
+        sqlx::query("DELETE FROM messages WHERE folder_id = ?")
+            .bind(&db_folder.id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE folders SET uid_validity = ?, synced_at = NULL, unread_count = 0, total_count = 0 WHERE id = ?",
+        )
+        .bind(remote_uid_validity)
+        .bind(&db_folder.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
     let since = db_folder.synced_at.as_deref().and_then(|s| {
         chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
             .ok()
@@ -396,10 +299,49 @@ async fn sync_folder<P: MailProvider + Clone + Send + Sync + 'static>(
     });
 
     // If never synced and a days limit is configured, use that as the floor.
-    let since = since
-        .or_else(|| sync_days_limit.map(|days| chrono::Utc::now() - chrono::Duration::days(days)));
+    let since = if mailbox_reset {
+        None
+    } else {
+        since.or_else(|| {
+            sync_days_limit.map(|days| chrono::Utc::now() - chrono::Duration::days(days))
+        })
+    };
 
-    let messages = provider.fetch_messages(&db_folder.full_path, since).await?;
+    let mut messages = provider.fetch_messages(&db_folder.full_path, since).await?;
+    let remote_uids: std::collections::HashSet<u32> = provider
+        .list_message_uids(&db_folder.full_path)
+        .await?
+        .into_iter()
+        .collect();
+
+    // SINCE is based on a message's internal date, so an old message moved
+    // into this mailbox can have a new UID without appearing in that search.
+    // Explicitly fetch every remote UID missing from both the cache and the
+    // incremental result so moves are repaired on the next sync.
+    let cached_uids: std::collections::HashSet<u32> = sqlx::query_scalar::<_, i64>(
+        "SELECT uid FROM messages WHERE folder_id = ? AND uid_validity = ?",
+    )
+    .bind(&db_folder.id)
+    .bind(remote_uid_validity)
+    .fetch_all(&pool)
+    .await?
+    .into_iter()
+    .filter_map(|uid| u32::try_from(uid).ok())
+    .collect();
+    let fetched_uids: std::collections::HashSet<u32> =
+        messages.iter().map(|message| message.uid).collect();
+    let missing_uids: Vec<u32> = remote_uids
+        .difference(&cached_uids)
+        .filter(|uid| !fetched_uids.contains(uid))
+        .copied()
+        .collect();
+    if !missing_uids.is_empty() {
+        messages.extend(
+            provider
+                .fetch_messages_by_uid(&db_folder.full_path, &missing_uids)
+                .await?,
+        );
+    }
 
     let message_count = messages.len() as i64;
     let mut unread_count: i64 = 0;
@@ -424,6 +366,11 @@ async fn sync_folder<P: MailProvider + Clone + Send + Sync + 'static>(
     // when multiple folders are syncing in parallel.
     let mut tx = pool.begin().await?;
     for msg in &messages {
+        // The complete UID snapshot is taken after metadata fetching. Do not
+        // resurrect a message that disappeared between those two operations.
+        if !remote_uids.contains(&msg.uid) {
+            continue;
+        }
         if !msg.is_read {
             unread_count += 1;
         }
@@ -431,21 +378,33 @@ async fn sync_folder<P: MailProvider + Clone + Send + Sync + 'static>(
         let to_json = serde_json::to_string(&msg.to).ok();
         let date_str = msg.date.map(|d| d.to_rfc3339());
 
-        let result = sqlx::query(
+        let stored_id: String = sqlx::query_scalar(
             r#"INSERT INTO messages
-                   (id, account_id, folder_id, uid, message_id, thread_id,
+                   (id, account_id, folder_id, uid, uid_validity, message_id, thread_id,
                     subject, from_name, from_email, to_json, date,
                     is_read, is_flagged, is_draft, has_attachments, preview, synced_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-               ON CONFLICT(message_id) DO UPDATE SET
-                   is_read    = excluded.is_read,
-                   is_flagged = excluded.is_flagged,
-                   synced_at  = excluded.synced_at"#,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(folder_id, uid_validity, uid) DO UPDATE SET
+                   message_id      = excluded.message_id,
+                   thread_id       = excluded.thread_id,
+                   subject         = excluded.subject,
+                   from_name       = excluded.from_name,
+                   from_email      = excluded.from_email,
+                   to_json         = excluded.to_json,
+                   date            = excluded.date,
+                   is_read         = excluded.is_read,
+                   is_flagged      = excluded.is_flagged,
+                   is_draft        = excluded.is_draft,
+                   has_attachments = excluded.has_attachments,
+                   preview         = excluded.preview,
+                   synced_at       = excluded.synced_at
+               RETURNING id"#,
         )
         .bind(&msg_id)
         .bind(account_id)
         .bind(&db_folder.id)
         .bind(msg.uid as i64)
+        .bind(remote_uid_validity)
         .bind(&msg.message_id)
         .bind(&msg.thread_id)
         .bind(&msg.subject)
@@ -458,11 +417,14 @@ async fn sync_folder<P: MailProvider + Clone + Send + Sync + 'static>(
         .bind(msg.is_draft)
         .bind(msg.has_attachments)
         .bind(&msg.preview)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
 
+        crate::api::messages::cache_provider_attachments_tx(&mut tx, &stored_id, &msg.attachments)
+            .await?;
+
         // Track genuinely new rows for webhook dispatch and rules evaluation.
-        if result.rows_affected() == 1 {
+        if stored_id == msg_id {
             new_message_payloads.push(serde_json::json!({
                 "subject": msg.subject,
                 "from": msg.from_email,
@@ -483,6 +445,21 @@ async fn sync_folder<P: MailProvider + Clone + Send + Sync + 'static>(
                 has_attachments: msg.has_attachments,
                 date: date_str,
             });
+        }
+    }
+
+    let cached_occurrences: Vec<(String, i64)> =
+        sqlx::query_as("SELECT id, uid FROM messages WHERE folder_id = ? AND uid_validity = ?")
+            .bind(&db_folder.id)
+            .bind(remote_uid_validity)
+            .fetch_all(&mut *tx)
+            .await?;
+    for (id, uid) in cached_occurrences {
+        if !remote_uids.contains(&(uid as u32)) {
+            sqlx::query("DELETE FROM messages WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
         }
     }
     tx.commit().await?;
@@ -555,8 +532,8 @@ async fn sync_folder<P: MailProvider + Clone + Send + Sync + 'static>(
 /// Pre-fetch and cache bodies for up to PREFETCH_LIMIT recent messages that have no cached body.
 const PREFETCH_LIMIT: i64 = 50;
 
-async fn prefetch_uncached_bodies<P: MailProvider>(
-    provider: P,
+async fn prefetch_uncached_bodies(
+    provider: Arc<dyn MailProvider>,
     pool: SqlitePool,
     folder_id: &str,
     folder_path: &str,
@@ -605,6 +582,15 @@ async fn prefetch_uncached_bodies<P: MailProvider>(
             let fetched = bodies.len();
             for (uid, body) in bodies {
                 if let Some(msg_id) = id_by_uid.get(&uid) {
+                    if let Err(error) = crate::api::messages::cache_provider_attachments(
+                        &pool,
+                        msg_id,
+                        &body.attachments,
+                    )
+                    .await
+                    {
+                        warn!("failed to cache attachments for uid {}: {}", uid, error);
+                    }
                     if let Err(e) = sqlx::query(
                         r#"INSERT INTO message_bodies (message_id, html_body, text_body, raw_headers)
                            VALUES (?, ?, ?, ?)
@@ -626,5 +612,209 @@ async fn prefetch_uncached_bodies<P: MailProvider>(
         Err(e) => {
             warn!("body pre-fetch failed for folder {}: {}", folder_path, e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, RwLock};
+
+    use chrono::Utc;
+
+    use super::*;
+    use crate::providers::{Folder, Message, MessageBody};
+
+    #[derive(Default)]
+    struct RemoteMailbox {
+        uid_validity: u32,
+        messages: Vec<Message>,
+        incremental_uids: Vec<u32>,
+    }
+
+    struct MockProvider(Arc<RwLock<RemoteMailbox>>);
+
+    #[async_trait::async_trait]
+    impl MailProvider for MockProvider {
+        fn provider_id(&self) -> &str {
+            "mock"
+        }
+        async fn authenticate(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn list_folders(&self) -> Result<Vec<Folder>> {
+            Ok(Vec::new())
+        }
+        async fn folder_uid_validity(&self, _: &str) -> Result<Option<u32>> {
+            Ok(Some(self.0.read().unwrap().uid_validity))
+        }
+        async fn fetch_messages(
+            &self,
+            _: &str,
+            since: Option<chrono::DateTime<Utc>>,
+        ) -> Result<Vec<Message>> {
+            let state = self.0.read().unwrap();
+            if since.is_none() {
+                return Ok(state.messages.clone());
+            }
+            Ok(state
+                .messages
+                .iter()
+                .filter(|m| state.incremental_uids.contains(&m.uid))
+                .cloned()
+                .collect())
+        }
+        async fn list_message_uids(&self, _: &str) -> Result<Vec<u32>> {
+            Ok(self
+                .0
+                .read()
+                .unwrap()
+                .messages
+                .iter()
+                .map(|m| m.uid)
+                .collect())
+        }
+        async fn fetch_message_body(&self, _: &str, _: u32) -> Result<MessageBody> {
+            Ok(MessageBody {
+                message_id: "mock".into(),
+                html_body: None,
+                text_body: None,
+                raw_headers: None,
+                attachments: Vec::new(),
+            })
+        }
+        async fn fetch_bodies_batch(&self, _: &str, _: &[u32]) -> Result<Vec<(u32, MessageBody)>> {
+            Ok(Vec::new())
+        }
+        async fn mark_seen(&self, _: &str, _: u32) -> Result<()> {
+            Ok(())
+        }
+        async fn mark_unseen(&self, _: &str, _: u32) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_message(&self, _: &str, _: u32) -> Result<()> {
+            Ok(())
+        }
+        async fn move_message(&self, _: &str, _: u32, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn set_flagged(&self, _: &str, _: u32, _: bool) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn message(uid: u32, message_id: Option<&str>) -> Message {
+        Message {
+            id: Uuid::new_v4(),
+            uid,
+            message_id: message_id.map(str::to_string),
+            thread_id: None,
+            subject: Some(format!("message {uid}")),
+            from_name: None,
+            from_email: Some("sender@example.test".into()),
+            to: vec![],
+            cc: vec![],
+            date: Some(Utc::now()),
+            is_read: false,
+            is_flagged: false,
+            is_draft: false,
+            has_attachments: false,
+            attachments: Vec::new(),
+            preview: None,
+        }
+    }
+
+    async fn setup() -> (SqlitePool, FolderRecord) {
+        let path = format!("/tmp/email_sync_contract_{}.db", Uuid::new_v4());
+        let (pool, _) = crate::db::create_pool(&format!("sqlite:{path}"))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('a','A','a@example.test','test','basic')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO folders (id, account_id, name, full_path, uid_validity, synced_at) VALUES ('f','a','Inbox','INBOX',1,datetime('now'))")
+            .execute(&pool).await.unwrap();
+        let folder = sqlx::query_as("SELECT id, name, full_path, synced_at, is_excluded, uid_validity FROM folders WHERE id='f'")
+            .fetch_one(&pool).await.unwrap();
+        (pool, folder)
+    }
+
+    async fn folder(pool: &SqlitePool) -> FolderRecord {
+        sqlx::query_as("SELECT id, name, full_path, synced_at, is_excluded, uid_validity FROM folders WHERE id='f'")
+            .fetch_one(pool).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn sync_contract_handles_missing_message_id_repeat_and_remote_delete() {
+        let (pool, db_folder) = setup().await;
+        let remote = Arc::new(RwLock::new(RemoteMailbox {
+            uid_validity: 1,
+            messages: vec![message(10, None), message(11, Some("same@example.test"))],
+            incremental_uids: vec![10, 11],
+        }));
+        let provider: Arc<dyn MailProvider> = Arc::new(MockProvider(remote.clone()));
+        sync_folder(provider.clone(), pool.clone(), "a", db_folder, None)
+            .await
+            .unwrap();
+        sync_folder(
+            provider.clone(),
+            pool.clone(),
+            "a",
+            folder(&pool).await,
+            None,
+        )
+        .await
+        .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE folder_id='f'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "repeat sync must upsert mailbox identity");
+        remote.write().unwrap().messages.remove(0);
+        sync_folder(provider, pool.clone(), "a", folder(&pool).await, None)
+            .await
+            .unwrap();
+        let uids: Vec<i64> = sqlx::query_scalar("SELECT uid FROM messages WHERE folder_id='f'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(uids, vec![11]);
+    }
+
+    #[tokio::test]
+    async fn sync_contract_discovers_old_message_moved_into_folder_and_resets_uidvalidity() {
+        let (pool, db_folder) = setup().await;
+        let remote = Arc::new(RwLock::new(RemoteMailbox {
+            uid_validity: 1,
+            messages: vec![message(20, Some("moved@example.test"))],
+            incremental_uids: Vec::new(),
+        }));
+        let provider: Arc<dyn MailProvider> = Arc::new(MockProvider(remote.clone()));
+        sync_folder(provider.clone(), pool.clone(), "a", db_folder, None)
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE uid=20")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "missing UID metadata must be fetched independent of SINCE"
+        );
+
+        let mut replacement = message(1, Some("replacement@example.test"));
+        replacement.subject = Some("replacement".into());
+        *remote.write().unwrap() = RemoteMailbox {
+            uid_validity: 2,
+            messages: vec![replacement],
+            incremental_uids: Vec::new(),
+        };
+        sync_folder(provider, pool.clone(), "a", folder(&pool).await, None)
+            .await
+            .unwrap();
+        let rows: Vec<(i64, i64, Option<String>)> =
+            sqlx::query_as("SELECT uid, uid_validity, subject FROM messages WHERE folder_id='f'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(1, 2, Some("replacement".into()))]);
     }
 }

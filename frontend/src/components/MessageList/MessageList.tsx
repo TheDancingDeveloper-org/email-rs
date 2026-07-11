@@ -65,17 +65,23 @@ function useKeyboardNav(
 
 type BulkAction = 'archive' | 'delete' | 'mark_read' | 'mark_unread';
 
-async function callBulkApi(ids: string[], action: BulkAction): Promise<void> {
-  await fetch('/api/v1/messages/bulk', {
+interface BulkResponse { processed: number; failed: number; results: { id: string; success: boolean; error?: string }[] }
+
+async function callBulkApi(ids: string[], action: BulkAction): Promise<BulkResponse> {
+  const response = await fetch('/api/v1/messages/bulk', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids, action }),
   });
+  const body = await response.json() as BulkResponse & { error?: string };
+  if (!response.ok) throw new Error(body.error || `${response.status} ${response.statusText}`);
+  return body;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function MessageList() {
+  const [bulkError, setBulkError] = useState<string | null>(null);
   const {
     selectedFolderId,
     selectedMessageId,
@@ -245,11 +251,18 @@ export function MessageList() {
     if (action === 'delete') {
       if (!window.confirm(`Delete ${selectedMessageIds.length} message(s)?`)) return;
     }
-    await callBulkApi(selectedMessageIds, action);
-    clearMessageSelection();
-    refetch();
-    refetchSmart();
-    refetchLabel();
+    setBulkError(null);
+    try {
+      const result = await callBulkApi(selectedMessageIds, action);
+      if (result.failed) {
+        setBulkError(`${result.processed} succeeded, ${result.failed} failed: ${result.results.filter(item => !item.success).map(item => item.error).join('; ')}`);
+      } else {
+        clearMessageSelection();
+      }
+      refetch(); refetchSmart(); refetchLabel();
+    } catch (error) {
+      setBulkError(error instanceof Error ? error.message : String(error));
+    }
   }, [selectedMessageIds, clearMessageSelection, refetch, refetchSmart, refetchLabel]);
 
   // ── Context menu ─────────────────────────────────────────────────────────
@@ -369,6 +382,7 @@ export function MessageList() {
 
   return (
     <div className={styles.messageList}>
+      {bulkError && <div role="alert" className={styles.bulkError}>{bulkError}</div>}
       {/* Bulk action bar */}
       {selectedMessageIds.length > 0 ? (
         <div className={styles.bulkBar}>

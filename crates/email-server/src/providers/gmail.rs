@@ -55,8 +55,9 @@ pub struct GmailProvider {
     pub account_id: String,
     pub email: String,
     pub access_token: String,
-    pub imap_host: &'static str,
+    pub imap_host: String,
     pub imap_port: u16,
+    pub provider_type: String,
 }
 
 impl GmailProvider {
@@ -65,8 +66,20 @@ impl GmailProvider {
             account_id,
             email,
             access_token,
-            imap_host: "imap.gmail.com",
+            imap_host: "imap.gmail.com".to_string(),
             imap_port: 993,
+            provider_type: "gmail".to_string(),
+        }
+    }
+
+    pub fn new_outlook(account_id: String, email: String, access_token: String) -> Self {
+        Self {
+            account_id,
+            email,
+            access_token,
+            imap_host: "outlook.office365.com".to_string(),
+            imap_port: 993,
+            provider_type: "microsoft365".to_string(),
         }
     }
 
@@ -83,7 +96,7 @@ impl GmailProvider {
     async fn connect_inner(
         &self,
     ) -> Result<async_imap::Session<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>> {
-        info!("connecting to imap.gmail.com:993");
+        info!("connecting to {}:{}", self.imap_host, self.imap_port);
 
         // Build rustls config with Mozilla trust roots.
         let mut root_store = RootCertStore::empty();
@@ -94,11 +107,11 @@ impl GmailProvider {
 
         let connector = TlsConnector::from(Arc::new(tls_config));
 
-        let tcp = tokio::net::TcpStream::connect((self.imap_host, self.imap_port))
+        let tcp = tokio::net::TcpStream::connect((self.imap_host.as_str(), self.imap_port))
             .await
             .map_err(|e| AppError::Imap(format!("TCP connect failed: {}", e)))?;
 
-        let domain = rustls::pki_types::ServerName::try_from(self.imap_host)
+        let domain = rustls::pki_types::ServerName::try_from(self.imap_host.as_str())
             .map_err(|e| AppError::Imap(format!("invalid hostname: {}", e)))?
             .to_owned();
 
@@ -150,6 +163,30 @@ fn special_use_for(name: &str) -> Option<Option<String>> {
     }
 }
 
+fn generic_special_use(name: &str, attrs: &[NameAttribute<'_>]) -> Option<String> {
+    for attr in attrs {
+        if let NameAttribute::Extension(extension) = attr {
+            match extension.to_ascii_lowercase().trim_start_matches('\\') {
+                "sent" => return Some("sent".to_string()),
+                "drafts" => return Some("drafts".to_string()),
+                "trash" => return Some("trash".to_string()),
+                "junk" => return Some("spam".to_string()),
+                "archive" => return Some("archive".to_string()),
+                _ => {}
+            }
+        }
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "inbox" => Some("inbox".to_string()),
+        "sent" | "sent items" | "sent mail" => Some("sent".to_string()),
+        "drafts" => Some("drafts".to_string()),
+        "trash" | "deleted" | "deleted items" => Some("trash".to_string()),
+        "junk" | "junk email" | "spam" => Some("spam".to_string()),
+        "archive" => Some("archive".to_string()),
+        _ => None,
+    }
+}
+
 /// Derive a human-readable folder name from the IMAP full path.
 fn display_name(full_path: &str) -> String {
     let without_prefix = full_path.strip_prefix("[Gmail]/").unwrap_or(full_path);
@@ -194,7 +231,7 @@ fn format_address(addr: &async_imap::imap_proto::types::Address<'_>) -> String {
 #[async_trait]
 impl MailProvider for GmailProvider {
     fn provider_id(&self) -> &str {
-        "gmail"
+        &self.provider_type
     }
 
     async fn authenticate(&mut self) -> Result<()> {
@@ -235,10 +272,13 @@ impl MailProvider for GmailProvider {
 
             let full_path = name.name().to_string();
 
-            // Apply Gmail-specific mapping (skip or tag as special).
-            let special_use = match special_use_for(&full_path) {
-                None => continue, // skip All Mail etc.
-                Some(su) => su,
+            let special_use = if self.provider_type == "gmail" {
+                match special_use_for(&full_path) {
+                    None => continue,
+                    Some(su) => su,
+                }
+            } else {
+                generic_special_use(&full_path, name.attributes())
             };
 
             folders.push(Folder {
@@ -253,6 +293,17 @@ impl MailProvider for GmailProvider {
 
         let _ = session.logout().await;
         Ok(folders)
+    }
+
+    async fn folder_uid_validity(&self, folder: &str) -> Result<Option<u32>> {
+        let mut session = self.connect().await?;
+        let mailbox = session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT failed: {}", e)))?;
+        let uid_validity = mailbox.uid_validity;
+        let _ = session.logout().await;
+        Ok(uid_validity)
     }
 
     async fn fetch_messages(
@@ -292,7 +343,7 @@ impl MailProvider for GmailProvider {
         let uid_range = uids.join(",");
 
         let fetch_stream = session
-            .uid_fetch(&uid_range, "(UID FLAGS RFC822.SIZE ENVELOPE)")
+            .uid_fetch(&uid_range, "(UID FLAGS RFC822.SIZE ENVELOPE BODYSTRUCTURE)")
             .await
             .map_err(|e| AppError::Imap(format!("UID FETCH failed: {}", e)))?;
 
@@ -391,6 +442,10 @@ impl MailProvider for GmailProvider {
                     .map(|s| s.chars().take(200).collect::<String>())
             });
 
+            let attachments = fetch
+                .bodystructure()
+                .map(super::bodystructure_attachments)
+                .unwrap_or_default();
             messages.push(Message {
                 id: Uuid::new_v4(),
                 uid,
@@ -405,13 +460,28 @@ impl MailProvider for GmailProvider {
                 is_read,
                 is_flagged,
                 is_draft,
-                has_attachments: false,
+                has_attachments: !attachments.is_empty(),
+                attachments,
                 preview,
             });
         }
 
         let _ = session.logout().await;
         Ok(messages)
+    }
+
+    async fn list_message_uids(&self, folder: &str) -> Result<Vec<u32>> {
+        let mut session = self.connect().await?;
+        session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT failed: {e}")))?;
+        let uids = session
+            .uid_search("ALL")
+            .await
+            .map_err(|e| AppError::Imap(format!("UID SEARCH ALL failed: {e}")))?;
+        let _ = session.logout().await;
+        Ok(uids.into_iter().collect())
     }
 
     async fn fetch_message_body(&self, folder: &str, uid: u32) -> Result<MessageBody> {
@@ -442,25 +512,32 @@ impl MailProvider for GmailProvider {
             .body()
             .ok_or_else(|| AppError::Imap("message had no RFC822 body".to_string()))?;
 
-        let parsed = mail_parser::MessageParser::default()
-            .parse(raw)
-            .ok_or_else(|| AppError::Imap("failed to parse message".to_string()))?;
-
-        let text_body = parsed.body_text(0).map(|s| s.to_string());
-        let html_body = parsed.body_html(0).map(|s| s.to_string());
-
-        let raw_headers = std::str::from_utf8(raw)
-            .ok()
-            .and_then(|s| s.split_once("\r\n\r\n").map(|(h, _)| h.to_string()));
-
+        let body = super::parse_message_body(uid, raw)?;
         let _ = session.logout().await;
+        Ok(body)
+    }
 
-        Ok(MessageBody {
-            message_id: uid.to_string(),
-            html_body,
-            text_body,
-            raw_headers,
-        })
+    async fn fetch_attachment(&self, folder: &str, uid: u32, part_id: &str) -> Result<Vec<u8>> {
+        if !super::valid_imap_part_id(part_id) {
+            return Err(AppError::Imap("invalid MIME part identifier".into()));
+        }
+        let mut session = self.connect().await?;
+        session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT failed: {e}")))?;
+        let stream = session
+            .uid_fetch(uid.to_string(), format!("(BODY.PEEK[{part_id}])"))
+            .await
+            .map_err(|e| AppError::Imap(format!("attachment UID FETCH failed: {e}")))?;
+        let fetches = stream.collect::<Vec<_>>().await;
+        let content = fetches
+            .into_iter()
+            .filter_map(|item| item.ok())
+            .find_map(|fetch| fetch.body().map(ToOwned::to_owned));
+        let _ = session.logout().await;
+        content
+            .ok_or_else(|| AppError::NotFound(format!("attachment part {part_id} is unavailable")))
     }
 
     async fn fetch_bodies_batch(
@@ -507,24 +584,10 @@ impl MailProvider for GmailProvider {
                     Some(b) => b,
                     None => continue,
                 };
-                let Some(parsed) = mail_parser::MessageParser::default().parse(raw) else {
+                let Ok(body) = super::parse_message_body(uid, raw) else {
                     continue;
                 };
-                let text_body = parsed.body_text(0).map(|s| s.to_string());
-                let html_body = parsed.body_html(0).map(|s| s.to_string());
-                let raw_headers = std::str::from_utf8(raw)
-                    .ok()
-                    .and_then(|s| s.split_once("\r\n\r\n").map(|(h, _)| h.to_string()));
-
-                results.push((
-                    uid,
-                    MessageBody {
-                        message_id: uid.to_string(),
-                        html_body,
-                        text_body,
-                        raw_headers,
-                    },
-                ));
+                results.push((uid, body));
             }
         }
 
