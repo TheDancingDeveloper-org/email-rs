@@ -24,6 +24,9 @@ pub enum AppError {
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
 
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     #[error("IMAP error: {0}")]
     Imap(String),
 
@@ -42,6 +45,7 @@ impl IntoResponse for AppError {
             AppError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Provider(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::Imap(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::Smtp(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::Internal(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),

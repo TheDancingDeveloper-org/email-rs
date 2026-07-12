@@ -19,6 +19,7 @@ use email_types::{
 use super::integration_tokens::{
     CreateIntegrationToken, CreatedIntegrationToken, IntegrationToken,
 };
+use super::webhooks::{IntegrationEvent, WebhookDelivery};
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -403,12 +404,18 @@ fn doc_update_webhook() {}
 #[utoipa::path(delete, path = "/webhooks/{id}", security(("bearerAuth" = [])), params(("id" = String, Path)), responses((status = 200, body = StatusResponse), (status = 404, body = ErrorResponse)))]
 fn doc_delete_webhook() {}
 
+#[utoipa::path(get, path = "/integration-events", security(("bearerAuth" = ["mail.metadata.read"])), params(("after" = Option<String>, Query, description = "Return events after this event ID"), ("limit" = Option<i64>, Query)), responses((status = 200, body = [IntegrationEvent])))]
+fn doc_integration_events() {}
+
+#[utoipa::path(get, path = "/webhook-deliveries", security(("bearerAuth" = [])), responses((status = 200, body = [WebhookDelivery])))]
+fn doc_webhook_deliveries() {}
+
 #[utoipa::path(get, path = "/events", security(("bearerAuth" = ["mail.metadata.read"])), responses((status = 200, content_type = "text/event-stream", body = String)))]
 fn doc_events() {}
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "email-rs API", version = "0.4.0"),
+    info(title = "email-rs API", version = "0.5.0"),
     servers((url = "/api/v1")),
     paths(
         doc_health,
@@ -475,6 +482,8 @@ fn doc_events() {}
         doc_create_webhook,
         doc_update_webhook,
         doc_delete_webhook,
+        doc_integration_events,
+        doc_webhook_deliveries,
         doc_events
     ),
     components(schemas(
@@ -520,6 +529,8 @@ fn doc_events() {}
         , Webhook
         , CreateWebhook
         , UpdateWebhook
+        , IntegrationEvent
+        , WebhookDelivery
     )),
     modifiers(&SecurityAddon)
 )]

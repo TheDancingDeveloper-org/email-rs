@@ -2,6 +2,12 @@
 
 email-rs is a single-user application, but every mail, settings, webhook, sync, search, calendar, and event endpoint still requires an application session. Only login/bootstrap, OAuth callbacks, and `GET /api/v1/health` are public.
 
+Provider secrets require `EMAIL_RS_CREDENTIAL_KEY`, a stable base64-encoded
+32-byte key generated with `openssl rand -base64 32`. OAuth token JSON and
+IMAP/SMTP passwords are encrypted with AES-256-GCM before SQLite writes.
+Existing plaintext rows are migrated at startup. Store and back up the key in
+secrets management; losing it makes provider credentials unrecoverable.
+
 ## First user
 
 Supply the initial credential as deployment secrets on the first start:

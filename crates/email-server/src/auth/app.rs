@@ -436,6 +436,7 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
     }
     if *method == Method::GET
         && (path.starts_with("/folders/")
+            || path == "/integration-events"
             || path == "/search"
             || path == "/search/suggest"
             || path == "/contacts/suggest"

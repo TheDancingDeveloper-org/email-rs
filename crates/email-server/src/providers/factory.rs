@@ -30,6 +30,9 @@ pub async fn load_account_config(pool: &SqlitePool, account_id: &str) -> Result<
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound(format!("account {account_id} not found")))?;
+    account.oauth_token_json = crate::credentials::open_optional(account.oauth_token_json)?;
+    account.password = crate::credentials::open_optional(account.password)?;
+    account.smtp_password = crate::credentials::open_optional(account.smtp_password)?;
 
     if account.auth_type == "oauth2" {
         let raw = account
@@ -149,7 +152,7 @@ async fn refresh_oauth_token(
     let json = serde_json::to_string(&refreshed)
         .map_err(|error| AppError::Auth(format!("serialize OAuth token: {error}")))?;
     sqlx::query("UPDATE accounts SET oauth_token_json = ?, token_expiry = ? WHERE id = ?")
-        .bind(json)
+        .bind(crate::credentials::seal(&json)?)
         .bind(refreshed.expires_at.map(|value| value.to_string()))
         .bind(&account.id)
         .execute(pool)

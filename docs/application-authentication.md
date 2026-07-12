@@ -67,6 +67,10 @@ They cannot manage sessions, application users, OAuth authorization, webhooks,
 or other integration tokens. A route outside the mail integration surface is
 denied even if every available scope was granted.
 
+`mail.metadata.read` also permits the read-only `/api/v1/integration-events`
+cursor endpoint so an integration can replay missed durable events. Webhook
+configuration and `/api/v1/webhook-deliveries` remain application-user-only.
+
 ## Origin and CORS rules
 
 Cookie-authenticated POST, PUT, PATCH, and DELETE requests require an `Origin` matching the request host, `EMAIL_RS_PUBLIC_URL`, or `EMAIL_RS_ALLOWED_ORIGINS`. Bearer mutations do not require Origin, but CORS still controls whether a browser origin can read the response. Same-origin web access needs no CORS header.

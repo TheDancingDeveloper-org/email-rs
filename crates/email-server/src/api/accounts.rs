@@ -27,6 +27,9 @@ pub async fn create_account(
 ) -> Result<Json<AccountRow>> {
     let id = Uuid::new_v4().to_string();
     let use_ssl = body.use_ssl.unwrap_or(true);
+    let oauth_token_json = crate::credentials::seal_optional(body.oauth_token_json.as_deref())?;
+    let password = crate::credentials::seal_optional(body.password.as_deref())?;
+    let smtp_password = crate::credentials::seal_optional(body.smtp_password.as_deref())?;
 
     sqlx::query(
         r#"INSERT INTO accounts
@@ -39,14 +42,14 @@ pub async fn create_account(
     .bind(&body.email)
     .bind(&body.provider_type)
     .bind(&body.auth_type)
-    .bind(&body.oauth_token_json)
+    .bind(oauth_token_json)
     .bind(&body.host)
     .bind(body.port)
     .bind(use_ssl)
-    .bind(&body.password)
+    .bind(password)
     .bind(&body.smtp_host)
     .bind(body.smtp_port)
-    .bind(&body.smtp_password)
+    .bind(smtp_password)
     .execute(&state.pool)
     .await?;
 
@@ -221,6 +224,40 @@ mod tests {
         assert_eq!(body["providerType"], "generic_imap");
         assert!(body["id"].is_string());
         assert!(body["createdAt"].is_string());
+    }
+
+    #[tokio::test]
+    async fn create_account_encrypts_provider_passwords() {
+        let state = setup().await;
+        let payload = serde_json::json!({
+            "name": "Encrypted IMAP",
+            "email": "secure@example.com",
+            "providerType": "generic_imap",
+            "authType": "basic",
+            "host": "imap.example.com",
+            "password": "imap-secret",
+            "smtpHost": "smtp.example.com",
+            "smtpPassword": "smtp-secret"
+        });
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/accounts",
+            Some(payload),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let stored: (String, String) = sqlx::query_as(
+            "SELECT password, smtp_password FROM accounts WHERE email = 'secure@example.com'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert!(stored.0.starts_with("encv1:"));
+        assert!(stored.1.starts_with("encv1:"));
+        assert_eq!(crate::credentials::open(&stored.0).unwrap(), "imap-secret");
+        assert_eq!(crate::credentials::open(&stored.1).unwrap(), "smtp-secret");
     }
 
     #[tokio::test]

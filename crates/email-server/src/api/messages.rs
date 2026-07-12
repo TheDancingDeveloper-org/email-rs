@@ -56,6 +56,7 @@ pub async fn bulk_messages(
     }))
 }
 
+use crate::api::webhooks::fire_webhooks;
 use crate::error::{AppError, Result};
 use crate::providers::factory::provider_for_message;
 use crate::providers::{MailProvider, ProviderAttachment};
@@ -67,6 +68,26 @@ async fn message_folder_id(pool: &sqlx::SqlitePool, message_id: &str) -> Result<
         .fetch_optional(pool)
         .await
         .map_err(Into::into)
+}
+
+async fn message_event_context(
+    pool: &sqlx::SqlitePool,
+    message_id: &str,
+) -> Result<Option<(String, serde_json::Value)>> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT account_id, logical_id FROM messages WHERE id = ?")
+            .bind(message_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(account_id, logical_id)| {
+        (
+            account_id,
+            serde_json::json!({
+                "logicalId": logical_id,
+                "occurrenceId": message_id,
+            }),
+        )
+    }))
 }
 
 async fn refresh_folder_counts(pool: &sqlx::SqlitePool, folder_id: &str) -> Result<()> {
@@ -116,6 +137,12 @@ async fn bulk_message(
     action: &BulkAction,
     affected_folders: &mut BTreeSet<String>,
 ) -> Result<()> {
+    let event = message_event_context(&state.pool, id).await?;
+    let event_type = match action {
+        BulkAction::MarkRead | BulkAction::MarkUnread => "message.updated",
+        BulkAction::Delete => "message.deleted",
+        BulkAction::Archive => "message.moved",
+    };
     let source_folder_id = message_folder_id(&state.pool, id).await?;
     match action {
         BulkAction::MarkRead | BulkAction::MarkUnread => {
@@ -171,6 +198,9 @@ async fn bulk_message(
     if let Some(folder_id) = source_folder_id {
         affected_folders.insert(folder_id);
     }
+    if let Some((account_id, data)) = event {
+        fire_webhooks(&state.pool, &account_id, event_type, data).await;
+    }
     Ok(())
 }
 
@@ -179,6 +209,7 @@ pub async fn patch_message(
     Path(message_id): Path<String>,
     Json(req): Json<PatchMessageRequest>,
 ) -> Result<Json<serde_json::Value>> {
+    let event = message_event_context(&state.pool, &message_id).await?;
     if let Some(is_read) = req.is_read {
         let (folder, uid, provider) = load_provider(&state, &message_id).await?;
         if is_read {
@@ -207,6 +238,10 @@ pub async fn patch_message(
             .await?;
     }
 
+    if let Some((account_id, data)) = event {
+        fire_webhooks(&state.pool, &account_id, "message.updated", data).await;
+    }
+
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
@@ -214,6 +249,7 @@ pub async fn delete_message(
     State(state): State<Arc<AppState>>,
     Path(message_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
+    let event = message_event_context(&state.pool, &message_id).await?;
     let folder_id = message_folder_id(&state.pool, &message_id).await?;
 
     delete_remote(&state, &message_id).await?;
@@ -226,6 +262,9 @@ pub async fn delete_message(
     if let Some(folder_id) = folder_id {
         refresh_folder_counts(&state.pool, &folder_id).await?;
     }
+    if let Some((account_id, data)) = event {
+        fire_webhooks(&state.pool, &account_id, "message.deleted", data).await;
+    }
 
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
@@ -234,6 +273,7 @@ pub async fn archive_message(
     State(state): State<Arc<AppState>>,
     Path(message_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
+    let event = message_event_context(&state.pool, &message_id).await?;
     let source_folder_id = message_folder_id(&state.pool, &message_id).await?;
 
     // Find the archive folder for this message's account.
@@ -264,6 +304,12 @@ pub async fn archive_message(
         .await?;
     if let Some(source_folder_id) = source_folder_id {
         refresh_folder_counts(&state.pool, &source_folder_id).await?;
+    }
+    if let Some((account_id, mut data)) = event {
+        if let Some(object) = data.as_object_mut() {
+            object.insert("destination".to_string(), destination.into());
+        }
+        fire_webhooks(&state.pool, &account_id, "message.moved", data).await;
     }
 
     Ok(Json(serde_json::json!({ "status": "archived" })))

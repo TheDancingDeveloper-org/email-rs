@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use futures::stream::{self, StreamExt};
 use sqlx::SqlitePool;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -11,6 +12,8 @@ use crate::api::webhooks::fire_webhooks;
 use crate::error::{AppError, Result};
 use crate::providers::factory::provider_for_account;
 use crate::providers::MailProvider;
+
+static ACCOUNT_SYNC_LOCKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 /// Background IMAP sync engine.
 /// Periodically polls all configured accounts and updates the local SQLite cache.
@@ -56,6 +59,34 @@ impl ImapSyncEngine {
     }
 
     async fn sync_account_inner(
+        &self,
+        account_id: &str,
+        event_tx: Option<&broadcast::Sender<String>>,
+    ) -> Result<()> {
+        let locks = ACCOUNT_SYNC_LOCKS.get_or_init(|| Mutex::new(HashSet::new()));
+        {
+            let mut active = locks.lock().await;
+            if !active.insert(account_id.to_string()) {
+                return Err(AppError::Conflict(format!(
+                    "account {account_id} is already synchronizing"
+                )));
+            }
+        }
+        let result = self.sync_account_unlocked(account_id, event_tx).await;
+        locks.lock().await.remove(account_id);
+        if result.is_ok() {
+            fire_webhooks(
+                &self.pool,
+                account_id,
+                "sync.completed",
+                serde_json::json!({"status": "completed"}),
+            )
+            .await;
+        }
+        result
+    }
+
+    async fn sync_account_unlocked(
         &self,
         account_id: &str,
         event_tx: Option<&broadcast::Sender<String>>,
@@ -497,13 +528,13 @@ async fn sync_folder(
         }
     }
 
-    // Fire new_message webhooks for genuinely inserted messages.
+    // Persist message.created events for genuinely inserted messages.
     if !new_message_payloads.is_empty() {
         let pool_ref = pool.clone();
         let account_id_str = account_id.to_string();
         tokio::spawn(async move {
             for payload in new_message_payloads {
-                fire_webhooks(&pool_ref, &account_id_str, "new_message", payload).await;
+                fire_webhooks(&pool_ref, &account_id_str, "message.created", payload).await;
             }
         });
     }

@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod calendar;
 pub mod config;
+pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod imap;
@@ -30,9 +31,11 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
     info!("starting email-server on {}", cfg.bind_addr());
 
     let (pool, has_fts) = db::create_pool(&cfg.database_url).await?;
+    credentials::migrate_account_credentials(&pool).await?;
     auth::app::bootstrap_from_env(&pool).await?;
     let auth_settings = auth::app::AuthSettings::from_env(cfg.public_url.as_deref());
     let app_state = Arc::new(AppState::with_auth(pool.clone(), has_fts, auth_settings));
+    api::webhooks::spawn_delivery_worker(pool.clone());
     SyncOrchestrator::spawn_background(pool, app_state.event_tx.clone());
 
     let app = build_app(app_state, &cfg.frontend_dist);

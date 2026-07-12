@@ -184,8 +184,9 @@ async fn upsert_account(
     provider_type: &str,
     token_json: &str,
     token_expiry: Option<String>,
-) -> std::result::Result<String, sqlx::Error> {
+) -> Result<String> {
     let id = Uuid::new_v4().to_string();
+    let token_json = crate::credentials::seal(token_json)?;
     sqlx::query(
         r#"INSERT INTO accounts (id, name, email, provider_type, auth_type, oauth_token_json, token_expiry, sync_days_limit)
            VALUES (?, ?, ?, ?, 'oauth2', ?, ?, 30)
@@ -493,6 +494,10 @@ async fn update_account_token(
     token_json: &str,
     token_expiry: Option<String>,
 ) -> Response {
+    let token_json = match crate::credentials::seal(token_json) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
     let result =
         sqlx::query("UPDATE accounts SET oauth_token_json = ?, token_expiry = ? WHERE id = ?")
             .bind(token_json)

@@ -220,6 +220,14 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         }
     }
 
+    let migration_012 = include_str!("migrations/012_webhook_deliveries.sql");
+    for statement in migration_012.split(';') {
+        let trimmed = statement.trim();
+        if !trimmed.is_empty() {
+            sqlx::query(trimmed).execute(pool).await?;
+        }
+    }
+
     run_message_identity_migration(pool).await?;
     run_attachment_metadata_migration(pool).await?;
     run_application_auth_migration(pool).await?;

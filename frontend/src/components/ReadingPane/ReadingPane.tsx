@@ -4,6 +4,7 @@ import { useAppStore } from '../../store';
 import { useApi } from '../../hooks/useApi';
 import { useContextMenu } from '../ContextMenu/ContextMenu';
 import type { Label } from '../../types';
+import { sanitizeEmailHtml } from '../../utils/sanitizeEmailHtml';
 
 interface FullMessage {
   id: string;
@@ -129,13 +130,6 @@ function ReadIcon({ isRead }: { isRead: boolean }) {
       <path d="M1.5 4.5h8M1.5 7.5h11M1.5 10.5h11" />
     </svg>
   );
-}
-
-function injectEmailBase(html: string, dark: boolean): string {
-  const bg = dark ? '#e8e5e0' : '#faf9f7';
-  const style = `<style>html,body{background-color:${bg}!important;}</style>`;
-  if (html.includes('</head>')) return html.replace('</head>', `${style}</head>`);
-  return style + html;
 }
 
 export function ReadingPane() {
@@ -547,8 +541,9 @@ export function ReadingPane() {
         {message.body?.htmlBody ? (
           <iframe
             className={styles.bodyFrame}
-            srcDoc={injectEmailBase(message.body.htmlBody, theme === 'dark')}
-            sandbox="allow-same-origin"
+            srcDoc={sanitizeEmailHtml(message.body.htmlBody, theme === 'dark')}
+            sandbox=""
+            referrerPolicy="no-referrer"
             title="Message body"
           />
         ) : (

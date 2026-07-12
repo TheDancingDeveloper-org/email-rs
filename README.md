@@ -82,6 +82,7 @@ All configuration is via environment variables (`.env` or `docker-compose.yml`).
 | `EMAIL_RS_HEADLESS` | Set to `1` to disable the desktop window on Linux | unset |
 | `EMAIL_RS_BOOTSTRAP_USERNAME` | Initial single-user login name | `admin` |
 | `EMAIL_RS_BOOTSTRAP_PASSWORD` | Initial password secret (12+ characters; used only when no app user exists) | — |
+| `EMAIL_RS_CREDENTIAL_KEY` | Stable base64-encoded 32-byte AES key for provider credentials | — |
 | `EMAIL_RS_PUBLIC_URL` | Required HTTPS URL for a non-loopback deployment | — |
 | `EMAIL_RS_ALLOWED_ORIGINS` | Comma-separated Capacitor/development origins allowed by CORS | — |
 | `EMAIL_RS_SESSION_TTL_SECS` | Browser/desktop cookie lifetime | `43200` (12 hours) |
@@ -228,6 +229,21 @@ The complete OpenAPI 3.1 contract is available at `/api/v1/openapi.json` and via
 the `export_openapi` binary. `clients/python` is the generated, version-matched
 `email-rs-client` package; tagged releases publish it to the Forgejo Python
 package registry. Consumers should pin the exact SDK and email-rs image version.
+
+OAuth token JSON and IMAP/SMTP passwords are stored as randomized AES-256-GCM
+envelopes. Generate `EMAIL_RS_CREDENTIAL_KEY` once with
+`openssl rand -base64 32`, keep it in secrets management, and back it up
+separately from SQLite. Startup migrates legacy plaintext credential rows in
+place and fails closed if credential rows exist but the key is missing or wrong.
+
+Integration events are persisted before delivery. Webhook payloads contain a
+top-level `id`, `event`, `timestamp`, `accountId`, and `data`; failed deliveries
+use bounded exponential retry and their status is visible at
+`/api/v1/webhook-deliveries`. A consumer with `mail.metadata.read` can recover
+missed events from `/api/v1/integration-events?after=<event-id>`. Stable event
+names include `message.created`, `message.updated`, `message.moved`,
+`message.deleted`, and `sync.completed`. The legacy webhook subscription name
+`new_message` continues to match `message.created` during migration.
 
 ---
 

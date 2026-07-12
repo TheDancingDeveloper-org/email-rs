@@ -82,6 +82,8 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/webhooks"),
     ("PATCH", "/webhooks/{id}"),
     ("DELETE", "/webhooks/{id}"),
+    ("GET", "/integration-events"),
+    ("GET", "/webhook-deliveries"),
 ];
 
 pub fn openapi_value() -> serde_json::Value {
@@ -230,6 +232,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/webhooks/{id}",
             patch(webhooks::update_webhook).delete(webhooks::delete_webhook),
         )
+        .route("/integration-events", get(webhooks::list_events))
+        .route("/webhook-deliveries", get(webhooks::list_deliveries))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             crate::auth::app::require_auth,

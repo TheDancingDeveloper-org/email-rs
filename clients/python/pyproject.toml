@@ -1,6 +1,6 @@
 [project]
 name = "email-rs-client"
-version = "0.4.0"
+version = "0.5.0"
 description = "A client library for accessing email-rs API"
 authors = []
 requires-python = ">=3.11"

@@ -31,6 +31,7 @@ from .error_response import ErrorResponse
 from .event_link import EventLink
 from .folder import Folder
 from .full_message import FullMessage
+from .integration_event import IntegrationEvent
 from .integration_token import IntegrationToken
 from .label import Label
 from .message import Message
@@ -54,6 +55,7 @@ from .update_rule_body import UpdateRuleBody
 from .update_webhook import UpdateWebhook
 from .version_response import VersionResponse
 from .webhook import Webhook
+from .webhook_delivery import WebhookDelivery
 
 __all__ = (
     "Account",
@@ -87,6 +89,7 @@ __all__ = (
     "EventLink",
     "Folder",
     "FullMessage",
+    "IntegrationEvent",
     "IntegrationToken",
     "Label",
     "Message",
@@ -110,4 +113,5 @@ __all__ = (
     "UpdateWebhook",
     "VersionResponse",
     "Webhook",
+    "WebhookDelivery",
 )
