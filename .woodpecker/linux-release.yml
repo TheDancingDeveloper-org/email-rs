@@ -24,7 +24,8 @@ steps:
 
   # ── Build server and native FluentGUI Linux binaries ────────────────────────
   - name: build-binary
-    image: rust:1.86-slim
+    # The locked Fluent desktop graph includes crates whose MSRV is Rust 1.88.
+    image: rust:1.88-slim
     depends_on: [build-frontend]
     commands:
       - apt-get update && apt-get install -y pkg-config libssl-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && rm -rf /var/lib/apt/lists/*
