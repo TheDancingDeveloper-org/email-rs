@@ -5,6 +5,16 @@ use sqlx::{
     SqlitePool,
 };
 
+#[derive(sqlx::FromRow)]
+struct LogicalIdentityRow {
+    id: String,
+    account_id: String,
+    message_id: Option<String>,
+    from_email: Option<String>,
+    date: Option<String>,
+    subject: Option<String>,
+}
+
 /// Returns `(pool, has_fts)` — `has_fts` is false if SQLite was built without FTS5.
 pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool)> {
     // Strip sqlite:// prefix to get the file path, then ensure parent dir exists.
@@ -213,7 +223,132 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     run_message_identity_migration(pool).await?;
     run_attachment_metadata_migration(pool).await?;
     run_application_auth_migration(pool).await?;
+    run_integration_token_migration(pool).await?;
+    run_logical_message_id_migration(pool).await?;
 
+    Ok(())
+}
+
+async fn run_logical_message_id_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 16")
+            .fetch_optional(pool)
+            .await?;
+    if applied.is_some() {
+        return Ok(());
+    }
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('messages')")
+        .fetch_all(pool)
+        .await?;
+    if !columns.iter().any(|column| column == "logical_id") {
+        sqlx::query("ALTER TABLE messages ADD COLUMN logical_id TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await?;
+    }
+    let rows: Vec<LogicalIdentityRow> = sqlx::query_as(
+        r#"SELECT id, account_id, message_id, from_email, date, subject
+           FROM messages WHERE logical_id = ''"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    for row in rows {
+        let logical_id = logical_message_id(
+            &row.account_id,
+            row.message_id.as_deref(),
+            row.from_email.as_deref(),
+            row.date.as_deref(),
+            row.subject.as_deref(),
+            Some(&row.id),
+        );
+        sqlx::query("UPDATE messages SET logical_id = ? WHERE id = ?")
+            .bind(logical_id)
+            .bind(row.id)
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_logical_id ON messages(logical_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("INSERT INTO schema_migrations (version) VALUES (16)")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Reconcile a logical message across mailbox moves. Exact duplicate copies
+/// intentionally share an identifier; the folder/UID occurrence remains distinct.
+pub(crate) fn logical_message_id(
+    account_id: &str,
+    rfc_message_id: Option<&str>,
+    from_email: Option<&str>,
+    date: Option<&str>,
+    subject: Option<&str>,
+    fallback_occurrence_id: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    fn normalized(value: Option<&str>) -> String {
+        value.unwrap_or_default().trim().to_ascii_lowercase()
+    }
+    let identifying_metadata = format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        normalized(rfc_message_id),
+        normalized(from_email),
+        normalized(date),
+        normalized(subject),
+    );
+    let identity = if identifying_metadata.chars().all(|ch| ch == '\u{1f}') {
+        fallback_occurrence_id.unwrap_or_default().to_string()
+    } else {
+        identifying_metadata
+    };
+    let digest = Sha256::digest(format!("{account_id}\u{1f}{identity}").as_bytes());
+    format!(
+        "lm_{}",
+        digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+async fn run_integration_token_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 15")
+            .fetch_optional(pool)
+            .await?;
+    if applied.is_some() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS integration_tokens (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            token_prefix TEXT NOT NULL,
+            scopes_json TEXT NOT NULL,
+            expires_at INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_used_at TEXT,
+            revoked_at TEXT
+        )"#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_integration_tokens_user ON integration_tokens(user_id, created_at)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_integration_tokens_hash ON integration_tokens(token_hash)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("INSERT INTO schema_migrations (version) VALUES (15)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -630,6 +765,36 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     use super::*;
+
+    #[test]
+    fn logical_identity_is_stable_across_occurrences_and_not_rfc_only() {
+        let first = logical_message_id(
+            "account",
+            Some("<duplicate@example>"),
+            Some("one@example.test"),
+            Some("2026-07-11T00:00:00Z"),
+            Some("First"),
+            Some("occurrence-a"),
+        );
+        let moved = logical_message_id(
+            "account",
+            Some("<duplicate@example>"),
+            Some("one@example.test"),
+            Some("2026-07-11T00:00:00Z"),
+            Some("First"),
+            Some("occurrence-b"),
+        );
+        let distinct_duplicate = logical_message_id(
+            "account",
+            Some("<duplicate@example>"),
+            Some("two@example.test"),
+            Some("2026-07-12T00:00:00Z"),
+            Some("Second"),
+            Some("occurrence-c"),
+        );
+        assert_eq!(first, moved);
+        assert_ne!(first, distinct_duplicate);
+    }
 
     #[tokio::test]
     async fn legacy_identity_migration_creates_backup_and_reconciliation_marker() {

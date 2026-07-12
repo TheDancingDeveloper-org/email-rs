@@ -42,6 +42,22 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      - name: Export schema-bearing OpenAPI contract
+        run: |
+          cargo run -q -p email-server --bin export_openapi --locked > /tmp/email-rs-openapi.json
+          python3 - <<'PY'
+          import json
+          import tomllib
+          doc = json.load(open('/tmp/email-rs-openapi.json'))
+          version = tomllib.load(open('crates/email-server/Cargo.toml', 'rb'))['package']['version']
+          assert doc['openapi'] == '3.1.0'
+          assert doc['info']['version'] == version
+          assert len(doc['paths']) >= 50
+          PY
+
+      - name: Type-check generated Python client syntax
+        run: python3 -m compileall -q clients/python/email_rs_client
+
   docker:
     runs-on: ubuntu-latest
     steps:

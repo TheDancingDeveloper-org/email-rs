@@ -305,7 +305,7 @@ async fn search_structured(
         ""
     };
     let sql = format!(
-        r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
+        r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
                   m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
                   m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
                   m.snoozed_until
@@ -343,7 +343,7 @@ async fn search_fts(
     // Column weights: message_id(unindexed)=0, subject=10, from_name=5, from_email=5, preview=2
     let rows = if let Some(aid) = account_id {
         sqlx::query_as::<_, MessageRow>(
-            r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
+            r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
                       m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
                       m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
                       m.snoozed_until
@@ -359,7 +359,7 @@ async fn search_fts(
         .await?
     } else {
         sqlx::query_as::<_, MessageRow>(
-            r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
+            r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
                       m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
                       m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
                       m.snoozed_until
@@ -394,7 +394,7 @@ async fn search_like(
 
     let rows = if let Some(aid) = account_id {
         sqlx::query_as::<_, MessageRow>(&format!(
-            r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
+            r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
                       m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
                       m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
                       m.snoozed_until
@@ -423,7 +423,7 @@ async fn search_like(
         .await?
     } else {
         sqlx::query_as::<_, MessageRow>(&format!(
-            r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
+            r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
                       m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
                       m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
                       m.snoozed_until

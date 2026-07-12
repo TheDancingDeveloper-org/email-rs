@@ -81,7 +81,16 @@ fn env_i64(name: &str, default: i64) -> i64 {
 pub struct AuthPrincipal {
     pub user_id: String,
     pub session_id: String,
-    pub kind: ClientKind,
+    pub kind: PrincipalKind,
+    pub scopes: Arc<HashSet<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalKind {
+    Cookie,
+    Bearer,
+    Integration,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -234,7 +243,17 @@ pub async fn refresh(
     {
         return AppError::Database(err).into_response();
     }
-    issue_session(&state, principal.user_id, principal.kind).await
+    let kind = match principal.kind {
+        PrincipalKind::Cookie => ClientKind::Cookie,
+        PrincipalKind::Bearer => ClientKind::Bearer,
+        PrincipalKind::Integration => {
+            return error(
+                StatusCode::FORBIDDEN,
+                "integration tokens cannot be refreshed",
+            )
+        }
+    };
+    issue_session(&state, principal.user_id, kind).await
 }
 
 pub async fn logout(
@@ -298,39 +317,145 @@ pub async fn require_auth(
     let session = match sqlx::query_as::<_, SessionRow>(
         "SELECT id, user_id, kind FROM app_sessions WHERE token_hash = ? AND expires_at > ?",
     )
-    .bind(token_hash)
+    .bind(&token_hash)
     .bind(now)
     .fetch_optional(&state.pool)
     .await
     {
-        Ok(Some(session)) => session,
-        Ok(None) => return error(StatusCode::UNAUTHORIZED, "session expired or revoked"),
+        Ok(session) => session,
         Err(err) => return AppError::Database(err).into_response(),
     };
-    let stored_kind = if session.kind == "bearer" {
-        ClientKind::Bearer
+    let principal = if let Some(session) = session {
+        let stored_kind = if session.kind == "bearer" {
+            ClientKind::Bearer
+        } else {
+            ClientKind::Cookie
+        };
+        if stored_kind != presented_kind {
+            return error(StatusCode::UNAUTHORIZED, "invalid authentication mechanism");
+        }
+        if stored_kind == ClientKind::Cookie
+            && is_mutation(request.method())
+            && !valid_origin(request.headers(), &state.auth)
+        {
+            return error(StatusCode::FORBIDDEN, "untrusted request origin");
+        }
+        let _ = sqlx::query("UPDATE app_sessions SET last_seen_at = datetime('now') WHERE id = ?")
+            .bind(&session.id)
+            .execute(&state.pool)
+            .await;
+        AuthPrincipal {
+            user_id: session.user_id,
+            session_id: session.id,
+            kind: if stored_kind == ClientKind::Bearer {
+                PrincipalKind::Bearer
+            } else {
+                PrincipalKind::Cookie
+            },
+            scopes: Arc::new(HashSet::new()),
+        }
     } else {
-        ClientKind::Cookie
-    };
-    if stored_kind != presented_kind {
-        return error(StatusCode::UNAUTHORIZED, "invalid authentication mechanism");
-    }
-    if stored_kind == ClientKind::Cookie
-        && is_mutation(request.method())
-        && !valid_origin(request.headers(), &state.auth)
-    {
-        return error(StatusCode::FORBIDDEN, "untrusted request origin");
-    }
-    let _ = sqlx::query("UPDATE app_sessions SET last_seen_at = datetime('now') WHERE id = ?")
-        .bind(&session.id)
+        if presented_kind != ClientKind::Bearer {
+            return error(StatusCode::UNAUTHORIZED, "session expired or revoked");
+        }
+        #[derive(sqlx::FromRow)]
+        struct IntegrationRow {
+            id: String,
+            user_id: String,
+            scopes_json: String,
+        }
+        let integration = match sqlx::query_as::<_, IntegrationRow>(
+            r#"SELECT id, user_id, scopes_json FROM integration_tokens
+               WHERE token_hash = ? AND revoked_at IS NULL
+                 AND (expires_at IS NULL OR expires_at > ?)"#,
+        )
+        .bind(&token_hash)
+        .bind(now)
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(Some(integration)) => integration,
+            Ok(None) => return error(StatusCode::UNAUTHORIZED, "credential expired or revoked"),
+            Err(err) => return AppError::Database(err).into_response(),
+        };
+        let scopes: HashSet<String> = match serde_json::from_str(&integration.scopes_json) {
+            Ok(scopes) => scopes,
+            Err(_) => {
+                return error(
+                    StatusCode::UNAUTHORIZED,
+                    "integration credential is invalid",
+                )
+            }
+        };
+        let Some(required_scope) =
+            required_integration_scope(request.method(), request.uri().path())
+        else {
+            return error(
+                StatusCode::FORBIDDEN,
+                "integration credentials cannot access this route",
+            );
+        };
+        if !scopes.contains(required_scope) {
+            return error(
+                StatusCode::FORBIDDEN,
+                format!("integration token requires scope {required_scope}"),
+            );
+        }
+        let _ = sqlx::query(
+            "UPDATE integration_tokens SET last_used_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&integration.id)
         .execute(&state.pool)
         .await;
-    request.extensions_mut().insert(AuthPrincipal {
-        user_id: session.user_id,
-        session_id: session.id,
-        kind: stored_kind,
-    });
+        AuthPrincipal {
+            user_id: integration.user_id,
+            session_id: integration.id,
+            kind: PrincipalKind::Integration,
+            scopes: Arc::new(scopes),
+        }
+    };
+    request.extensions_mut().insert(principal);
     next.run(request).await
+}
+
+fn required_integration_scope(method: &Method, path: &str) -> Option<&'static str> {
+    if *method == Method::POST && path == "/messages" {
+        return Some("mail.send");
+    }
+    if *method == Method::POST && path.starts_with("/sync/") {
+        return Some("mail.sync");
+    }
+    if path.starts_with("/accounts") {
+        return (*method == Method::GET).then_some("mail.accounts.read");
+    }
+    if *method == Method::GET
+        && path.starts_with("/messages/")
+        && (path.matches('/').count() == 2 || path.contains("/attachments"))
+    {
+        return Some("mail.body.read");
+    }
+    if *method == Method::GET
+        && (path.starts_with("/folders/")
+            || path == "/search"
+            || path == "/search/suggest"
+            || path == "/contacts/suggest"
+            || path.starts_with("/smart-folders/")
+            || path == "/labels"
+            || path.starts_with("/labels/"))
+    {
+        return Some("mail.metadata.read");
+    }
+    if matches!(
+        *method,
+        Method::POST | Method::PATCH | Method::PUT | Method::DELETE
+    ) && (path.starts_with("/messages/")
+        || path == "/messages/bulk"
+        || path.starts_with("/folders/")
+        || path.starts_with("/labels/"))
+    {
+        return Some("mail.modify");
+    }
+    None
 }
 
 fn presented_token(headers: &HeaderMap) -> Option<(String, ClientKind)> {
@@ -475,7 +600,7 @@ fn new_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
-fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -768,5 +893,80 @@ mod tests {
             .await
             .unwrap();
         assert!(!crate::api::auth::oauth_owner_is_active(&state, &pending).await);
+    }
+
+    #[tokio::test]
+    async fn integration_tokens_are_hash_only_scoped_and_revocable() {
+        let state = setup().await;
+        seed_user(&state).await;
+        let (_, login) = login_as(&state, ClientKind::Bearer).await;
+        let user_authorization = format!("Bearer {}", login["token"].as_str().unwrap());
+
+        let (status, _, created) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::POST,
+            "/integration-tokens",
+            Some(serde_json::json!({
+                "name": "myAIAgent",
+                "scopes": ["mail.accounts.read"]
+            })),
+            &[("authorization", &user_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let integration_token = created["token"].as_str().unwrap();
+        let token_id = created["id"].as_str().unwrap();
+        assert!(integration_token.starts_with("eirs_"));
+
+        let stored: (String, String) =
+            sqlx::query_as("SELECT token_hash, token_prefix FROM integration_tokens WHERE id = ?")
+                .bind(token_id)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_ne!(stored.0, integration_token);
+        assert!(integration_token.starts_with(&stored.1));
+
+        let integration_authorization = format!("Bearer {integration_token}");
+        let (status, _, _) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::GET,
+            "/accounts",
+            None,
+            &[("authorization", &integration_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _, denied) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::GET,
+            "/messages/example",
+            None,
+            &[("authorization", &integration_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(denied["error"].as_str().unwrap().contains("mail.body.read"));
+
+        let (status, _, _) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::DELETE,
+            &format!("/integration-tokens/{token_id}"),
+            None,
+            &[("authorization", &user_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _, _) = send(
+            crate::api::router(state),
+            Method::GET,
+            "/accounts",
+            None,
+            &[("authorization", &integration_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

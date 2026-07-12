@@ -184,7 +184,7 @@ pub async fn list_label_messages(
     let offset = (page - 1) * per_page;
 
     let rows = sqlx::query_as::<_, MessageRow>(
-        r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id, m.thread_id,
+        r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id, m.thread_id,
                   m.subject, m.from_name, m.from_email, m.to_json, m.date,
                   m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview, m.snoozed_until
            FROM messages m

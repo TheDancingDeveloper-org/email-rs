@@ -1857,7 +1857,7 @@ dependencies = [
 
 [[package]]
 name = "email-client"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "email-types",
@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "email-desktop-fluent"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "email-server"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1938,6 +1938,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "urlencoding",
+ "utoipa",
  "uuid",
  "webkit2gtk",
  "webpki-roots 0.26.11",
@@ -1947,11 +1948,12 @@ dependencies = [
 
 [[package]]
 name = "email-types"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "serde",
  "sqlx",
+ "utoipa",
 ]
 
 [[package]]
@@ -8740,6 +8742,29 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "utoipa"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bde15df68e80b16c7d16b9616e80770ad158988daa56a27dccd1e55558b0160"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+ "utoipa-gen",
+]
+
+[[package]]
+name = "utoipa-gen"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba0b99ee52df3028635d93840c797102da61f8a7bb3cf751032455895b52ef8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
 
 [[package]]
 name = "uuid"

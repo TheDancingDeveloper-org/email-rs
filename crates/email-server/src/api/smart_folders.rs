@@ -26,7 +26,7 @@ pub async fn list_smart_messages(
     let rows = match kind.as_str() {
         "all" => {
             sqlx::query_as::<_, MessageRow>(
-                r#"SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id,
+                r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
                           m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
                           m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
                           m.snoozed_until
@@ -44,7 +44,7 @@ pub async fn list_smart_messages(
         }
         "unread" => {
             sqlx::query_as::<_, MessageRow>(
-                r#"SELECT id, account_id, folder_id, uid, message_id,
+                r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id,
                           thread_id, subject, from_name, from_email, to_json,
                           date, is_read, is_flagged, is_draft, has_attachments, preview,
                           snoozed_until
@@ -61,7 +61,7 @@ pub async fn list_smart_messages(
         }
         "flagged" => {
             sqlx::query_as::<_, MessageRow>(
-                r#"SELECT id, account_id, folder_id, uid, message_id,
+                r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id,
                           thread_id, subject, from_name, from_email, to_json,
                           date, is_read, is_flagged, is_draft, has_attachments, preview,
                           snoozed_until
@@ -78,7 +78,7 @@ pub async fn list_smart_messages(
         }
         "snoozed" => {
             sqlx::query_as::<_, MessageRow>(
-                r#"SELECT id, account_id, folder_id, uid, message_id,
+                r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id,
                           thread_id, subject, from_name, from_email, to_json,
                           date, is_read, is_flagged, is_draft, has_attachments, preview,
                           snoozed_until

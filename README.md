@@ -218,6 +218,19 @@ cargo build --release --target x86_64-pc-windows-msvc -p email-server
 
 ---
 
+## Service integrations and Python SDK
+
+Machine consumers authenticate with revocable integration tokens created by an
+email-rs application user. Tokens are stored only as SHA-256 hashes and can be
+limited to account, metadata, body, mutation, send, and sync scopes.
+
+The complete OpenAPI 3.1 contract is available at `/api/v1/openapi.json` and via
+the `export_openapi` binary. `clients/python` is the generated, version-matched
+`email-rs-client` package; tagged releases publish it to the Forgejo Python
+package registry. Consumers should pin the exact SDK and email-rs image version.
+
+---
+
 ## License
 
 MIT

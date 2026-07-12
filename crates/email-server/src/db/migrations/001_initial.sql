@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS folders (
 
 CREATE TABLE IF NOT EXISTS messages (
     id              TEXT PRIMARY KEY,
+    logical_id      TEXT NOT NULL DEFAULT '',
     account_id      TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     folder_id       TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
     uid             INTEGER NOT NULL,
@@ -51,6 +52,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder_id);
 CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account_id);
 CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_rfc_message_id ON messages(message_id);
+CREATE INDEX IF NOT EXISTS idx_messages_logical_id ON messages(logical_id);
 
 CREATE TABLE IF NOT EXISTS message_bodies (
     message_id   TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,

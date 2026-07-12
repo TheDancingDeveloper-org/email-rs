@@ -10745,6 +10745,8 @@ mod tests {
     fn message(id: &str, folder_id: &str, is_read: bool) -> Message {
         Message {
             id: id.to_string(),
+            occurrence_id: id.to_string(),
+            logical_id: format!("logical-{id}"),
             account_id: "account".to_string(),
             folder_id: folder_id.to_string(),
             uid: 1,
@@ -10767,6 +10769,8 @@ mod tests {
     fn full_message(id: &str, folder_id: &str, is_read: bool, is_flagged: bool) -> FullMessage {
         FullMessage {
             id: id.to_string(),
+            occurrence_id: id.to_string(),
+            logical_id: format!("logical-{id}"),
             account_id: "account".to_string(),
             folder_id: folder_id.to_string(),
             uid: 1,

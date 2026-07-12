@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
+    extract::State,
     middleware,
     routing::{get, patch, post, put},
     Json, Router,
@@ -14,8 +15,10 @@ pub mod calendar;
 pub mod compose;
 pub mod events;
 pub mod folders;
+pub mod integration_tokens;
 pub mod labels;
 pub mod messages;
+pub mod openapi;
 pub mod rules;
 pub mod search;
 pub mod smart_folders;
@@ -72,6 +75,9 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/app-auth/logout"),
     ("POST", "/app-auth/refresh"),
     ("DELETE", "/app-auth/sessions/{id}"),
+    ("GET", "/integration-tokens"),
+    ("POST", "/integration-tokens"),
+    ("DELETE", "/integration-tokens/{id}"),
     ("GET", "/webhooks"),
     ("POST", "/webhooks"),
     ("PATCH", "/webhooks/{id}"),
@@ -79,27 +85,46 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
 ];
 
 pub fn openapi_value() -> serde_json::Value {
-    let mut paths = serde_json::Map::new();
-    for (method, path) in PRIVILEGED_ROUTE_INVENTORY {
-        paths
-            .entry((*path).to_string())
-            .or_insert_with(|| serde_json::json!({}));
-        paths.get_mut(*path).and_then(serde_json::Value::as_object_mut).unwrap().insert(
-            method.to_ascii_lowercase(),
-            serde_json::json!({
-                "operationId": format!("{}_{}", method.to_ascii_lowercase(), path.trim_matches('/').replace(['/', '{', '}'], "_")),
-                "security": [{"bearerAuth": []}],
-                "responses": {"200": {"description": "Success"}, "401": {"description": "Authentication required"}}
-            }),
-        );
+    openapi::value()
+}
+
+async fn readiness(State(state): State<Arc<AppState>>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schema_migrations WHERE version >= 16")
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(1..) => Json(serde_json::json!({"status": "ready"})).into_response(),
+        Ok(_) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "database migrations are incomplete"})),
+        )
+            .into_response(),
+        Err(error) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": format!("database is not ready: {error}")})),
+        )
+            .into_response(),
     }
-    serde_json::json!({
-        "openapi": "3.1.0",
-        "info": {"title": "email-rs API", "version": env!("CARGO_PKG_VERSION")},
-        "servers": [{"url": "/api/v1"}],
-        "paths": paths,
-        "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}}
-    })
+}
+
+async fn version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "productVersion": env!("CARGO_PKG_VERSION"),
+        "apiVersion": "v1",
+    }))
+}
+
+async fn capabilities() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "productVersion": env!("CARGO_PKG_VERSION"),
+        "apiVersion": "v1",
+        "capabilities": [
+            "mail.accounts", "mail.metadata", "mail.body", "mail.attachments",
+            "mail.search", "mail.mutations", "mail.send", "mail.sync"
+        ],
+        "integrationScopes": integration_tokens::ALLOWED_SCOPES,
+    }))
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -190,6 +215,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::delete(crate::auth::app::revoke),
         )
         .route(
+            "/integration-tokens",
+            get(integration_tokens::list_tokens).post(integration_tokens::create_token),
+        )
+        .route(
+            "/integration-tokens/{id}",
+            axum::routing::delete(integration_tokens::revoke_token),
+        )
+        .route(
             "/webhooks",
             get(webhooks::list_webhooks).post(webhooks::create_webhook),
         )
@@ -204,6 +237,9 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/ready", get(readiness))
+        .route("/version", get(version))
+        .route("/capabilities", get(capabilities))
         .route("/openapi.json", get(|| async { Json(openapi_value()) }))
         .route("/app-auth/bootstrap", post(crate::auth::app::bootstrap))
         .route("/app-auth/login", post(crate::auth::app::login))
@@ -211,4 +247,40 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/auth/microsoft/callback", get(auth::microsoft_callback))
         .merge(protected)
         .with_state(state)
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn openapi_covers_every_protected_operation_with_schemas_and_auth_errors() {
+        let document = openapi_value();
+        assert_eq!(document["openapi"], "3.1.0");
+        assert_eq!(document["info"]["version"], env!("CARGO_PKG_VERSION"));
+        let paths = document["paths"].as_object().unwrap();
+        let mut operation_ids = HashSet::new();
+        for (method, path) in PRIVILEGED_ROUTE_INVENTORY {
+            let operation = &paths[*path][method.to_ascii_lowercase()];
+            assert!(operation.is_object(), "missing {method} {path}");
+            assert!(operation["responses"].as_object().is_some_and(|responses| {
+                responses.keys().any(|status| status.starts_with('2'))
+            }));
+            assert!(operation["responses"]["401"].is_object(), "{method} {path}");
+            assert!(operation["responses"]["403"].is_object(), "{method} {path}");
+            let operation_id = operation["operationId"].as_str().unwrap();
+            assert!(!operation_id.starts_with("doc_"));
+            assert!(
+                operation_ids.insert(operation_id),
+                "duplicate {operation_id}"
+            );
+        }
+        let message = &document["components"]["schemas"]["Message"]["properties"];
+        assert_eq!(message["logicalId"]["type"], "string");
+        assert_eq!(message["occurrenceId"]["type"], "string");
+        assert!(paths["/messages"]["post"]["requestBody"].is_object());
+        assert!(paths["/folders/{id}/messages"]["get"]["parameters"].is_array());
+    }
 }

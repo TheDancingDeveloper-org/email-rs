@@ -60,6 +60,8 @@ fn test_folder(id: &str, unread: i64) -> Folder {
 fn test_message(id: &str, is_read: bool) -> Message {
     Message {
         id: id.to_string(),
+        occurrence_id: id.to_string(),
+        logical_id: format!("logical-{id}"),
         account_id: "account-1".to_string(),
         folder_id: "inbox".to_string(),
         uid: 1,
@@ -82,6 +84,8 @@ fn test_message(id: &str, is_read: bool) -> Message {
 fn test_full_message(id: &str) -> FullMessage {
     FullMessage {
         id: id.to_string(),
+        occurrence_id: id.to_string(),
+        logical_id: format!("logical-{id}"),
         account_id: "account-1".to_string(),
         folder_id: "inbox".to_string(),
         uid: 1,

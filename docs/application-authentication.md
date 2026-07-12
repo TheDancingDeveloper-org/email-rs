@@ -11,6 +11,8 @@ Provider credentials authorize email-rs to access Gmail, Microsoft, or IMAP. App
 - Only SHA-256 token hashes are stored in `app_sessions`.
 - Cookie sessions default to 12 hours; bearer sessions default to 30 days.
 - Refresh rotates the credential. Logout and revocation delete it server-side.
+- Service integrations use separately managed, revocable bearer tokens. Only a
+  SHA-256 hash and a display prefix are stored; the plaintext is returned once.
 - OAuth authorization state contains the initiating application user/session and optional account ID. A revoked or expired initiating session invalidates the callback state.
 
 ## Public endpoints
@@ -44,10 +46,26 @@ Use `"client": "bearer"` for a native mobile login. A successful response contai
 |---|---|---|
 | `GET` | `/api/v1/app-auth/me` | Return the authenticated user, session, and client kind. |
 | `POST` | `/api/v1/app-auth/refresh` | Rotate the current credential and extend expiry. |
+| `GET` | `/api/v1/integration-tokens` | List integration-token metadata. |
+| `POST` | `/api/v1/integration-tokens` | Create a token; returns plaintext once. |
+| `DELETE` | `/api/v1/integration-tokens/{id}` | Revoke a token immediately. |
 | `POST` | `/api/v1/app-auth/logout` | Revoke the current session and expire its cookie. |
 | `DELETE` | `/api/v1/app-auth/sessions/{id}` | Revoke a session belonging to the current user. |
 
 Send bearer credentials as `Authorization: Bearer <token>`. Browser fetches use the same-origin cookie automatically.
+
+Integration tokens accept only these least-privilege scopes:
+
+- `mail.accounts.read`
+- `mail.metadata.read`
+- `mail.body.read`
+- `mail.modify`
+- `mail.send`
+- `mail.sync`
+
+They cannot manage sessions, application users, OAuth authorization, webhooks,
+or other integration tokens. A route outside the mail integration surface is
+denied even if every available scope was granted.
 
 ## Origin and CORS rules
 

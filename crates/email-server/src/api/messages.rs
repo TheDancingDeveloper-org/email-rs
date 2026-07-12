@@ -516,7 +516,7 @@ pub async fn list_messages(
     let unread_only = q.unread_only.unwrap_or(false);
 
     let sql = if unread_only {
-        r#"SELECT id, account_id, folder_id, uid, message_id, thread_id,
+        r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id, thread_id,
                   subject, from_name, from_email, to_json, date,
                   is_read, is_flagged, is_draft, has_attachments, preview, snoozed_until
            FROM messages
@@ -525,7 +525,7 @@ pub async fn list_messages(
            ORDER BY date DESC
            LIMIT ? OFFSET ?"#
     } else {
-        r#"SELECT id, account_id, folder_id, uid, message_id, thread_id,
+        r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id, thread_id,
                   subject, from_name, from_email, to_json, date,
                   is_read, is_flagged, is_draft, has_attachments, preview, snoozed_until
            FROM messages
@@ -550,7 +550,7 @@ pub async fn get_message(
     Path(message_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
     let msg = sqlx::query_as::<_, MessageRow>(
-        r#"SELECT id, account_id, folder_id, uid, message_id, thread_id,
+        r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id, thread_id,
                   subject, from_name, from_email, to_json, date,
                   is_read, is_flagged, is_draft, has_attachments, preview, snoozed_until
            FROM messages WHERE id = ?"#,
@@ -627,6 +627,8 @@ pub async fn get_message(
 
     let result = serde_json::json!({
         "id": msg.id,
+        "occurrenceId": msg.occurrence_id,
+        "logicalId": msg.logical_id,
         "accountId": msg.account_id,
         "folderId": msg.folder_id,
         "uid": msg.uid,

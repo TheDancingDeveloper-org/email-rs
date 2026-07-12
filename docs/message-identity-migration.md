@@ -12,6 +12,18 @@ An IMAP occurrence is uniquely identified by:
 
 `folder_id` belongs to one account, so this scopes the UID to both account and mailbox. `messages.message_id` is nullable, non-unique, and indexed for correlation/search.
 
+The API exposes that concrete row as both the backward-compatible `id` and the
+explicit `occurrenceId`. It separately exposes `logicalId`, a durable identifier
+derived from the account and normalized message metadata. The logical identifier
+survives a move that deletes one occurrence and later creates another.
+
+The reconciliation key includes RFC Message-ID, sender, date, and subject. This
+avoids treating RFC Message-ID as unique when providers duplicate it. When RFC
+Message-ID is absent, the remaining metadata provides a documented best-effort
+generic-IMAP identity; only a message with no identifying metadata falls back to
+its occurrence ID. Future provider-native stable IDs can replace the generic
+fingerprint without changing the occurrence model.
+
 ## Synchronization
 
 - Metadata upserts use mailbox identity and retain the existing local message ID on conflict.

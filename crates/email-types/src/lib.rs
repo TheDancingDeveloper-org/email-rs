@@ -1,14 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthClientKind {
     Cookie,
     Bearer,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthCredentials {
     pub username: String,
@@ -16,7 +16,7 @@ pub struct AuthCredentials {
     pub client: AuthClientKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthSession {
     pub user_id: String,
@@ -25,7 +25,7 @@ pub struct AuthSession {
     pub token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthIdentity {
     pub user_id: String,
@@ -33,12 +33,12 @@ pub struct AuthIdentity {
     pub client: AuthClientKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct StatusResponse {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -50,7 +50,7 @@ pub struct Account {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateAccount {
     pub name: String,
@@ -67,7 +67,7 @@ pub struct CreateAccount {
     pub smtp_password: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAccount {
     pub name: Option<String>,
@@ -108,7 +108,7 @@ mod double_option {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSettings {
@@ -120,7 +120,7 @@ pub struct AccountSettings {
     pub signature: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct Folder {
@@ -135,17 +135,22 @@ pub struct Folder {
     pub is_excluded: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchFolder {
     pub is_excluded: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    /// Backward-compatible mailbox-occurrence identifier.
     pub id: String,
+    /// Identifies this concrete folder/UID occurrence.
+    pub occurrence_id: String,
+    /// Durable cross-folder identifier used by integrations.
+    pub logical_id: String,
     pub account_id: String,
     pub folder_id: String,
     pub uid: i64,
@@ -165,14 +170,14 @@ pub struct Message {
     pub snoozed_until: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageBody {
     pub html_body: Option<String>,
     pub text_body: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct MessageAttachment {
@@ -183,10 +188,13 @@ pub struct MessageAttachment {
     pub size_bytes: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FullMessage {
+    /// Backward-compatible mailbox-occurrence identifier.
     pub id: String,
+    pub occurrence_id: String,
+    pub logical_id: String,
     pub account_id: String,
     pub folder_id: String,
     pub uid: i64,
@@ -207,7 +215,7 @@ pub struct FullMessage {
     pub attachments: Vec<MessageAttachment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BulkAction {
     Archive,
@@ -216,13 +224,13 @@ pub enum BulkAction {
     MarkUnread,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct BulkRequest {
     pub ids: Vec<String>,
     pub action: BulkAction,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct BulkResult {
     pub id: String,
     pub success: bool,
@@ -230,26 +238,26 @@ pub struct BulkResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct BulkResponse {
     pub processed: usize,
     pub failed: usize,
     pub results: Vec<BulkResult>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchMessageRequest {
     pub is_read: Option<bool>,
     pub is_flagged: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct SnoozeRequest {
     pub until: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SendRequest {
     pub account_id: String,
@@ -262,17 +270,17 @@ pub struct SendRequest {
     pub in_reply_to: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct SendResponse {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct AuthorizeResponse {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct Label {
@@ -282,7 +290,7 @@ pub struct Label {
     pub color: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateLabelBody {
     pub account_id: String,
@@ -290,14 +298,14 @@ pub struct CreateLabelBody {
     pub color: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateLabelBody {
     pub name: Option<String>,
     pub color: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Attendee {
     pub email: String,
@@ -305,7 +313,7 @@ pub struct Attendee {
     pub response_status: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarEvent {
     pub id: String,
@@ -322,7 +330,7 @@ pub struct CalendarEvent {
     pub meet_link: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarSearchResult {
@@ -335,7 +343,7 @@ pub struct CalendarSearchResult {
     pub is_all_day: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarSuggestion {
@@ -344,7 +352,7 @@ pub struct CalendarSuggestion {
     pub start_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct MessageSuggestion {
@@ -356,19 +364,19 @@ pub struct MessageSuggestion {
     pub date: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct SuggestResponse {
     pub messages: Vec<MessageSuggestion>,
     pub events: Vec<CalendarSuggestion>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct SearchResponse {
     pub messages: Vec<Message>,
     pub events: Vec<CalendarSearchResult>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct Contact {
@@ -376,7 +384,7 @@ pub struct Contact {
     pub email: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConditionField {
     From,
@@ -392,7 +400,7 @@ pub enum ConditionField {
     DateBefore,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConditionOperator {
     Contains,
@@ -401,7 +409,7 @@ pub enum ConditionOperator {
     StartsWith,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct Condition {
     pub id: String,
     pub field: ConditionField,
@@ -409,21 +417,21 @@ pub struct Condition {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum MatchMode {
     All,
     Any,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct ConditionGroup {
     #[serde(rename = "match")]
     pub match_mode: MatchMode,
     pub conditions: Vec<Condition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleConditionDto {
     pub id: String,
@@ -432,7 +440,7 @@ pub struct RuleConditionDto {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleActionDto {
     pub id: String,
@@ -440,7 +448,7 @@ pub struct RuleActionDto {
     pub action_value: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleDto {
     pub id: String,
@@ -453,7 +461,7 @@ pub struct RuleDto {
     pub actions: Vec<RuleActionDto>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConditionInput {
     pub field: String,
@@ -461,14 +469,14 @@ pub struct ConditionInput {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionInput {
     pub action_type: String,
     pub action_value: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRuleBody {
     pub account_id: String,
@@ -478,7 +486,7 @@ pub struct CreateRuleBody {
     pub actions: Option<Vec<ActionInput>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRuleBody {
     pub name: Option<String>,
@@ -487,7 +495,7 @@ pub struct UpdateRuleBody {
     pub actions: Option<Vec<ActionInput>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct EventLink {
@@ -502,18 +510,18 @@ pub struct EventLink {
     pub linked_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AddLinkBody {
     pub message_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct AddLinkResponse {
     pub id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
 pub struct Webhook {
@@ -527,7 +535,7 @@ pub struct Webhook {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateWebhook {
     pub url: String,
@@ -536,7 +544,7 @@ pub struct CreateWebhook {
     pub account_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateWebhook {
     pub url: Option<String>,
@@ -545,7 +553,7 @@ pub struct UpdateWebhook {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SyncEvent {
     SyncStart {

@@ -377,14 +377,23 @@ async fn sync_folder(
         let msg_id = Uuid::new_v4().to_string();
         let to_json = serde_json::to_string(&msg.to).ok();
         let date_str = msg.date.map(|d| d.to_rfc3339());
+        let logical_id = crate::db::logical_message_id(
+            account_id,
+            msg.message_id.as_deref(),
+            msg.from_email.as_deref(),
+            date_str.as_deref(),
+            msg.subject.as_deref(),
+            Some(&msg_id),
+        );
 
         let stored_id: String = sqlx::query_scalar(
             r#"INSERT INTO messages
-                   (id, account_id, folder_id, uid, uid_validity, message_id, thread_id,
+                   (id, logical_id, account_id, folder_id, uid, uid_validity, message_id, thread_id,
                     subject, from_name, from_email, to_json, date,
                     is_read, is_flagged, is_draft, has_attachments, preview, synced_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(folder_id, uid_validity, uid) DO UPDATE SET
+                   logical_id      = excluded.logical_id,
                    message_id      = excluded.message_id,
                    thread_id       = excluded.thread_id,
                    subject         = excluded.subject,
@@ -401,6 +410,7 @@ async fn sync_folder(
                RETURNING id"#,
         )
         .bind(&msg_id)
+        .bind(&logical_id)
         .bind(account_id)
         .bind(&db_folder.id)
         .bind(msg.uid as i64)
@@ -426,6 +436,9 @@ async fn sync_folder(
         // Track genuinely new rows for webhook dispatch and rules evaluation.
         if stored_id == msg_id {
             new_message_payloads.push(serde_json::json!({
+                "eventId": Uuid::new_v4(),
+                "logicalId": logical_id,
+                "occurrenceId": stored_id,
                 "subject": msg.subject,
                 "from": msg.from_email,
                 "fromName": msg.from_name,
@@ -763,6 +776,13 @@ mod tests {
         )
         .await
         .unwrap();
+        let logical_ids: Vec<String> =
+            sqlx::query_scalar("SELECT logical_id FROM messages WHERE folder_id='f' ORDER BY uid")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(logical_ids.len(), 2);
+        assert!(logical_ids.iter().all(|id| id.starts_with("lm_")));
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE folder_id='f'")
             .fetch_one(&pool)
             .await

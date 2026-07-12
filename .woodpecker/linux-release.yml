@@ -49,6 +49,16 @@ steps:
       password:
         from_secret: forgejo_token
 
+  # Publish the generated Python SDK under the same immutable product/API version.
+  - name: publish-python-client
+    image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+    environment:
+      FORGEJO_TOKEN:
+        from_secret: forgejo_token
+    commands:
+      - uv build --project clients/python
+      - uv publish --publish-url "${CI_FORGE_URL}/api/packages/indexarr/pypi" --username indexarr --password "$FORGEJO_TOKEN" clients/python/dist/*
+
   # ── Upload tarball to Forgejo release ────────────────────────────────────────
   - name: upload-assets
     image: alpine:3.19
