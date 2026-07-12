@@ -897,4 +897,55 @@ mod tests {
         let _ = std::fs::remove_file(backup_path);
         let _ = std::fs::remove_file(database_path);
     }
+
+    #[tokio::test]
+    async fn full_migrations_upgrade_messages_without_logical_id() {
+        let database_path = format!("/tmp/email_logical_id_{}.db", uuid::Uuid::new_v4());
+        let options = SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        for statement in include_str!("migrations/001_initial.sql").split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+        for statement in [
+            "ALTER TABLE messages DROP COLUMN logical_id",
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('account-1', 'Legacy', 'legacy@example.test', 'imap', 'password')",
+            "INSERT INTO folders (id, account_id, name, full_path, synced_at) VALUES ('folder-1', 'account-1', 'Inbox', 'INBOX', datetime('now'))",
+            "INSERT INTO messages (id, account_id, folder_id, uid, message_id, from_email, date, subject) VALUES ('message-1', 'account-1', 'folder-1', 7, '<legacy@example>', 'sender@example.test', '2026-07-12T00:00:00Z', 'Legacy')",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_migrations(&pool).await.unwrap();
+
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('messages')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(columns.iter().any(|column| column == "logical_id"));
+        let logical_id: String =
+            sqlx::query_scalar("SELECT logical_id FROM messages WHERE id = 'message-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(logical_id.starts_with("lm_"));
+        let version: i64 =
+            sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 16")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(version, 16);
+
+        pool.close().await;
+        let _ = std::fs::remove_file(database_path);
+    }
 }

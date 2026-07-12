@@ -444,7 +444,7 @@ fn doc_events() {}
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "email-rs API", version = "0.6.0"),
+    info(title = "email-rs API", version = "0.6.1"),
     servers((url = "/api/v1")),
     paths(
         doc_health,

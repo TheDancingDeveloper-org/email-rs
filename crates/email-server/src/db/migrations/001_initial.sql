@@ -52,7 +52,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder_id);
 CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account_id);
 CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_rfc_message_id ON messages(message_id);
-CREATE INDEX IF NOT EXISTS idx_messages_logical_id ON messages(logical_id);
+-- Created by migration 016 after legacy databases have gained logical_id.
 
 CREATE TABLE IF NOT EXISTS message_bodies (
     message_id   TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
