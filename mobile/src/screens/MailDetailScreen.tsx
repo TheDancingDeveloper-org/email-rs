@@ -18,6 +18,22 @@ function avatar(name: string) {
   return { bg: `oklch(62% 0.12 ${hue})`, initials: name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase() };
 }
 
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function downloadAttachment(messageId: string, attachmentId: string, filename: string) {
+  const blob = await api.attachment(messageId, attachmentId);
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 export function MailDetailScreen() {
   const { selectedMessage, setSelectedMessage, theme } = useAppStore();
   const [body, setBody] = useState<MessageBody | null>(null);
@@ -107,6 +123,24 @@ export function MailDetailScreen() {
         {!loading && !body?.body?.htmlBody && !body?.body?.textBody && (
           <div className={styles.loading}>No content</div>
         )}
+
+        {!loading && body?.attachments.map((attachment) => (
+          <button
+            key={attachment.id}
+            type="button"
+            onClick={async () => {
+              setActionError(null);
+              try {
+                await downloadAttachment(body.id, attachment.id, attachment.filename);
+              } catch (cause) {
+                setActionError(cause instanceof Error ? cause.message : 'Unable to download attachment');
+              }
+            }}
+            style={{ width: '100%', marginTop: 8, padding: 12, textAlign: 'left' }}
+          >
+            {attachment.filename} · {formatBytes(attachment.sizeBytes)}
+          </button>
+        ))}
 
         <div className={styles.bottomPad} />
       </div>

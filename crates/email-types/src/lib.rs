@@ -268,6 +268,17 @@ pub struct SendRequest {
     pub text_body: Option<String>,
     pub html_body: Option<String>,
     pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<OutgoingAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OutgoingAttachment {
+    pub filename: String,
+    pub content_type: String,
+    /// Standard base64-encoded file content.
+    pub content_base64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]

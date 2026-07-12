@@ -234,6 +234,15 @@
   cursor: pointer;
   transition: background var(--transition);
 }
+
+a.attachment {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.attachment:hover {
+  border-color: var(--accent);
+}
 .attachment:hover {
   background: var(--row-hover);
 }

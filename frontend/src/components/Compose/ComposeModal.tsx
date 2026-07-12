@@ -17,6 +17,7 @@ export function ComposeModal() {
   const [showBcc, setShowBcc] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<File[]>([]);
 
   useEffect(() => {
     if (compose) {
@@ -29,6 +30,7 @@ export function ComposeModal() {
       setBody(compose.mode === 'forward' ? buildForwardBody(compose.quotedText, compose.quotedFrom) : '');
       setError(null);
       setSending(false);
+      setAttachments([]);
       // Fetch account signature.
       fetch(`/api/v1/accounts/${compose.accountId}/settings`)
         .then((r) => r.json())
@@ -44,10 +46,17 @@ export function ComposeModal() {
     setSending(true);
     setError(null);
     try {
-      const sigBlock = signature ? `\n\n-- \n${signature}` : '';
+      const sigBlock = signature
+        ? ['', '', `--${String.fromCharCode(32)}`, signature].join('\n')
+        : '';
       const fullBody = (compose.mode === 'reply' && compose.quotedText
         ? body + '\n\n' + buildQuotedBlock(compose.quotedText, compose.quotedFrom)
         : body) + sigBlock;
+      const encodedAttachments = await Promise.all(attachments.map(async (file) => ({
+        filename: file.name,
+        contentType: file.type || 'application/octet-stream',
+        contentBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
+      })));
       const resp = await fetch('/api/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -59,6 +68,7 @@ export function ComposeModal() {
           subject,
           textBody: fullBody,
           inReplyTo: compose.inReplyTo,
+          attachments: encodedAttachments,
         }),
       });
       if (!resp.ok) {
@@ -72,7 +82,7 @@ export function ComposeModal() {
     } finally {
       setSending(false);
     }
-  }, [compose, to, subject, body, closeCompose]);
+  }, [attachments, bcc, body, cc, closeCompose, compose, signature, subject, to]);
 
   if (!compose) return null;
 
@@ -164,10 +174,43 @@ export function ComposeModal() {
         <button className={styles.discardBtn} type="button" onClick={closeCompose}>
           Discard
         </button>
+        <label className={styles.discardBtn}>
+          Attach
+          <input
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => {
+              const selected = Array.from(event.target.files ?? []);
+              setAttachments((current) => [...current, ...selected]);
+              event.target.value = '';
+            }}
+          />
+        </label>
+        {attachments.map((file, index) => (
+          <button
+            key={`${file.name}-${file.size}-${index}`}
+            className={styles.discardBtn}
+            type="button"
+            title="Remove attachment"
+            onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+          >
+            {file.name} ×
+          </button>
+        ))}
         {error && <span className={styles.errorMsg}>{error}</span>}
       </div>
     </div>
   );
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function buildQuotedBlock(text: string, from?: string): string {

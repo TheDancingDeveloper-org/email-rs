@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_imap::types::{Flag, NameAttribute};
 use async_trait::async_trait;
@@ -13,6 +13,23 @@ use uuid::Uuid;
 use super::{Folder, MailProvider, Message, MessageBody};
 use crate::error::{AppError, Result};
 use tracing::{info, warn};
+
+fn gmail_thread_identity(
+    attributes: &[async_imap::imap_proto::types::AttributeValue<'_>],
+) -> Option<(u32, u64)> {
+    use async_imap::imap_proto::types::AttributeValue;
+
+    let mut uid = None;
+    let mut thread_id = None;
+    for attribute in attributes {
+        match attribute {
+            AttributeValue::Uid(value) => uid = Some(*value),
+            AttributeValue::GmailThrId(value) => thread_id = Some(*value),
+            _ => {}
+        }
+    }
+    uid.zip(thread_id)
+}
 
 // ── XOAUTH2 SASL authenticator ────────────────────────────────────────────────
 
@@ -342,6 +359,47 @@ impl MailProvider for GmailProvider {
         let uids: Vec<String> = uid_set.iter().map(|u| u.to_string()).collect();
         let uid_range = uids.join(",");
 
+        // Gmail's stable thread identifier is only available through its IMAP
+        // extension. Fetch it separately so Outlook (which shares this provider
+        // implementation for XOAUTH2) never receives an unsupported attribute.
+        let mut thread_ids = HashMap::new();
+        if self.provider_type == "gmail" {
+            use async_imap::imap_proto::{types::Response, Status};
+
+            let command_id = session
+                .run_command(format!("UID FETCH {uid_range} (UID X-GM-THRID)"))
+                .await
+                .map_err(|e| AppError::Imap(format!("Gmail thread UID FETCH failed: {e}")))?;
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .ok_or_else(|| {
+                        AppError::Imap(
+                            "Gmail closed the connection while fetching thread IDs".to_string(),
+                        )
+                    })?
+                    .map_err(|e| AppError::Imap(format!("Gmail thread response failed: {e}")))?;
+                match response.parsed() {
+                    Response::Fetch(_, attributes) => {
+                        if let Some((uid, thread_id)) = gmail_thread_identity(attributes) {
+                            thread_ids
+                                .insert(uid, format!("gmail:{}:{thread_id}", self.account_id));
+                        }
+                    }
+                    Response::Done { tag, status, .. } if tag == &command_id => {
+                        if *status != Status::Ok {
+                            return Err(AppError::Imap(format!(
+                                "Gmail thread UID FETCH completed with {status:?}"
+                            )));
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let fetch_stream = session
             .uid_fetch(&uid_range, "(UID FLAGS RFC822.SIZE ENVELOPE BODYSTRUCTURE)")
             .await
@@ -450,7 +508,7 @@ impl MailProvider for GmailProvider {
                 id: Uuid::new_v4(),
                 uid,
                 message_id,
-                thread_id: None,
+                thread_id: thread_ids.get(&uid).cloned(),
                 subject,
                 from_name,
                 from_email,
@@ -694,5 +752,21 @@ impl MailProvider for GmailProvider {
         stream.collect::<Vec<_>>().await;
         let _ = session.logout().await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod thread_tests {
+    use super::*;
+    use async_imap::imap_proto::types::AttributeValue;
+
+    #[test]
+    fn extracts_stable_gmail_thread_identity() {
+        let attributes = vec![
+            AttributeValue::Uid(42),
+            AttributeValue::GmailThrId(9_876_543),
+        ];
+        assert_eq!(gmail_thread_identity(&attributes), Some((42, 9_876_543)));
+        assert_eq!(gmail_thread_identity(&[AttributeValue::Uid(42)]), None);
     }
 }

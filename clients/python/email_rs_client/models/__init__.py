@@ -38,6 +38,7 @@ from .message import Message
 from .message_attachment import MessageAttachment
 from .message_body import MessageBody
 from .message_suggestion import MessageSuggestion
+from .outgoing_attachment import OutgoingAttachment
 from .patch_folder import PatchFolder
 from .patch_message_request import PatchMessageRequest
 from .rule_action_dto import RuleActionDto
@@ -96,6 +97,7 @@ __all__ = (
     "MessageAttachment",
     "MessageBody",
     "MessageSuggestion",
+    "OutgoingAttachment",
     "PatchFolder",
     "PatchMessageRequest",
     "RuleActionDto",

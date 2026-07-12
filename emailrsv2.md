@@ -1,16 +1,119 @@
 # email-rs and myAIAgent integration review
 
-## Current implementation state (authoritative handoff)
+## Current implementation state (authoritative handoff — 2026-07-12 continuation)
+
+**Read this section first.** It supersedes the older 2026-07-12 handoff and
+the original review below. The continuation work is captured in the two commits
+identified here; do not restart from an older handoff.
+
+The answer to **"has all this work been completed?" remains no**. The core
+service boundary, v0.5 release, legacy-ingestion retirement, webhook indexing,
+and most client-completeness work are done. Provider/platform validation and
+synchronized draft CRUD are still open. The post-v0.5 work described below
+also needs a new release boundary; do not amend or silently republish v0.5.0.
+
+### Repository state at this handoff
+
+`email-rs` (`/home/sprooty/Working/Active/apps/email-rs`):
+
+- `main`/`origin/main` are at `9d804c3` (`v0.5.0`). The v0.5 release contains
+  durable secure events, credential encryption, stable logical IDs, generated
+  SDK publication, and the release/CI repairs.
+- The commit containing this handoff is the post-v0.5 client-completeness
+  slice. It adds SMTP/MIME outgoing attachments (including CC/BCC), attachment
+  validation/size limits, Gmail `X-GM-THRID` identity, RFC `In-Reply-To`
+  reconciliation for generic IMAP, and web/mobile folder, label, and smart-view
+  pagination.
+- Standalone web and mobile compose now select and send attachments. Their
+  reading panes now list attachment filenames/sizes and expose authenticated
+  downloads. The web static bundle has been rebuilt, so the old hashed JS/CSS
+  assets are replaced by the newly generated hashed assets in the same commit.
+- `clients/python` has been regenerated from the current OpenAPI and now
+  includes `OutgoingAttachment`/`SendRequest.attachments`. It still reports
+  `0.5.0`; before publishing this post-v0.5 contract, choose and apply the next
+  synchronized version across Rust/OpenAPI/Python, then publish immutably.
+
+`myAIAgent` (`/home/sprooty/Working/Active/myAIAgent`):
+
+- Commit `30db0ff` migrates the Android mail client to the gateway. Its parent
+  `c66354f` was the previous `main`/`origin/main`. Commit `6a567c7` completed webhook
+  indexing and removed legacy IMAP/Gmail-mail ingestion while preserving the
+  independent Google Calendar connector. Compose pins email-rs v0.5.0 by digest
+  and the backend consumes published `email-rs-client==0.5.0`.
+- `ApiService`, `EmailViewModel`, and `EmailScreen` now use `/api/mail` for
+  status, account/folder discovery, paginated inbox metadata, full-message
+  loading, triage, AI drafting, explicit send, and indexed-email deep links.
+- The backend adds `GET /api/mail/indexed/{email_id}`, resolving the persisted
+  AI/search row through `EmailRsMessageLink.logical_id` to the current
+  occurrence ID. Tests and generated API docs cover this route.
+- No database migration is required for this Android slice; it uses the mapping
+  tables already landed in migration `020_email_rs_webhook_index.py`.
+
+### Recommendation status based on the actual branches/worktrees
+
+| # | Recommendation | Current state | Remaining evidence or work |
+|---|---|---|---|
+| 1 | Machine tokens, complete OpenAPI, logical IDs, synchronized versioning | **Complete for v0.5; next version pending for dirty worktree** | v0.5 is tagged/released. Apply a new synchronized version before publishing the attachment/threading contract. |
+| 2 | Generated Python client and cross-repository acceptance | **Mostly complete** | v0.5 SDK is published/consumed and the real acceptance script covers webhook retry, logical reconciliation, search, and persisted triage. It is not a required CI job. |
+| 3 | Immutable sidecar pin in compose and Komodo | **Partial** | myAIAgent compose pins `v0.5.0@sha256:31e2...139c3a`. Production ops/Komodo state was not inspected in this continuation because the requested write scope was these two repos. |
+| 4 | email-rs-owned scheduling; retire legacy IMAP/Gmail mail paths | **Complete in myAIAgent code** | `6a567c7` removed `imap_email` and Gmail mail ingestion; `GoogleConnector` is calendar-only. Real deployed behavior remains an ops check. |
+| 5 | Encrypted credentials and safe HTML | **Complete in email-rs code** | AES-256-GCM migration/fail-closed behavior and safe HTML/remote-image blocking are landed. Production must supply a stable `EMAIL_RS_CREDENTIAL_KEY`. |
+| 6 | Drafts, outgoing attachments, threading, pagination | **Partial, active dirty slice** | Outgoing attachments, provider-derived threading, read/download workflows, and folder/label/smart pagination are implemented locally. Provider-synchronized persistent draft create/update/delete is not implemented. Search pagination and physical mobile download behavior still need product validation. |
+| 7 | Webhook-driven AI indexing and persisted triage | **Complete in code; deployment validation pending** | `6a567c7` plus `scripts/email_rs_acceptance.sh` implement the path. Production still needs webhook/secret configuration and a real provider message proof. |
+| 8 | Real-provider and platform release validation | **Not complete** | No fresh proof for Gmail, Microsoft, generic IMAP, Windows installer lifecycle, or physical iOS/Android onboarding/secure storage. |
+
+### Verification recorded in this continuation
+
+Passed:
+
+```text
+email-rs: cargo fmt --check
+email-rs: cargo clippy --workspace --all-targets -- -D warnings
+email-rs: cargo test --workspace --locked
+          10 email-client + 109 Fluent + 150 server tests passed
+email-rs: cargo run -q -p email-server --bin export_openapi --locked
+email-rs: generated Python client ruff/compile checks
+email-rs: frontend npm run build
+email-rs: mobile npm run build
+
+myAIAgent: docker compose build backend-test
+myAIAgent: focused tests/test_mail.py — 13 passed
+myAIAgent: full backend pytest — 258 passed, 2 deselected
+myAIAgent: frontend npm ci && npm run build
+myAIAgent: Android ./gradlew testDebugUnitTest --rerun-tasks
+```
+
+The real `scripts/email_rs_acceptance.sh` was not rerun because it needs the
+Forgejo token/release boundary and the current email-rs changes are not yet
+published as a new immutable image/SDK.
+
+### Exact next actions after interruption
+
+1. Decide the next synchronized email-rs version for the post-v0.5 attachment,
+   threading, pagination, and attachment-reading work; update Rust/OpenAPI/SDK,
+   then regenerate the client and bundles once more.
+2. Implement provider-synchronized draft create/update/delete, or leave row 6
+   explicitly partial. Do not claim local browser autosave is synchronized
+   draft support.
+3. Publish/pin that next immutable SDK/image in an explicit myAIAgent dependency
+   change, then rerun `scripts/email_rs_acceptance.sh`.
+4. Separately perform the secrets/Komodo/provider/platform gates in the final
+   section below. Those cannot be proven by unit tests in these worktrees.
+
+## Superseded handoff from earlier on 2026-07-12
+
+This section is retained as history only. Its status table predates the v0.5
+release, the landed myAIAgent webhook/legacy-removal commit, and the current
+uncommitted client work. Do not use it as the source of truth.
 
 Last audited: **2026-07-12 UTC** against:
 
 - `email-rs` at `62f9f9a` on `main` plus the uncommitted `v0.5.0` security/event work described below (`v0.4.0` is commit `45ec198`).
 - `myAIAgent` at `076cb91` on `main`, plus the uncommitted webhook-indexing work listed below.
 
-This section is the current source of truth for follow-up agents. The original
-review remains below as design context. Do not infer completion from a broad
-commit message or from the existence of a route: use the status table and
-verification gates here.
+This section was the source of truth for an earlier continuation and is now
+superseded by the first section in this document. Its commands and gaps are
+retained only to explain how the current state was reached.
 
 The answer to **"has all this work been completed?" is no**.
 
@@ -84,7 +187,7 @@ inside a container where `localhost:5432` is not Docker's published host and the
 compose database network is not directly reachable. Run database tests through
 `backend-test`, as above.
 
-### Next actions (do these in order)
+### Historical next actions (superseded; do not execute as the current plan)
 
 1. Commit, push, tag, and verify email-rs v0.5.0, including publication of the
    already-generated `email-rs-client==0.5.0` and immutable container image.
@@ -102,7 +205,7 @@ compose database network is not directly reachable. Run database tests through
    call the review complete until every row is
    complete and verified at its actual scope.
 
-### Required completion gates
+### Historical completion gates
 
 Before changing the answer from "no" to "yes", record fresh results for:
 

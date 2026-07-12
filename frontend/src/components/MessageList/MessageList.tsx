@@ -81,6 +81,10 @@ async function callBulkApi(ids: string[], action: BulkAction): Promise<BulkRespo
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function MessageList() {
+  const pageSize = 50;
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const loadedMessagesRef = useRef<Message[]>([]);
   const [bulkError, setBulkError] = useState<string | null>(null);
   const {
     selectedFolderId,
@@ -104,6 +108,9 @@ export function MessageList() {
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = 0;
     setExpandedThreads(new Set());
+    setPage(1);
+    setHasMore(false);
+    loadedMessagesRef.current = [];
   }, [folderSelectSeq]);
 
   const isSmartFolder = !!selectedFolderId?.startsWith('smart:');
@@ -116,18 +123,18 @@ export function MessageList() {
 
   const { data: folderMessages, loading: folderLoading, refetch } = useApi<Message[]>(
     selectedFolderId && !searchQuery && !isSmartFolder && !isLabelFolder && !isAdvancedSearching
-      ? `/api/v1/folders/${selectedFolderId}/messages`
+      ? `/api/v1/folders/${selectedFolderId}/messages?page=${page}&per_page=${pageSize}`
       : '',
     { immediate: !!selectedFolderId && !searchQuery && !isSmartFolder && !isLabelFolder && !isAdvancedSearching },
   );
 
   const { data: labelMessages, loading: labelLoading, refetch: refetchLabel } = useApi<Message[]>(
-    isLabelFolder && !searchQuery && !isAdvancedSearching ? `/api/v1/labels/${labelFolderId}/messages` : '',
+    isLabelFolder && !searchQuery && !isAdvancedSearching ? `/api/v1/labels/${labelFolderId}/messages?page=${page}&per_page=${pageSize}` : '',
     { immediate: isLabelFolder && !searchQuery && !isAdvancedSearching },
   );
 
   const { data: smartMessages, loading: smartLoading, refetch: refetchSmart } = useApi<Message[]>(
-    isSmartFolder && !searchQuery && !isAdvancedSearching ? `/api/v1/smart-folders/${smartKind}/messages` : '',
+    isSmartFolder && !searchQuery && !isAdvancedSearching ? `/api/v1/smart-folders/${smartKind}/messages?page=${page}&per_page=${pageSize}` : '',
     { immediate: isSmartFolder && !searchQuery && !isAdvancedSearching },
   );
 
@@ -164,8 +171,18 @@ export function MessageList() {
 
   // Sync fetched data into the store so mutations elsewhere can update it.
   useEffect(() => {
-    if (fetchedMessages) setMessages(fetchedMessages);
-  }, [fetchedMessages, setMessages]);
+    if (!fetchedMessages) return;
+    const paginated = !isSearching && !isAdvancedSearching;
+    if (paginated && page > 1) {
+      const byId = new Map(loadedMessagesRef.current.map((message) => [message.id, message]));
+      for (const message of fetchedMessages) byId.set(message.id, message);
+      loadedMessagesRef.current = Array.from(byId.values());
+    } else {
+      loadedMessagesRef.current = fetchedMessages;
+    }
+    setMessages(loadedMessagesRef.current);
+    setHasMore(paginated && fetchedMessages.length === pageSize);
+  }, [fetchedMessages, isAdvancedSearching, isSearching, page, pageSize, setMessages]);
 
   useKeyboardNav(messages.length ? messages : undefined, selectedMessageId, setSelectedMessage);
 
@@ -527,6 +544,15 @@ export function MessageList() {
             onContextMenu={(e) => openContextMenu(e, buildRowContextMenu(message))}
           />
         ))}
+        {!loading && hasMore && !isSearching && !isAdvancedSearching && (
+          <button
+            type="button"
+            className={styles.threadExpandBtn}
+            onClick={() => setPage((current) => current + 1)}
+          >
+            Load more messages
+          </button>
+        )}
       </div>
 
       {contextMenu}

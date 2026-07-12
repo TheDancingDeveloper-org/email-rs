@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.outgoing_attachment import OutgoingAttachment
+
 
 T = TypeVar("T", bound="SendRequest")
 
@@ -20,6 +24,7 @@ class SendRequest:
         cc (list[str]):
         subject (str):
         to (list[str]):
+        attachments (list[OutgoingAttachment] | Unset):
         html_body (None | str | Unset):
         in_reply_to (None | str | Unset):
         text_body (None | str | Unset):
@@ -30,6 +35,7 @@ class SendRequest:
     cc: list[str]
     subject: str
     to: list[str]
+    attachments: list[OutgoingAttachment] | Unset = UNSET
     html_body: None | str | Unset = UNSET
     in_reply_to: None | str | Unset = UNSET
     text_body: None | str | Unset = UNSET
@@ -45,6 +51,13 @@ class SendRequest:
         subject = self.subject
 
         to = self.to
+
+        attachments: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.attachments, Unset):
+            attachments = []
+            for attachments_item_data in self.attachments:
+                attachments_item = attachments_item_data.to_dict()
+                attachments.append(attachments_item)
 
         html_body: None | str | Unset
         if isinstance(self.html_body, Unset):
@@ -75,6 +88,8 @@ class SendRequest:
                 "to": to,
             }
         )
+        if attachments is not UNSET:
+            field_dict["attachments"] = attachments
         if html_body is not UNSET:
             field_dict["htmlBody"] = html_body
         if in_reply_to is not UNSET:
@@ -86,6 +101,8 @@ class SendRequest:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.outgoing_attachment import OutgoingAttachment
+
         d = dict(src_dict)
         account_id = d.pop("accountId")
 
@@ -96,6 +113,15 @@ class SendRequest:
         subject = d.pop("subject")
 
         to = cast(list[str], d.pop("to"))
+
+        _attachments = d.pop("attachments", UNSET)
+        attachments: list[OutgoingAttachment] | Unset = UNSET
+        if _attachments is not UNSET:
+            attachments = []
+            for attachments_item_data in _attachments:
+                attachments_item = OutgoingAttachment.from_dict(attachments_item_data)
+
+                attachments.append(attachments_item)
 
         def _parse_html_body(data: object) -> None | str | Unset:
             if data is None:
@@ -130,6 +156,7 @@ class SendRequest:
             cc=cc,
             subject=subject,
             to=to,
+            attachments=attachments,
             html_body=html_body,
             in_reply_to=in_reply_to,
             text_body=text_body,

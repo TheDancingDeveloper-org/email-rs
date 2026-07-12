@@ -24,6 +24,9 @@ pub enum AppError {
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
 
+    #[error("validation error: {0}")]
+    Validation(String),
+
     #[error("conflict: {0}")]
     Conflict(String),
 
@@ -45,6 +48,7 @@ impl IntoResponse for AppError {
             AppError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Provider(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
+            AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::Imap(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::Smtp(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
@@ -96,6 +100,14 @@ mod tests {
         assert_eq!(
             status_of(AppError::PayloadTooLarge("x".into())),
             StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn validation_is_400() {
+        assert_eq!(
+            status_of(AppError::Validation("x".into())),
+            StatusCode::BAD_REQUEST
         );
     }
 

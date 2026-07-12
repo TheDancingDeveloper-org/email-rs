@@ -277,7 +277,7 @@ impl MailProvider for GenericImapProvider {
             let is_flagged = flags.iter().any(|f| matches!(f, Flag::Flagged));
             let is_draft = flags.iter().any(|f| matches!(f, Flag::Draft));
 
-            let (subject, from_name, from_email, to_addresses, date, message_id) =
+            let (subject, from_name, from_email, to_addresses, date, message_id, thread_id) =
                 if let Some(env) = fetch.envelope() {
                     let subject = bytes_to_string(env.subject.as_deref());
 
@@ -326,6 +326,21 @@ impl MailProvider for GenericImapProvider {
                         .and_then(|b| std::str::from_utf8(b).ok())
                         .map(|s| s.trim_matches(|c: char| c == '<' || c == '>').to_string());
 
+                    // Generic IMAP has no universal provider thread ID. Preserve
+                    // the RFC parent identity so the sync layer can reconcile it
+                    // to the root thread already stored for that message.
+                    let thread_id = env
+                        .in_reply_to
+                        .as_deref()
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .map(|s| {
+                            format!(
+                                "rfc:{}",
+                                s.trim().trim_matches(|c: char| c == '<' || c == '>')
+                            )
+                        })
+                        .filter(|value| value != "rfc:");
+
                     (
                         subject,
                         from_name,
@@ -333,9 +348,10 @@ impl MailProvider for GenericImapProvider {
                         to_addresses,
                         date,
                         message_id,
+                        thread_id,
                     )
                 } else {
-                    (None, None, None, vec![], None, None)
+                    (None, None, None, vec![], None, None, None)
                 };
 
             let preview = fetch.body().and_then(|b| {
@@ -348,11 +364,13 @@ impl MailProvider for GenericImapProvider {
                 .bodystructure()
                 .map(super::bodystructure_attachments)
                 .unwrap_or_default();
+            let thread_id =
+                thread_id.or_else(|| message_id.as_deref().map(|value| format!("rfc:{value}")));
             messages.push(Message {
                 id: Uuid::new_v4(),
                 uid,
                 message_id,
-                thread_id: None,
+                thread_id,
                 subject,
                 from_name,
                 from_email,

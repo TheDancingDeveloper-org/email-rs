@@ -21,6 +21,14 @@ interface FullMessage {
     htmlBody: string | null;
     textBody: string | null;
   } | null;
+  attachments: MessageAttachment[];
+}
+
+interface MessageAttachment {
+  id: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
 }
 
 function getAvatarStyle(name: string): { bg: string; initials: string } {
@@ -37,6 +45,12 @@ function formatFullDate(dateStr: string | null): string {
     weekday: 'short', year: 'numeric', month: 'short',
     day: 'numeric', hour: '2-digit', minute: '2-digit',
   });
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 const RP = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
@@ -527,12 +541,21 @@ export function ReadingPane() {
       </div>
 
       {/* Attachments */}
-      {message.hasAttachments && (
+      {message.attachments.length > 0 && (
         <div className={styles.attachments}>
-          <div className={styles.attachment}>
-            <AttachIcon />
-            attachment
-          </div>
+          {message.attachments.map((attachment) => (
+            <a
+              key={attachment.id}
+              className={styles.attachment}
+              href={`/api/v1/messages/${encodeURIComponent(message.id)}/attachments/${encodeURIComponent(attachment.id)}`}
+              download={attachment.filename}
+              title={`Download ${attachment.filename}`}
+            >
+              <AttachIcon />
+              <span>{attachment.filename}</span>
+              <span>{formatBytes(attachment.sizeBytes)}</span>
+            </a>
+          ))}
         </div>
       )}
 

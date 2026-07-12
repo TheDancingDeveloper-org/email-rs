@@ -416,6 +416,30 @@ async fn sync_folder(
             msg.subject.as_deref(),
             Some(&msg_id),
         );
+        let thread_id = if let Some(parent_message_id) = msg
+            .thread_id
+            .as_deref()
+            .and_then(|value| value.strip_prefix("rfc:"))
+        {
+            sqlx::query_scalar::<_, String>(
+                r#"SELECT thread_id
+                   FROM messages
+                   WHERE account_id = ? AND message_id = ? AND thread_id IS NOT NULL
+                   ORDER BY date, id
+                   LIMIT 1"#,
+            )
+            .bind(account_id)
+            .bind(parent_message_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .or_else(|| Some(format!("rfc:{account_id}:{parent_message_id}")))
+        } else {
+            msg.thread_id.clone().or_else(|| {
+                msg.message_id
+                    .as_deref()
+                    .map(|message_id| format!("rfc:{account_id}:{message_id}"))
+            })
+        };
 
         let stored_id: String = sqlx::query_scalar(
             r#"INSERT INTO messages
@@ -447,7 +471,7 @@ async fn sync_folder(
         .bind(msg.uid as i64)
         .bind(remote_uid_validity)
         .bind(&msg.message_id)
-        .bind(&msg.thread_id)
+        .bind(&thread_id)
         .bind(&msg.subject)
         .bind(&msg.from_name)
         .bind(&msg.from_email)

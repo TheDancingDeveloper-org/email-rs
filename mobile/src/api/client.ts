@@ -77,6 +77,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+async function requestBlob(path: string): Promise<Blob> {
+  assertContractRoute('GET', path);
+  const headers = new Headers();
+  if (session?.token) headers.set('Authorization', `Bearer ${session.token}`);
+  const response = await fetch(`${baseUrl()}${path}`, { headers });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `${response.status} ${response.statusText}`);
+  }
+  return response.blob();
+}
+
 export interface AuthSessionResponse {
   userId: string;
   sessionId: string;
@@ -132,6 +144,11 @@ export interface MobileSendRequest {
   textBody: string | null;
   htmlBody: string | null;
   inReplyTo: string | null;
+  attachments: {
+    filename: string;
+    contentType: string;
+    contentBase64: string;
+  }[];
 }
 
 export const api = {
@@ -139,6 +156,7 @@ export const api = {
   folders:         (accountId: string) => request(`/accounts/${segment(accountId)}/folders`),
   messages:        (folderId: string, page = 1) => request(`/folders/${segment(folderId)}/messages?page=${page}&per_page=40`),
   message:         (id: string) => request(`/messages/${segment(id)}`),
+  attachment:      (messageId: string, attachmentId: string) => requestBlob(`/messages/${segment(messageId)}/attachments/${segment(attachmentId)}`),
   search:          (q: string) => request(`/search?q=${encodeURIComponent(q)}&limit=40`),
   markRead:        (id: string) => json('PATCH', `/messages/${segment(id)}`, { isRead: true }),
   flag:            (id: string, val: boolean) => json('PATCH', `/messages/${segment(id)}`, { isFlagged: val }),

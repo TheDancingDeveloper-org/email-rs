@@ -51,6 +51,14 @@ export interface MessageBody {
   isFlagged: boolean;
   hasAttachments: boolean;
   body: { htmlBody: string | null; textBody: string | null } | null;
+  attachments: MessageAttachment[];
+}
+
+export interface MessageAttachment {
+  id: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
 }
 
 export type Screen = 'inbox' | 'compose' | 'calendar' | 'profile';

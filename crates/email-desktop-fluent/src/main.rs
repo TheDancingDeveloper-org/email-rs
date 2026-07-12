@@ -10478,6 +10478,7 @@ fn build_quick_reply_request(
         text_body: Some(body),
         html_body: None,
         in_reply_to,
+        attachments: Vec::new(),
     })
 }
 
@@ -10532,6 +10533,7 @@ fn build_compose_request(
         text_body: Some(text_body),
         html_body: None,
         in_reply_to,
+        attachments: Vec::new(),
     })
 }
 

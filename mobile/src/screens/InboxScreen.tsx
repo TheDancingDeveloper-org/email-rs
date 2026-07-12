@@ -21,6 +21,8 @@ export function InboxScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -49,18 +51,23 @@ export function InboxScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadMessages = useCallback(async (folderId: string) => {
+  const loadMessages = useCallback(async (folderId: string, requestedPage = 1) => {
     setLoading(true);
     try {
-      const msgs = await api.messages(folderId) as Message[];
-      setMessages(msgs);
+      const msgs = await api.messages(folderId, requestedPage) as Message[];
+      setMessages((current) => requestedPage === 1 ? msgs : [
+        ...current,
+        ...msgs.filter((message) => !current.some((existing) => existing.id === message.id)),
+      ]);
+      setPage(requestedPage);
+      setHasMore(msgs.length === 40);
     } catch { /* ignore */ }
     setLoading(false);
   }, []);
 
   useEffect(() => {
     if (!selectedFolderId) return;
-    loadMessages(selectedFolderId);
+    loadMessages(selectedFolderId, 1);
   }, [selectedFolderId, loadMessages]);
 
   const handleSearchChange = (q: string) => {
@@ -87,7 +94,7 @@ export function InboxScreen() {
   const handleRefresh = async () => {
     if (!selectedFolderId || refreshing) return;
     setRefreshing(true);
-    await loadMessages(selectedFolderId);
+    await loadMessages(selectedFolderId, 1);
     setRefreshing(false);
   };
 
@@ -163,6 +170,15 @@ export function InboxScreen() {
         {!listLoading && listMessages.map((msg) => (
           <MailRow key={msg.id} message={msg} onClick={() => setSelectedMessage(msg)} />
         ))}
+        {!isSearching && !listLoading && hasMore && selectedFolderId && (
+          <button
+            type="button"
+            onClick={() => loadMessages(selectedFolderId, page + 1)}
+            style={{ width: 'calc(100% - 32px)', margin: 16, padding: 12 }}
+          >
+            Load more messages
+          </button>
+        )}
         <div className={styles.listPad} />
       </div>
 

@@ -13,6 +13,7 @@ export function ComposeScreen() {
   const [body, setBody] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<File[]>([]);
 
   const [suggestions, setSuggestions] = useState<Contact[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -47,6 +48,11 @@ export function ComposeScreen() {
     setSending(true);
     setSendError(null);
     try {
+      const encodedAttachments = await Promise.all(attachments.map(async (file) => ({
+        filename: file.name,
+        contentType: file.type || 'application/octet-stream',
+        contentBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
+      })));
       await api.send({
         accountId,
         to: to.split(/[,;]/).map((value) => value.trim()).filter(Boolean),
@@ -56,6 +62,7 @@ export function ComposeScreen() {
         textBody: body || null,
         htmlBody: null,
         inReplyTo: null,
+        attachments: encodedAttachments,
       });
       closeCompose();
     } catch (cause) {
@@ -133,8 +140,39 @@ export function ComposeScreen() {
           onChange={(e) => setBody(e.target.value)}
           placeholder="Write your message…"
         />
+        <label style={{ padding: '10px 16px', color: 'var(--accent)', cursor: 'pointer' }}>
+          Add attachment
+          <input
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => {
+              setAttachments((current) => [...current, ...Array.from(event.target.files ?? [])]);
+              event.target.value = '';
+            }}
+          />
+        </label>
+        {attachments.map((file, index) => (
+          <button
+            key={`${file.name}-${file.size}-${index}`}
+            type="button"
+            onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+            style={{ margin: '0 16px 6px', padding: 8, textAlign: 'left' }}
+          >
+            {file.name} ×
+          </button>
+        ))}
         {sendError && <div role="alert" style={{ padding: '10px 16px', color: 'var(--danger)', fontSize: 13 }}>{sendError}</div>}
       </div>
     </div>
   );
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
