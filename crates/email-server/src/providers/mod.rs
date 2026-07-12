@@ -167,6 +167,21 @@ pub trait MailProvider: Send + Sync {
     async fn move_message(&self, src_folder: &str, uid: u32, dest_folder: &str) -> Result<()>;
     /// Toggle the \Flagged flag.
     async fn set_flagged(&self, folder: &str, uid: u32, flagged: bool) -> Result<()>;
+    /// Append a provider-synchronized RFC/MIME draft to the given mailbox.
+    async fn append_draft(
+        &self,
+        _folder: &str,
+        _message_id: &str,
+        _raw_message: &[u8],
+    ) -> Result<u32> {
+        Err(crate::error::AppError::Provider(
+            "provider does not support synchronized drafts".into(),
+        ))
+    }
+    /// Permanently remove a draft. This deliberately bypasses normal trash behavior.
+    async fn delete_draft(&self, folder: &str, uid: u32) -> Result<()> {
+        self.delete_message(folder, uid).await
+    }
 }
 
 #[async_trait]

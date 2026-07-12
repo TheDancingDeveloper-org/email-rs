@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import styles from './ComposeScreen.module.css';
 import { useAppStore } from '../store';
 import { api } from '../api/client';
@@ -14,6 +14,9 @@ export function ComposeScreen() {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<File[]>([]);
+  const draftId = useRef<string | null>(null);
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftSave = useRef<Promise<void>>(Promise.resolve());
 
   const [suggestions, setSuggestions] = useState<Contact[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -43,16 +46,56 @@ export function ComposeScreen() {
     setShowSuggestions(false);
   };
 
+  const draftPayload = useCallback(async () => ({
+    accountId,
+    to: to.split(/[,;]/).map((value) => value.trim()).filter(Boolean),
+    cc: [],
+    bcc: [],
+    subject,
+    textBody: body,
+    htmlBody: null,
+    inReplyTo: null,
+    attachments: await encodeAttachments(attachments),
+  }), [accountId, attachments, body, subject, to]);
+
+  const persistDraft = useCallback(() => {
+    const operation = draftSave.current.catch(() => {}).then(async () => {
+      if (!accountId) return;
+      const payload = await draftPayload();
+      const saved = draftId.current
+        ? await api.updateDraft(draftId.current, payload)
+        : await api.createDraft(payload);
+      draftId.current = saved.id;
+    });
+    draftSave.current = operation;
+    return operation;
+  }, [accountId, draftPayload]);
+
+  useEffect(() => {
+    if (!accountId || (!to && !subject && !body && attachments.length === 0)) return;
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => {
+      persistDraft().catch(() => setSendError('Draft autosave failed'));
+    }, 1000);
+    return () => { if (draftTimer.current) clearTimeout(draftTimer.current); };
+  }, [accountId, attachments.length, body, persistDraft, subject, to]);
+
+  const handleClose = async () => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    if (to || subject || body || attachments.length > 0) {
+      await persistDraft().catch(() => {});
+    }
+    closeCompose();
+  };
+
   const handleSend = async () => {
     if (!accountId || !to.trim() || sending) return;
     setSending(true);
     setSendError(null);
     try {
-      const encodedAttachments = await Promise.all(attachments.map(async (file) => ({
-        filename: file.name,
-        contentType: file.type || 'application/octet-stream',
-        contentBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
-      })));
+      if (draftTimer.current) clearTimeout(draftTimer.current);
+      await draftSave.current.catch(() => {});
+      const encodedAttachments = await encodeAttachments(attachments);
       await api.send({
         accountId,
         to: to.split(/[,;]/).map((value) => value.trim()).filter(Boolean),
@@ -64,6 +107,7 @@ export function ComposeScreen() {
         inReplyTo: null,
         attachments: encodedAttachments,
       });
+      if (draftId.current) await api.deleteDraft(draftId.current).catch(() => {});
       closeCompose();
     } catch (cause) {
       setSendError(cause instanceof Error ? cause.message : 'Unable to send message');
@@ -75,7 +119,7 @@ export function ComposeScreen() {
   return (
     <div className={styles.screen}>
       <header className={styles.header}>
-        <button className={styles.cancel} onClick={closeCompose}>Cancel</button>
+        <button className={styles.cancel} onClick={handleClose}>Save &amp; close</button>
         <span className={styles.title}>New Message</span>
         <button
           className={`${styles.send} ${(!to.trim() || sending) ? styles.sendDisabled : ''}`}
@@ -175,4 +219,12 @@ function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
   return btoa(binary);
+}
+
+async function encodeAttachments(attachments: File[]) {
+  return Promise.all(attachments.map(async (file) => ({
+    filename: file.name,
+    contentType: file.type || 'application/octet-stream',
+    contentBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
+  })));
 }

@@ -422,6 +422,11 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
     if *method == Method::POST && path == "/messages" {
         return Some("mail.send");
     }
+    if matches!(*method, Method::POST | Method::PUT | Method::DELETE)
+        && (path == "/drafts" || path.starts_with("/drafts/"))
+    {
+        return Some("mail.modify");
+    }
     if *method == Method::POST && path.starts_with("/sync/") {
         return Some("mail.sync");
     }

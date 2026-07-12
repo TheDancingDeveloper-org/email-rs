@@ -10,10 +10,11 @@ use utoipa::{Modify, OpenApi, ToSchema};
 use email_types::{
     Account, AccountSettings, AddLinkBody, AddLinkResponse, AuthCredentials, AuthIdentity,
     AuthSession, AuthorizeResponse, BulkRequest, BulkResponse, CalendarEvent, Contact,
-    CreateAccount, CreateLabelBody, CreateRuleBody, CreateWebhook, EventLink, Folder, FullMessage,
-    Label, Message, MessageAttachment, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
-    SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount,
-    UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
+    CreateAccount, CreateLabelBody, CreateRuleBody, CreateWebhook, DraftRequest, DraftResponse,
+    EventLink, Folder, FullMessage, Label, Message, MessageAttachment, PatchFolder,
+    PatchMessageRequest, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
+    StatusResponse, SuggestResponse, UpdateAccount, UpdateLabelBody, UpdateRuleBody, UpdateWebhook,
+    Webhook,
 };
 
 use super::integration_tokens::{
@@ -284,6 +285,34 @@ fn doc_send_message() {}
 
 #[utoipa::path(
     post,
+    path = "/drafts",
+    security(("bearerAuth" = ["mail.modify"])),
+    request_body = DraftRequest,
+    responses((status = 200, body = DraftResponse), (status = 404, body = ErrorResponse), (status = 502, body = ErrorResponse))
+)]
+fn doc_create_draft() {}
+
+#[utoipa::path(
+    put,
+    path = "/drafts/{id}",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path, description = "Draft occurrence ID")),
+    request_body = DraftRequest,
+    responses((status = 200, body = DraftResponse), (status = 404, body = ErrorResponse), (status = 502, body = ErrorResponse))
+)]
+fn doc_update_draft() {}
+
+#[utoipa::path(
+    delete,
+    path = "/drafts/{id}",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path, description = "Draft occurrence ID")),
+    responses((status = 200, body = StatusResponse), (status = 404, body = ErrorResponse))
+)]
+fn doc_delete_draft() {}
+
+#[utoipa::path(
+    post,
     path = "/sync/{account_id}",
     security(("bearerAuth" = ["mail.sync"])),
     params(("account_id" = String, Path)),
@@ -415,7 +444,7 @@ fn doc_events() {}
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "email-rs API", version = "0.5.0"),
+    info(title = "email-rs API", version = "0.6.0"),
     servers((url = "/api/v1")),
     paths(
         doc_health,
@@ -445,6 +474,9 @@ fn doc_events() {}
         doc_list_attachments,
         doc_download_attachment,
         doc_send_message,
+        doc_create_draft,
+        doc_update_draft,
+        doc_delete_draft,
         doc_trigger_sync,
         doc_gmail_authorize,
         doc_auth_me,
@@ -511,6 +543,8 @@ fn doc_events() {}
         BulkResponse,
         SendRequest,
         SendResponse,
+        DraftRequest,
+        DraftResponse,
         AuthorizeResponse
         , SearchResponse
         , SuggestResponse

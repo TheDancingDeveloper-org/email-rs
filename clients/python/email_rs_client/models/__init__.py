@@ -27,6 +27,8 @@ from .create_label_body import CreateLabelBody
 from .create_rule_body import CreateRuleBody
 from .create_webhook import CreateWebhook
 from .created_integration_token import CreatedIntegrationToken
+from .draft_request import DraftRequest
+from .draft_response import DraftResponse
 from .error_response import ErrorResponse
 from .event_link import EventLink
 from .folder import Folder
@@ -86,6 +88,8 @@ __all__ = (
     "CreateLabelBody",
     "CreateRuleBody",
     "CreateWebhook",
+    "DraftRequest",
+    "DraftResponse",
     "ErrorResponse",
     "EventLink",
     "Folder",

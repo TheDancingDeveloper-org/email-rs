@@ -22,6 +22,7 @@ pub struct SmtpConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboundMessage {
     pub from: String,
+    pub message_id: Option<String>,
     pub to: Vec<String>,
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
@@ -39,13 +40,16 @@ pub struct OutboundAttachment {
     pub content: Vec<u8>,
 }
 
-fn build_message(msg: &OutboundMessage) -> Result<Message> {
+pub(crate) fn build_message(msg: &OutboundMessage) -> Result<Message> {
     let from = msg
         .from
         .parse()
         .map_err(|e: lettre::address::AddressError| AppError::Smtp(e.to_string()))?;
 
     let mut builder = Message::builder().from(from).subject(&msg.subject);
+    if let Some(message_id) = &msg.message_id {
+        builder = builder.message_id(Some(format!("<{message_id}>")));
+    }
 
     for to in &msg.to {
         let addr = to
@@ -178,6 +182,7 @@ mod tests {
     fn builds_multipart_message_with_cc_bcc_and_attachment() {
         let message = build_message(&OutboundMessage {
             from: "me@example.test".into(),
+            message_id: None,
             to: vec!["to@example.test".into()],
             cc: vec!["cc@example.test".into()],
             bcc: vec!["bcc@example.test".into()],
@@ -203,5 +208,24 @@ mod tests {
         assert!(!wire.contains("Bcc:"));
         assert!(wire.contains("Content-Disposition: attachment"));
         assert!(wire.contains("filename=\"report.txt\""));
+    }
+
+    #[test]
+    fn formats_stable_message_id_for_provider_draft() {
+        let message = build_message(&OutboundMessage {
+            from: "me@example.test".into(),
+            message_id: Some("draft-stable@example.test".into()),
+            to: vec!["you@example.test".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Draft".into(),
+            text_body: Some(String::new()),
+            html_body: None,
+            in_reply_to: None,
+            attachments: vec![],
+        })
+        .unwrap();
+        let raw = String::from_utf8(message.formatted()).unwrap();
+        assert!(raw.contains("Message-ID: <draft-stable@example.test>"));
     }
 }

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import styles from './ComposeModal.module.css';
 import { RecipientInput } from './RecipientInput';
 import { useAppStore } from '../../store';
@@ -18,6 +18,9 @@ export function ComposeModal() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<File[]>([]);
+  const draftId = useRef<string | null>(null);
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftSave = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     if (compose) {
@@ -31,6 +34,7 @@ export function ComposeModal() {
       setError(null);
       setSending(false);
       setAttachments([]);
+      draftId.current = null;
       // Fetch account signature.
       fetch(`/api/v1/accounts/${compose.accountId}/settings`)
         .then((r) => r.json())
@@ -41,22 +45,85 @@ export function ComposeModal() {
 
   const splitAddrs = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
 
+  const draftPayload = useCallback(async () => {
+    if (!compose) return null;
+    const encodedAttachments = await encodeAttachments(attachments);
+    return {
+      accountId: compose.accountId,
+      to: splitAddrs(to),
+      cc: splitAddrs(cc),
+      bcc: splitAddrs(bcc),
+      subject,
+      textBody: body,
+      htmlBody: null,
+      inReplyTo: compose.inReplyTo,
+      attachments: encodedAttachments,
+    };
+  }, [attachments, bcc, body, cc, compose, subject, to]);
+
+  const persistDraft = useCallback(() => {
+    const operation = draftSave.current.catch(() => {}).then(async () => {
+      const payload = await draftPayload();
+      if (!payload) return;
+      const path = draftId.current ? `/api/v1/drafts/${draftId.current}` : '/api/v1/drafts';
+      const response = await fetch(path, {
+        method: draftId.current ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error('Draft autosave failed');
+      const saved = await response.json() as { id: string };
+      draftId.current = saved.id;
+    });
+    draftSave.current = operation;
+    return operation;
+  }, [draftPayload]);
+
+  useEffect(() => {
+    if (!compose || (!to && !cc && !bcc && !subject && !body && attachments.length === 0)) return;
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => {
+      persistDraft().catch(() => setError('Draft autosave failed'));
+    }, 1000);
+    return () => { if (draftTimer.current) clearTimeout(draftTimer.current); };
+  }, [attachments.length, bcc, body, cc, compose, persistDraft, subject, to]);
+
+  const removeDraft = useCallback(async () => {
+    await draftSave.current.catch(() => {});
+    if (!draftId.current) return;
+    const id = draftId.current;
+    draftId.current = null;
+    await fetch(`/api/v1/drafts/${id}`, { method: 'DELETE' });
+  }, []);
+
+  const handleClose = useCallback(async () => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    if (to || cc || bcc || subject || body || attachments.length > 0) {
+      try { await persistDraft(); } catch { /* the autosave error remains visible on reopen */ }
+    }
+    closeCompose();
+  }, [attachments.length, bcc, body, cc, closeCompose, persistDraft, subject, to]);
+
+  const handleDiscard = useCallback(async () => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    await removeDraft().catch(() => {});
+    closeCompose();
+  }, [closeCompose, removeDraft]);
+
   const handleSend = useCallback(async () => {
     if (!compose || !to.trim() || !body.trim()) return;
     setSending(true);
     setError(null);
     try {
+      if (draftTimer.current) clearTimeout(draftTimer.current);
+      await draftSave.current.catch(() => {});
       const sigBlock = signature
         ? ['', '', `--${String.fromCharCode(32)}`, signature].join('\n')
         : '';
       const fullBody = (compose.mode === 'reply' && compose.quotedText
         ? body + '\n\n' + buildQuotedBlock(compose.quotedText, compose.quotedFrom)
         : body) + sigBlock;
-      const encodedAttachments = await Promise.all(attachments.map(async (file) => ({
-        filename: file.name,
-        contentType: file.type || 'application/octet-stream',
-        contentBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
-      })));
+      const encodedAttachments = await encodeAttachments(attachments);
       const resp = await fetch('/api/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -75,6 +142,7 @@ export function ComposeModal() {
         const err = await resp.json().catch(() => ({ error: 'Send failed' }));
         setError((err as { error?: string }).error ?? 'Send failed');
       } else {
+        await removeDraft().catch(() => {});
         closeCompose();
       }
     } catch {
@@ -82,7 +150,7 @@ export function ComposeModal() {
     } finally {
       setSending(false);
     }
-  }, [attachments, bcc, body, cc, closeCompose, compose, signature, subject, to]);
+  }, [attachments, bcc, body, cc, closeCompose, compose, removeDraft, signature, subject, to]);
 
   if (!compose) return null;
 
@@ -93,7 +161,7 @@ export function ComposeModal() {
       <div className={styles.header}>
         <span className={styles.modeTag} data-mode={compose.mode}>{modeLabel}</span>
         <span className={styles.headerSubject}>{compose.subject || 'No subject'}</span>
-        <button className={styles.closeBtn} type="button" onClick={closeCompose} aria-label="Discard">
+        <button className={styles.closeBtn} type="button" onClick={handleClose} aria-label="Save draft and close">
           ×
         </button>
       </div>
@@ -171,7 +239,7 @@ export function ComposeModal() {
         >
           {sending ? 'Sending…' : 'Send'}
         </button>
-        <button className={styles.discardBtn} type="button" onClick={closeCompose}>
+        <button className={styles.discardBtn} type="button" onClick={handleDiscard}>
           Discard
         </button>
         <label className={styles.discardBtn}>
@@ -211,6 +279,14 @@ function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
   return btoa(binary);
+}
+
+async function encodeAttachments(attachments: File[]) {
+  return Promise.all(attachments.map(async (file) => ({
+    filename: file.name,
+    contentType: file.type || 'application/octet-stream',
+    contentBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
+  })));
 }
 
 function buildQuotedBlock(text: string, from?: string): string {

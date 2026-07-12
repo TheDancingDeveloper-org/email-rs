@@ -287,6 +287,31 @@ pub struct SendResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftRequest {
+    pub account_id: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub subject: String,
+    pub text_body: Option<String>,
+    pub html_body: Option<String>,
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<OutgoingAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftResponse {
+    pub id: String,
+    pub occurrence_id: String,
+    pub logical_id: String,
+    pub message_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct AuthorizeResponse {
     pub url: String,
 }

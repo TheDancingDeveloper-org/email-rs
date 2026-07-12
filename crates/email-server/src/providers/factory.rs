@@ -240,6 +240,15 @@ impl MailProvider for TestMailProvider {
     async fn set_flagged(&self, _folder: &str, _uid: u32, _flagged: bool) -> Result<()> {
         self.mutation()
     }
+
+    async fn append_draft(
+        &self,
+        _folder: &str,
+        _message_id: &str,
+        _raw_message: &[u8],
+    ) -> Result<u32> {
+        self.mutation().map(|()| 1)
+    }
 }
 
 pub async fn provider_for_message(

@@ -753,6 +753,53 @@ impl MailProvider for GmailProvider {
         let _ = session.logout().await;
         Ok(())
     }
+
+    async fn append_draft(
+        &self,
+        folder: &str,
+        message_id: &str,
+        raw_message: &[u8],
+    ) -> Result<u32> {
+        let mut session = self.connect().await?;
+        session
+            .append(folder, Some("(\\Draft)"), None, raw_message)
+            .await
+            .map_err(|e| AppError::Imap(format!("APPEND draft failed: {e}")))?;
+        session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT drafts failed: {e}")))?;
+        let uids = session
+            .uid_search(format!("HEADER Message-ID \"<{message_id}>\""))
+            .await
+            .map_err(|e| AppError::Imap(format!("draft UID lookup failed: {e}")))?;
+        let uid = uids.into_iter().max().ok_or_else(|| {
+            AppError::Imap("provider did not return the appended draft UID".into())
+        })?;
+        let _ = session.logout().await;
+        Ok(uid)
+    }
+
+    async fn delete_draft(&self, folder: &str, uid: u32) -> Result<()> {
+        let mut session = self.connect().await?;
+        session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT failed: {e}")))?;
+        let stream = session
+            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+            .await
+            .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {e}")))?;
+        stream.collect::<Vec<_>>().await;
+        session
+            .expunge()
+            .await
+            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))?
+            .collect::<Vec<_>>()
+            .await;
+        let _ = session.logout().await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

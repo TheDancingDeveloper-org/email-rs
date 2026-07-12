@@ -151,6 +151,14 @@ export interface MobileSendRequest {
   }[];
 }
 
+export interface MobileDraftResponse {
+  id: string;
+  occurrenceId: string;
+  logicalId: string;
+  messageId: string;
+  status: string;
+}
+
 export const api = {
   accounts:        () => request('/accounts'),
   folders:         (accountId: string) => request(`/accounts/${segment(accountId)}/folders`),
@@ -163,6 +171,9 @@ export const api = {
   archive:         (id: string) => json('POST', `/messages/${segment(id)}/archive`),
   trash:           (id: string) => json('DELETE', `/messages/${segment(id)}`),
   send:            (body: MobileSendRequest) => json('POST', '/messages', body),
+  createDraft:     (body: MobileSendRequest) => json<MobileDraftResponse>('POST', '/drafts', body),
+  updateDraft:     (id: string, body: MobileSendRequest) => json<MobileDraftResponse>('PUT', `/drafts/${segment(id)}`, body),
+  deleteDraft:     (id: string) => json('DELETE', `/drafts/${segment(id)}`),
   accountSettings: (accountId: string) => request(`/accounts/${segment(accountId)}/settings`),
   updateAccount:   (accountId: string, body: { syncDaysLimit?: number | null }) => json('PATCH', `/accounts/${segment(accountId)}`, body),
   updateFolder:    (folderId: string, body: { isExcluded?: boolean }) => json('PATCH', `/folders/${segment(folderId)}`, body),

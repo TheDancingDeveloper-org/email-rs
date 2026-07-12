@@ -48,6 +48,9 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/messages/{id}/snooze"),
     ("DELETE", "/messages/{id}/snooze"),
     ("POST", "/messages"),
+    ("POST", "/drafts"),
+    ("PUT", "/drafts/{id}"),
+    ("DELETE", "/drafts/{id}"),
     ("GET", "/calendar/events"),
     ("GET", "/calendar/events/{id}"),
     ("GET", "/calendar/events/{id}/links"),
@@ -123,7 +126,7 @@ async fn capabilities() -> Json<serde_json::Value> {
         "apiVersion": "v1",
         "capabilities": [
             "mail.accounts", "mail.metadata", "mail.body", "mail.attachments",
-            "mail.search", "mail.mutations", "mail.send", "mail.sync"
+            "mail.search", "mail.mutations", "mail.send", "mail.drafts", "mail.sync"
         ],
         "integrationScopes": integration_tokens::ALLOWED_SCOPES,
     }))
@@ -173,6 +176,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(snooze::snooze_message).delete(snooze::unsnooze_message),
         )
         .route("/messages", post(compose::send_message))
+        .route("/drafts", post(compose::create_draft))
+        .route(
+            "/drafts/{id}",
+            axum::routing::put(compose::update_draft).delete(compose::delete_draft),
+        )
         .route("/calendar/events", get(calendar::list_events))
         .route("/calendar/events/{id}", get(calendar::get_event))
         .route(

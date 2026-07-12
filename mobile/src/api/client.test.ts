@@ -35,4 +35,27 @@ describe('mobile server contract', () => {
     }));
     await expect(api.trash('m1')).rejects.toThrow('remote mutation failed');
   });
+
+  it('uses the synchronized draft create update and delete contract', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => '{"id":"draft-1","occurrenceId":"draft-1","logicalId":"logical-1","messageId":"message-1","status":"created"}',
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const body = {
+      accountId: 'account', to: [], cc: [], bcc: [], subject: '', textBody: '',
+      htmlBody: null, inReplyTo: null, attachments: [],
+    };
+
+    await api.createDraft(body);
+    await api.updateDraft('draft 1', body);
+    await api.deleteDraft('draft 2');
+
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/drafts/draft%201');
+    expect(fetchMock.mock.calls[1][1].method).toBe('PUT');
+    expect(fetchMock.mock.calls[2][1].method).toBe('DELETE');
+  });
 });

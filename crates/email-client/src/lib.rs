@@ -3,10 +3,10 @@ use email_types::{
     Account, AccountSettings, ActionInput, AddLinkBody, AddLinkResponse, AuthClientKind,
     AuthCredentials, AuthIdentity, AuthSession, AuthorizeResponse, BulkRequest, BulkResponse,
     CalendarEvent, ConditionField, ConditionGroup, Contact, CreateAccount, CreateLabelBody,
-    CreateWebhook, EventLink, Folder, FullMessage, Label, MatchMode, Message, MessageAttachment,
-    PatchFolder, PatchMessageRequest, RuleDto, SearchResponse, SendRequest, SendResponse,
-    SnoozeRequest, StatusResponse, SuggestResponse, SyncEvent, UpdateAccount, UpdateLabelBody,
-    UpdateWebhook,
+    CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, MatchMode,
+    Message, MessageAttachment, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
+    SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, SyncEvent,
+    UpdateAccount, UpdateLabelBody, UpdateWebhook,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Serialize};
@@ -280,6 +280,18 @@ impl EmailClient {
 
     pub async fn send_message(&self, body: &SendRequest) -> Result<SendResponse> {
         self.json(Method::POST, "messages", body).await
+    }
+
+    pub async fn create_draft(&self, body: &DraftRequest) -> Result<DraftResponse> {
+        self.json(Method::POST, "drafts", body).await
+    }
+
+    pub async fn update_draft(&self, id: &str, body: &DraftRequest) -> Result<DraftResponse> {
+        self.json(Method::PUT, &format!("drafts/{id}"), body).await
+    }
+
+    pub async fn delete_draft(&self, id: &str) -> Result<serde_json::Value> {
+        self.request(Method::DELETE, &format!("drafts/{id}")).await
     }
 
     pub async fn trigger_sync(&self, account_id: &str) -> Result<serde_json::Value> {

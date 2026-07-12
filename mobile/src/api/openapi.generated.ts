@@ -11,6 +11,7 @@ const routes: readonly [ApiMethod, RegExp][] = [
   ['GET', /^\/messages\/[^/]+$/], ['PATCH', /^\/messages\/[^/]+$/], ['DELETE', /^\/messages\/[^/]+$/],
   ['GET', /^\/messages\/[^/]+\/attachments$/], ['GET', /^\/messages\/[^/]+\/attachments\/[^/]+$/],
   ['POST', /^\/messages\/[^/]+\/archive$/], ['POST', /^\/messages$/],
+  ['POST', /^\/drafts$/], ['PUT', /^\/drafts\/[^/]+$/], ['DELETE', /^\/drafts\/[^/]+$/],
   ['GET', /^\/search$/], ['GET', /^\/contacts\/suggest$/],
   ['GET', /^\/app-auth\/me$/], ['POST', /^\/app-auth\/logout$/], ['POST', /^\/app-auth\/refresh$/],
 ];
