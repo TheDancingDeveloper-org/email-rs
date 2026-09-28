@@ -20,6 +20,7 @@ steps:
   - name: build-frontend
     image: node:22-alpine
     commands:
+      - export HOME=/tmp  # Node B agents mount .netrc read-only under the default HOME
       - cd frontend && npm ci && npx vite build --outDir ../release/static --emptyOutDir
 
   # ── Build server and native FluentGUI Linux binaries ────────────────────────
@@ -28,6 +29,7 @@ steps:
     image: rust:1.88-slim
     depends_on: [build-frontend]
     commands:
+      - export HOME=/tmp  # Node B agents mount .netrc read-only under the default HOME
       - apt-get update && apt-get install -y g++ pkg-config libssl-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && rm -rf /var/lib/apt/lists/*
       - CARGO_BUILD_JOBS=4 cargo build --release --locked -p email-server -p email-desktop-fluent
       - strip target/release/email-server
@@ -57,6 +59,7 @@ steps:
       FORGEJO_TOKEN:
         from_secret: forgejo_token
     commands:
+      - export HOME=/tmp  # Node B agents mount .netrc read-only under the default HOME
       - uv build --project clients/python
       - uv publish --publish-url "${CI_FORGE_URL}/api/packages/indexarr/pypi" --check-url "${CI_FORGE_URL}/api/packages/indexarr/pypi/simple" --username indexarr --password "$FORGEJO_TOKEN" clients/python/dist/*
 
@@ -68,6 +71,7 @@ steps:
       FORGEJO_TOKEN:
         from_secret: git_auth_token
     commands:
+      - export HOME=/tmp  # Node B agents mount .netrc read-only under the default HOME
       - apk add --no-cache curl jq
       - |
         set -e
@@ -111,6 +115,7 @@ steps:
       DISCORD_WEBHOOK_URL:
         from_secret: discord_webhook_url
     commands:
+      - export HOME=/tmp  # Node B agents mount .netrc read-only under the default HOME
       - apk add --no-cache curl
       - |
         HASH=$(echo "$CI_COMMIT_SHA" | cut -c1-7)
@@ -128,6 +133,7 @@ steps:
       DISCORD_WEBHOOK_URL:
         from_secret: discord_webhook_url
     commands:
+      - export HOME=/tmp  # Node B agents mount .netrc read-only under the default HOME
       - apk add --no-cache curl
       - |
         HASH=$(echo "$CI_COMMIT_SHA" | cut -c1-7)
