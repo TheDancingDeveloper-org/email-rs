@@ -22,6 +22,7 @@ pub const ALLOWED_SCOPES: &[&str] = &[
     "mail.send",
     "mail.accounts.read",
     "mail.sync",
+    "mail.accounts.connect",
 ];
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]

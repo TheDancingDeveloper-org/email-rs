@@ -430,6 +430,14 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
     if *method == Method::POST && path.starts_with("/sync/") {
         return Some("mail.sync");
     }
+    if *method == Method::GET
+        && (path == "/auth/gmail/authorize" || path == "/auth/microsoft/authorize")
+    {
+        // Start a provider sign-in for a new or existing (`account_id`) mailbox.
+        // The pending OAuth state is bound to this token, so revoking the token
+        // also invalidates any sign-in it started.
+        return Some("mail.accounts.connect");
+    }
     if path.starts_with("/accounts") {
         return (*method == Method::GET).then_some("mail.accounts.read");
     }
@@ -974,5 +982,78 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn connect_scope_lets_an_integration_start_and_complete_provider_sign_in() {
+        let state = setup().await;
+        seed_user(&state).await;
+        let (_, login) = login_as(&state, ClientKind::Bearer).await;
+        let user_authorization = format!("Bearer {}", login["token"].as_str().unwrap());
+
+        let mut tokens = Vec::new();
+        for scopes in [vec!["mail.accounts.read"], vec!["mail.accounts.read", "mail.accounts.connect"]] {
+            let (status, _, created) = send(
+                crate::api::router(Arc::clone(&state)),
+                Method::POST,
+                "/integration-tokens",
+                Some(serde_json::json!({ "name": "myAIAgent", "scopes": scopes })),
+                &[("authorization", &user_authorization)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            tokens.push(created);
+        }
+        let without = format!("Bearer {}", tokens[0]["token"].as_str().unwrap());
+        let with = format!("Bearer {}", tokens[1]["token"].as_str().unwrap());
+
+        let (status, _, denied) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::GET,
+            "/auth/gmail/authorize",
+            None,
+            &[("authorization", &without)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(denied["error"].as_str().unwrap().contains("mail.accounts.connect"));
+
+        // With the scope the request passes authentication; the handler then
+        // answers from provider configuration, which tests may not have.
+        let (status, _, body) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::GET,
+            "/auth/gmail/authorize",
+            None,
+            &[("authorization", &with)],
+        )
+        .await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+        // The callback accepts a flow started by the scoped token until it is revoked.
+        let user_id = login["userId"].as_str().unwrap().to_string();
+        let pending = crate::state::OAuthState {
+            user_id,
+            session_id: tokens[1]["id"].as_str().unwrap().to_string(),
+            verifier: None,
+            account_id: None,
+        };
+        assert!(crate::api::auth::oauth_owner_is_active(&state, &pending).await);
+        let unscoped = crate::state::OAuthState {
+            session_id: tokens[0]["id"].as_str().unwrap().to_string(),
+            ..pending.clone()
+        };
+        assert!(!crate::api::auth::oauth_owner_is_active(&state, &unscoped).await);
+        let (status, _, _) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::DELETE,
+            &format!("/integration-tokens/{}", tokens[1]["id"].as_str().unwrap()),
+            None,
+            &[("authorization", &user_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!crate::api::auth::oauth_owner_is_active(&state, &pending).await);
     }
 }

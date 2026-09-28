@@ -26,7 +26,7 @@ Provider credentials authorize email-rs to access Gmail, Microsoft, or IMAP. App
 | `GET` | `/api/v1/auth/gmail/callback` | Google OAuth callback. |
 | `GET` | `/api/v1/auth/microsoft/callback` | Microsoft OAuth callback. |
 
-All other API routes, including OAuth authorization-start routes and SSE events, require a valid application session.
+All other API routes, including OAuth authorization-start routes and SSE events, require a valid application session, except that an integration token with `mail.accounts.connect` may start OAuth authorization (see below).
 
 Bootstrap and login accept camelCase JSON:
 
@@ -62,9 +62,18 @@ Integration tokens accept only these least-privilege scopes:
 - `mail.modify`
 - `mail.send`
 - `mail.sync`
+- `mail.accounts.connect`
 
-They cannot manage sessions, application users, OAuth authorization, webhooks,
-or other integration tokens. A route outside the mail integration surface is
+`mail.accounts.connect` lets an integration start a provider sign-in with
+`GET /api/v1/auth/{gmail,microsoft}/authorize`, optionally with `account_id` to
+reconnect an existing mailbox whose provider token was revoked or expired. The
+pending OAuth state is bound to the token, and the callback completes only
+while the token is unrevoked, unexpired and still holds the scope. This lets an
+application such as myAIAgent offer "connect" and "reconnect" to its own
+signed-in users without holding an email-rs user credential.
+
+Integration tokens cannot manage sessions, application users, webhooks, or
+other integration tokens. A route outside the mail integration surface is
 denied even if every available scope was granted.
 
 `mail.metadata.read` also permits the read-only `/api/v1/integration-events`

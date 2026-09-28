@@ -74,6 +74,7 @@ fn spawn_sync(
 
 /// Validate and consume the OAuth state token. Returns the stored PKCE verifier
 /// (None for non-PKCE flows) or an error response.
+#[allow(clippy::result_large_err)]
 async fn consume_state(
     app_state: &Arc<AppState>,
     state_val: &str,
@@ -89,18 +90,39 @@ async fn consume_state(
     }
 }
 
+/// The principal that started an OAuth flow must still be valid at callback time:
+/// an unexpired application session, or an unrevoked, unexpired integration token
+/// holding `mail.accounts.connect` (its id is recorded as the session id).
 pub(crate) async fn oauth_owner_is_active(app_state: &AppState, pending: &OAuthState) -> bool {
-    sqlx::query_scalar::<_, i64>(
+    let now = chrono::Utc::now().timestamp();
+    let session = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM app_sessions WHERE id = ? AND user_id = ? AND expires_at > ?",
     )
     .bind(&pending.session_id)
     .bind(&pending.user_id)
-    .bind(chrono::Utc::now().timestamp())
+    .bind(now)
     .fetch_optional(&app_state.pool)
     .await
     .ok()
     .flatten()
-    .is_some()
+    .is_some();
+    if session {
+        return true;
+    }
+    sqlx::query_scalar::<_, String>(
+        r#"SELECT scopes_json FROM integration_tokens
+           WHERE id = ? AND user_id = ? AND revoked_at IS NULL
+             AND (expires_at IS NULL OR expires_at > ?)"#,
+    )
+    .bind(&pending.session_id)
+    .bind(&pending.user_id)
+    .bind(now)
+    .fetch_optional(&app_state.pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|scopes| serde_json::from_str::<Vec<String>>(&scopes).ok())
+    .is_some_and(|scopes| scopes.iter().any(|scope| scope == "mail.accounts.connect"))
 }
 
 #[allow(clippy::result_large_err)]

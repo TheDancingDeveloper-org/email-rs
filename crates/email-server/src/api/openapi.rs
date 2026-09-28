@@ -323,7 +323,8 @@ fn doc_trigger_sync() {}
 #[utoipa::path(
     get,
     path = "/auth/gmail/authorize",
-    security(("bearerAuth" = [])),
+    params(("account_id" = Option<String>, Query, description = "Reconnect this existing account instead of adding one")),
+    security(("bearerAuth" = []), ("bearerAuth" = ["mail.accounts.connect"])),
     responses((status = 200, body = AuthorizeResponse), (status = 401, body = ErrorResponse))
 )]
 fn doc_gmail_authorize() {}
@@ -340,7 +341,7 @@ fn doc_auth_refresh() {}
 #[utoipa::path(delete, path = "/app-auth/sessions/{id}", security(("bearerAuth" = [])), params(("id" = String, Path)), responses((status = 200, body = StatusResponse), (status = 404, body = ErrorResponse)))]
 fn doc_revoke_session() {}
 
-#[utoipa::path(get, path = "/auth/microsoft/authorize", security(("bearerAuth" = [])), responses((status = 200, body = AuthorizeResponse), (status = 401, body = ErrorResponse)))]
+#[utoipa::path(get, path = "/auth/microsoft/authorize", params(("account_id" = Option<String>, Query, description = "Reconnect this existing account instead of adding one")), security(("bearerAuth" = []), ("bearerAuth" = ["mail.accounts.connect"])), responses((status = 200, body = AuthorizeResponse), (status = 401, body = ErrorResponse)))]
 fn doc_microsoft_authorize() {}
 
 #[utoipa::path(get, path = "/auth/gmail/callback", params(("code" = String, Query), ("state" = String, Query)), responses((status = 303, description = "OAuth flow completed"), (status = 400, body = ErrorResponse)))]
@@ -444,7 +445,7 @@ fn doc_events() {}
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "email-rs API", version = "0.6.1"),
+    info(title = "email-rs API", version = "0.6.2"),
     servers((url = "/api/v1")),
     paths(
         doc_health,
