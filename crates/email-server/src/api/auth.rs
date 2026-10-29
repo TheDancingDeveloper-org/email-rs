@@ -246,7 +246,7 @@ async fn fetch_microsoft_userinfo(
         return Err(AppError::Auth("OAuth identity is empty".into()));
     };
     let name = nonempty(info.display_name).unwrap_or_else(|| email.clone());
-    object_id_matches(&object_id, info.id.as_deref())?;
+    object_id_matches(&tenant_id, &object_id, info.id.as_deref())?;
     Ok(VerifiedIdentity {
         email,
         name,
@@ -255,16 +255,40 @@ async fn fetch_microsoft_userinfo(
     })
 }
 
+/// Microsoft consumer (personal account) tenant. Graph `id` there is the
+/// last 16 hex characters of `oid`; work accounts use the same GUID.
+const MICROSOFT_CONSUMER_TENANT: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
+
 /// Graph `id` and the ID token `oid` name the same directory object.
-fn object_id_matches(oid: &str, graph_id: Option<&str>) -> Result<()> {
+/// `tenant_id` is the ID token `tid`. Personal accounts (the consumer tenant)
+/// compare the last 64 bits; work accounts require the full id.
+fn object_id_matches(tenant_id: &str, oid: &str, graph_id: Option<&str>) -> Result<()> {
     if let Some(graph_id) = graph_id.filter(|id| !id.is_empty()) {
-        if !graph_id.eq_ignore_ascii_case(oid) {
+        let same = if tenant_id.eq_ignore_ascii_case(MICROSOFT_CONSUMER_TENANT) {
+            consumer_object_id_matches(oid, graph_id)
+        } else {
+            graph_id.eq_ignore_ascii_case(oid)
+        };
+        if !same {
             return Err(AppError::Auth(
                 "Microsoft identity does not match the ID token".into(),
             ));
         }
     }
     Ok(())
+}
+
+/// Personal accounts: Graph `id` is 16 hex chars; `oid` is
+/// `00000000-0000-0000-xxxx-xxxxxxxxxxxx` with those bits in the last two groups.
+fn consumer_object_id_matches(oid: &str, graph_id: &str) -> bool {
+    let mut parts = oid.split('-');
+    let groups: Vec<&str> = parts.by_ref().collect();
+    if groups.len() != 5 {
+        return false;
+    }
+    let from_oid = format!("{}{}", groups[3], groups[4]);
+    let graph = graph_id.replace('-', "");
+    from_oid.eq_ignore_ascii_case(&graph)
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
@@ -758,7 +782,10 @@ async fn update_account_token(
 
 #[cfg(test)]
 mod tests {
-    use super::{finish_oauth, upsert_account, VerifiedIdentity};
+    use super::{
+        finish_oauth, object_id_matches, upsert_account, VerifiedIdentity,
+        MICROSOFT_CONSUMER_TENANT,
+    };
 
     fn identity(email: &str, name: &str) -> VerifiedIdentity {
         VerifiedIdentity {
@@ -767,6 +794,36 @@ mod tests {
             provider_tenant_id: None,
             provider_object_id: None,
         }
+    }
+
+    #[test]
+    fn work_account_object_ids_must_match_exactly() {
+        let tid = "11111111-2222-3333-4444-555555555555";
+        let oid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        assert!(object_id_matches(tid, oid, Some(oid)).is_ok());
+        assert!(object_id_matches(tid, oid, Some(&oid.to_ascii_uppercase())).is_ok());
+        assert!(object_id_matches(tid, oid, Some("aaaaaaaa-bbbb-cccc-dddd-ffffffffffff")).is_err());
+        // A work account does not accept the consumer last-64-bits form.
+        assert!(object_id_matches(tid, oid, Some("ddddeeeeeeeeeeee")).is_err());
+    }
+
+    #[test]
+    fn personal_account_object_id_compares_the_last_64_bits() {
+        let oid = "00000000-0000-0000-a1b2-c3d4e5f60718";
+        let graph = "a1b2c3d4e5f60718";
+        assert!(object_id_matches(MICROSOFT_CONSUMER_TENANT, oid, Some(graph)).is_ok());
+        assert!(object_id_matches(
+            MICROSOFT_CONSUMER_TENANT,
+            oid,
+            Some(&graph.to_ascii_uppercase())
+        )
+        .is_ok());
+        assert!(object_id_matches(MICROSOFT_CONSUMER_TENANT, oid, Some(oid)).is_err());
+        assert!(
+            object_id_matches(MICROSOFT_CONSUMER_TENANT, oid, Some("a1b2c3d4e5f60719")).is_err()
+        );
+        // Missing Graph id is not a mismatch.
+        assert!(object_id_matches(MICROSOFT_CONSUMER_TENANT, oid, None).is_ok());
     }
 
     fn microsoft(email: &str, tid: &str, oid: &str) -> VerifiedIdentity {
@@ -781,7 +838,8 @@ mod tests {
     use axum::http::StatusCode;
 
     async fn pool() -> sqlx::SqlitePool {
-        let path = format!("/tmp/email_oauth_identity_{}.db", uuid::Uuid::new_v4());
+        let _db_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let path = _db_dir.path().join("email.db").display().to_string();
         let (pool, _) = crate::db::create_pool(&format!("sqlite:{path}"))
             .await
             .unwrap();

@@ -704,7 +704,8 @@ mod tests {
     // ── Integration tests (in-memory SQLite) ────────────────────────────────────
 
     async fn make_state(with_fts: bool) -> Arc<crate::state::AppState> {
-        let path = format!("/tmp/email_test_{}.db", uuid::Uuid::new_v4());
+        let _db_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let path = _db_dir.path().join("email.db").display().to_string();
         let (pool, has_fts) = crate::db::create_pool(&format!("sqlite:{path}"))
             .await
             .unwrap();
@@ -1508,7 +1509,8 @@ mod tests {
 
     #[tokio::test]
     async fn first_index_is_replaced_and_bodies_reindexed() {
-        let path = format!("/tmp/email_test_{}.db", uuid::Uuid::new_v4());
+        let _db_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let path = _db_dir.path().join("email.db").display().to_string();
         let url = format!("sqlite:{path}");
         let (pool, has_fts) = crate::db::create_pool(&url).await.unwrap();
         assert!(has_fts);

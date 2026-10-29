@@ -63,5 +63,6 @@ gdk-pixbuf = { version = "0.18", optional = true }
 winres = "0.1"
 
 [dev-dependencies]
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

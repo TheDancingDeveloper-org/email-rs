@@ -18,12 +18,13 @@ hashes. Session tokens are stored as SHA-256 hashes.
 
 What is not encrypted: message bodies, attachment blobs, calendar data, search
 indexes and account metadata sit in SQLite as plaintext. The protection is file
-permissions, not encryption. On startup the server creates the data directory
+permissions, not encryption. On startup the server creates any missing data directory
 at mode 0700 and the database file, its `-wal` and its `-shm` at mode 0600 on
-Unix. An existing file or directory is tightened to those modes only when this
-process owns it; anything owned by another user is left untouched and a warning
-is logged. Startup refuses to serve a data directory that is group- or
-world-accessible.
+Unix. A directory that already exists is never chmodded (so a shared parent
+such as `/tmp` or `/var/lib` keeps its mode). Group or other access on an
+existing directory is logged as a warning. Startup refuses only a
+world-writable directory that does not have the sticky bit. An existing
+database file is tightened to 0600 only when this process owns it.
 
 There is no `/tmp` fallback. `DATABASE_URL` must point at a directory this
 process can create or already owns (the default is `$XDG_DATA_HOME/email-rs`,

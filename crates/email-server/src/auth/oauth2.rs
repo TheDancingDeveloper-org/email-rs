@@ -309,7 +309,7 @@ mod tests {
             access_token: "tok".into(),
             refresh_token: Some("ref".into()),
             expires_at: Some(Utc::now().timestamp() + offset_secs),
-                    id_token: None,
+            id_token: None,
         }
     }
 
@@ -319,7 +319,7 @@ mod tests {
             access_token: "tok".into(),
             refresh_token: None,
             expires_at: None,
-                    id_token: None,
+            id_token: None,
         };
         assert!(!t.is_expired());
     }
@@ -352,7 +352,7 @@ mod tests {
             expires_in: Some(3600),
             token_type: "Bearer".into(),
             scope: None,
-                    id_token: None,
+            id_token: None,
         };
         let before = Utc::now().timestamp();
         let stored = StoredToken::from_token_response(resp);
@@ -369,7 +369,7 @@ mod tests {
             expires_in: None,
             token_type: "Bearer".into(),
             scope: None,
-                    id_token: None,
+            id_token: None,
         };
         assert!(StoredToken::from_token_response(resp).expires_at.is_none());
     }
@@ -453,7 +453,7 @@ mod tests {
             access_token: "tok".into(),
             refresh_token: None,
             expires_at: Some(10_000),
-                    id_token: None,
+            id_token: None,
         };
         assert!(!token.is_expired_at(10_000 - EXPIRY_MARGIN_SECS - 1));
         assert!(token.is_expired_at(10_000 - EXPIRY_MARGIN_SECS));

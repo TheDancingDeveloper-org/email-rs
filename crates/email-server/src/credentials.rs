@@ -153,7 +153,8 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_database_credentials_are_encrypted_in_place() {
-        let path = format!("/tmp/email_credentials_test_{}.db", uuid::Uuid::new_v4());
+        let _db_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let path = _db_dir.path().join("email.db").display().to_string();
         let pool = crate::db::create_pool(&format!("sqlite:{path}"))
             .await
             .unwrap()
