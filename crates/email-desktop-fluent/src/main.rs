@@ -12114,6 +12114,7 @@ mod tests {
                     .to_string(),
             ),
             text_body: Some("Text fallback".to_string()),
+            ..Default::default()
         });
         let state = NativeAppState {
             selected_full_message: Some(full),
@@ -12134,6 +12135,7 @@ mod tests {
         full.body = Some(MessageBody {
             html_body: Some("   ".to_string()),
             text_body: Some("Text body".to_string()),
+            ..Default::default()
         });
         let mut state = NativeAppState {
             selected_full_message: Some(full),
@@ -12567,6 +12569,7 @@ mod tests {
         full.body = Some(MessageBody {
             html_body: None,
             text_body: Some("Original line\nSecond line".to_string()),
+            ..Default::default()
         });
         state.selected_message = Some("message".to_string());
         state.selected_full_message = Some(full);

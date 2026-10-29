@@ -221,6 +221,46 @@ pub mod generic_imap;
 pub mod gmail;
 pub mod google_calendar;
 
+/// Longest provider error text carried into an [`AppError`]. async-imap's
+/// parse errors embed the whole unparsed read buffer, up to 512 MiB.
+const MAX_IMAP_ERROR_CHARS: usize = 500;
+
+/// Drain an IMAP response stream (FETCH, STORE, LIST, EXPUNGE), failing on
+/// its first error.
+///
+/// async-imap does not end a response stream after a transport or parse
+/// error: once the server drops the connection mid-response, every further
+/// poll yields the same error again. `collect()` on such a stream never
+/// returns and allocates at memory bandwidth until the host runs out of
+/// memory (WI-892: the server grew to 63–69 GB three times). The connection
+/// is unusable after the first error, so stop there.
+pub(crate) async fn drain_imap_stream<T, E, S>(stream: S, context: &str) -> Result<Vec<T>>
+where
+    S: futures::Stream<Item = std::result::Result<T, E>>,
+    E: std::fmt::Display,
+{
+    use futures::StreamExt as _;
+
+    let mut stream = std::pin::pin!(stream);
+    let mut items = Vec::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(item) => items.push(item),
+            Err(error) => {
+                let detail: String = error
+                    .to_string()
+                    .chars()
+                    .take(MAX_IMAP_ERROR_CHARS)
+                    .collect();
+                return Err(crate::error::AppError::Imap(format!(
+                    "{context} failed: {detail}"
+                )));
+            }
+        }
+    }
+    Ok(items)
+}
+
 pub(crate) fn parse_message_body(uid: u32, raw: &[u8]) -> Result<MessageBody> {
     use mail_parser::MimeHeaders as _;
 
@@ -455,5 +495,114 @@ mod tests {
         );
         assert_eq!(body.attachments[0].filename, "attachment-1");
         assert_eq!(body.attachments[1].filename, body.attachments[2].filename);
+    }
+
+    /// Fail the test, instead of exhausting memory, once a stream has handed
+    /// out far more items than the server could have sent.
+    fn bounded<S: futures::Stream>(stream: S) -> impl futures::Stream<Item = S::Item> {
+        use futures::StreamExt as _;
+        let mut polled = 0usize;
+        stream.inspect(move |_| {
+            polled += 1;
+            assert!(
+                polled < 10_000,
+                "IMAP stream drained past its first error (WI-892)"
+            );
+        })
+    }
+
+    /// An IMAP server that answers UID FETCH with half a literal and then
+    /// closes the connection, as Gmail does when it drops a session.
+    async fn imap_session_dropped_mid_fetch() -> async_imap::Session<tokio::io::DuplexStream> {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = tokio::io::BufReader::new(reader);
+            writer.write_all(b"* OK ready\r\n").await.unwrap();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    return;
+                }
+                let tag = line
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                let reply = if line.contains("LOGIN") {
+                    format!("{tag} OK logged in\r\n")
+                } else if line.contains("SELECT") {
+                    format!(
+                        "* 1 EXISTS\r\n* OK [UIDVALIDITY 1] ok\r\n{tag} OK [READ-WRITE] done\r\n"
+                    )
+                } else {
+                    writer
+                        .write_all(b"* 1 FETCH (UID 1 BODY[] {500}\r\nFrom: a@example.com\r\n")
+                        .await
+                        .unwrap();
+                    writer.shutdown().await.unwrap();
+                    return;
+                };
+                writer.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let mut session = async_imap::Client::new(client)
+            .login("user", "password")
+            .await
+            .map_err(|(error, _)| error)
+            .unwrap();
+        session.select("INBOX").await.unwrap();
+        session
+    }
+
+    #[tokio::test]
+    async fn dropped_connection_mid_fetch_fails_instead_of_growing_forever() {
+        let mut session = imap_session_dropped_mid_fetch().await;
+        let stream = session.uid_fetch("1", "(UID BODY.PEEK[])").await.unwrap();
+
+        let error = drain_imap_stream(bounded(stream), "UID FETCH")
+            .await
+            .expect_err("a truncated FETCH response is an error");
+
+        assert!(error.to_string().contains("UID FETCH failed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn async_imap_repeats_the_error_after_a_dropped_connection() {
+        // The upstream behaviour the helper guards against: the stream never
+        // ends once the connection is gone, so `collect()` would never return.
+        // If an async-imap upgrade fails this, upstream ends the stream now;
+        // keep the helper and drop this test.
+        use futures::StreamExt as _;
+
+        let mut session = imap_session_dropped_mid_fetch().await;
+        let stream = session.uid_fetch("1", "(UID BODY.PEEK[])").await.unwrap();
+        let items: Vec<_> = stream.take(1_000).collect().await;
+
+        assert_eq!(items.len(), 1_000);
+        assert!(items.iter().all(|item| item.is_err()));
+    }
+
+    #[tokio::test]
+    async fn imap_error_text_is_capped() {
+        let huge = "x".repeat(10 * 1024 * 1024);
+        let stream = futures::stream::iter([Ok(1), Err(huge)]);
+
+        let error = drain_imap_stream(stream, "UID FETCH").await.unwrap_err();
+
+        assert!(error.to_string().len() < 2 * MAX_IMAP_ERROR_CHARS);
+    }
+
+    #[tokio::test]
+    async fn complete_imap_stream_is_drained_in_order() {
+        let stream = futures::stream::iter([Ok::<_, String>(1), Ok(2), Ok(3)]);
+
+        assert_eq!(
+            drain_imap_stream(stream, "UID FETCH").await.unwrap(),
+            vec![1, 2, 3]
+        );
     }
 }

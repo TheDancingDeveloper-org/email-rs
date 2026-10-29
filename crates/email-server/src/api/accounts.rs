@@ -265,7 +265,7 @@ mod tests {
         let state = setup().await;
         let payload = serde_json::json!({
             "name": "Gmail",
-            "email": "user@gmail.com",
+            "email": "user@example.com",
             "providerType": "gmail",
             "authType": "oauth"
         });
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let arr = body.as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["email"], "user@gmail.com");
+        assert_eq!(arr[0]["email"], "user@example.com");
     }
 
     #[tokio::test]
@@ -292,7 +292,7 @@ mod tests {
         )
         .bind("del-id")
         .bind("Del")
-        .bind("d@d.com")
+        .bind("d@example.com")
         .bind("generic_imap")
         .bind("password")
         .execute(&state.pool)
@@ -332,7 +332,7 @@ mod tests {
         )
         .bind("upd-id")
         .bind("Old")
-        .bind("o@o.com")
+        .bind("o@example.org")
         .bind("generic_imap")
         .bind("password")
         .execute(&state.pool)
@@ -410,7 +410,7 @@ mod tests {
         )
         .bind("cas-acc")
         .bind("C")
-        .bind("c@c.com")
+        .bind("c@example.org")
         .bind("generic_imap")
         .bind("password")
         .execute(&state.pool)

@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod oauth2;
+pub mod token_source;
 
 use serde::{Deserialize, Serialize};
 

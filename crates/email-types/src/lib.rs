@@ -170,11 +170,22 @@ pub struct Message {
     pub snoozed_until: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageBody {
     pub html_body: Option<String>,
     pub text_body: Option<String>,
+    /// The current message as Markdown for models and search: the real text
+    /// part (or the HTML converted), without quoted history, signature,
+    /// images or tracking links. Computed once when the body is cached.
+    #[serde(default)]
+    pub clean_body: Option<String>,
+    /// The quoted history split off `cleanBody`, if the message had any.
+    #[serde(default)]
+    pub quoted_history: Option<String>,
+    /// Whether a signature was removed from `cleanBody`.
+    #[serde(default)]
+    pub signature_stripped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]

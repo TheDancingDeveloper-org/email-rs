@@ -1,6 +1,6 @@
 [package]
 name = "email-server"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 default-run = "email-server"
 
@@ -15,11 +15,14 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono", "uuid
 async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
 lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "builder", "smtp-transport", "hostname", "mime03", "tracing"] }
 mail-parser = "0.9"
-oauth2 = "4"
+htmd = "0.5"
+markup5ever_rcdom = "0.38"
+regex = "1"
+oauth2 = "5"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
@@ -37,14 +40,14 @@ urlencoding = "2"
 tokio-stream = { version = "0.1", features = ["sync"] }
 hmac-sha256 = "1"
 dotenvy = "0.15"
-argon2 = "0.5"
-sha2 = "0.10"
+argon2 = "0.6"
+sha2 = "0.11"
 email-types = { path = "../email-types", features = ["server"] }
 utoipa = { version = "5", features = ["chrono"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-tray-icon = "0.19"
-tao = "0.30"
+tray-icon = "0.25"
+tao = "0.35"
 wry = "0.47"
 image = { version = "0.25", default-features = false, features = ["png"] }
 

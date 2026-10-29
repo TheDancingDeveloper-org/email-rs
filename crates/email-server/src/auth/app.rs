@@ -1,7 +1,7 @@
 use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
     Argon2,
 };
 use axum::{
@@ -177,7 +177,13 @@ pub async fn bootstrap(
     if let Err(message) = validate_password(&credentials.password) {
         return error(StatusCode::BAD_REQUEST, message);
     }
-    let mut tx = match state.pool.begin().await {
+    // Hash before taking the write lock so the lock isn't held while hashing.
+    let hash = match hash_password(credentials.password).await {
+        Ok(hash) => hash,
+        Err(err) => return err.into_response(),
+    };
+    // Read-then-insert: take the write lock up front (see `db::begin_write`).
+    let mut tx = match crate::db::begin_write(&state.pool).await {
         Ok(tx) => tx,
         Err(err) => return AppError::Database(err).into_response(),
     };
@@ -189,10 +195,6 @@ pub async fn bootstrap(
         Ok(_) => return error(StatusCode::CONFLICT, "application user already exists"),
         Err(err) => return AppError::Database(err).into_response(),
     }
-    let hash = match hash_password(credentials.password).await {
-        Ok(hash) => hash,
-        Err(err) => return err.into_response(),
-    };
     let user_id = Uuid::new_v4().to_string();
     if let Err(err) =
         sqlx::query("INSERT INTO app_users (id, username, password_hash) VALUES (?, ?, ?)")
@@ -587,10 +589,9 @@ fn validate_password(password: &str) -> Result<(), &'static str> {
 
 async fn hash_password(password: String) -> Result<String, AppError> {
     tokio::task::spawn_blocking(move || {
-        let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
-            .map_err(|error| AppError::Auth(format!("password salt failed: {error}")))?;
+        // A random v4 UUID is a 16-byte salt, the PHC-recommended length.
         Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
+            .hash_password_with_salt(password.as_bytes(), Uuid::new_v4().as_bytes())
             .map(|hash| hash.to_string())
             .map_err(|error| AppError::Auth(format!("password hashing failed: {error}")))
     })
@@ -724,6 +725,30 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         (headers, body)
+    }
+
+    #[tokio::test]
+    async fn password_hashes_round_trip_and_legacy_hashes_still_verify() {
+        let hash = hash_password("correct horse battery".into()).await.unwrap();
+        assert!(hash.starts_with("$argon2id$v=19$"));
+        assert!(
+            verify_password("correct horse battery".into(), hash.clone())
+                .await
+                .unwrap()
+        );
+        assert!(!verify_password("wrong".into(), hash).await.unwrap());
+
+        // Produced by argon2 0.5 (the version stored users were hashed with)
+        // from a fixed salt; argon2 0.6 must keep verifying it.
+        let legacy = "$argon2id$v=19$m=19456,t=2,p=1$BwcHBwcHBwcHBwcHBwcHBw$WLRGUa13/B3MXznFse33FId4O++DaYL6ulYUMEhpRqE";
+        assert!(
+            verify_password("correct horse battery".into(), legacy.into())
+                .await
+                .unwrap()
+        );
+        assert!(!verify_password("wrong".into(), legacy.into())
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -992,7 +1017,10 @@ mod tests {
         let user_authorization = format!("Bearer {}", login["token"].as_str().unwrap());
 
         let mut tokens = Vec::new();
-        for scopes in [vec!["mail.accounts.read"], vec!["mail.accounts.read", "mail.accounts.connect"]] {
+        for scopes in [
+            vec!["mail.accounts.read"],
+            vec!["mail.accounts.read", "mail.accounts.connect"],
+        ] {
             let (status, _, created) = send(
                 crate::api::router(Arc::clone(&state)),
                 Method::POST,
@@ -1016,7 +1044,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(denied["error"].as_str().unwrap().contains("mail.accounts.connect"));
+        assert!(denied["error"]
+            .as_str()
+            .unwrap()
+            .contains("mail.accounts.connect"));
 
         // With the scope the request passes authentication; the handler then
         // answers from provider configuration, which tests may not have.

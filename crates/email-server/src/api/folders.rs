@@ -34,7 +34,7 @@ pub async fn mark_folder_read(
     State(state): State<Arc<AppState>>,
     Path(folder_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = crate::db::begin_write(&state.pool).await?;
     let result = sqlx::query("UPDATE messages SET is_read = 1 WHERE folder_id = ?")
         .bind(&folder_id)
         .execute(&mut *tx)
@@ -99,7 +99,7 @@ mod tests {
         )
         .bind(id)
         .bind("T")
-        .bind(format!("{id}@t.com"))
+        .bind(format!("{id}@example.com"))
         .bind("generic_imap")
         .bind("password")
         .execute(pool)

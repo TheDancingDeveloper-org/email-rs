@@ -246,6 +246,10 @@ impl ImapSyncEngine {
         let account_id = account_id.to_string();
         let done_counter = Arc::new(AtomicUsize::new(0));
         let event_tx_owned: Option<broadcast::Sender<String>> = event_tx.cloned();
+        // Set once the account's credentials are refused for good (for example
+        // a revoked OAuth grant). Remaining folders are skipped rather than
+        // each failing against the provider, and the run reports it.
+        let auth_failure: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
 
         let errors: Vec<String> = stream::iter(db_folders)
             .map(|db_folder| {
@@ -254,9 +258,18 @@ impl ImapSyncEngine {
                 let account_id = account_id.clone();
                 let done_counter = done_counter.clone();
                 let event_tx = event_tx_owned.clone();
+                let auth_failure = auth_failure.clone();
                 async move {
                     let folder_name = db_folder.full_path.clone();
-                    let result = sync_folder(provider, pool, &account_id, db_folder, sync_days_limit).await;
+                    let result = if auth_failure.get().is_some() {
+                        Ok(()) // skipped; the run as a whole reports the auth failure
+                    } else {
+                        let result = sync_folder(provider, pool, &account_id, db_folder, sync_days_limit).await;
+                        if let Err(AppError::Auth(message)) = &result {
+                            let _ = auth_failure.set(message.clone());
+                        }
+                        result
+                    };
                     let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
                     if let Some(tx) = &event_tx {
                         let _ = tx.send(format!(
@@ -274,6 +287,9 @@ impl ImapSyncEngine {
 
         for e in &errors {
             error!("folder sync error: {}", e);
+        }
+        if let Some(message) = auth_failure.get() {
+            return Err(AppError::Auth(message.clone()));
         }
 
         if errors.is_empty() {
@@ -308,7 +324,7 @@ async fn sync_folder(
             "UIDVALIDITY changed for {} ({} -> {}), rebuilding folder cache",
             db_folder.full_path, db_folder.uid_validity, remote_uid_validity
         );
-        let mut tx = pool.begin().await?;
+        let mut tx = crate::db::begin_write(&pool).await?;
         sqlx::query("DELETE FROM messages WHERE folder_id = ?")
             .bind(&db_folder.id)
             .execute(&mut *tx)
@@ -394,8 +410,10 @@ async fn sync_folder(
     let mut new_msgs_for_rules: Vec<NewMsgInfo> = Vec::new();
 
     // Batch all inserts in a single transaction to reduce SQLite write-lock contention
-    // when multiple folders are syncing in parallel.
-    let mut tx = pool.begin().await?;
+    // when multiple folders are syncing in parallel. The write lock is taken up
+    // front so a concurrent writer is waited out, not reported as "database is
+    // locked" (see `db::begin_write`).
+    let mut tx = crate::db::begin_write(&pool).await?;
     for msg in &messages {
         // The complete UID snapshot is taken after metadata fetching. Do not
         // resurrect a message that disappeared between those two operations.
@@ -672,6 +690,15 @@ async fn prefetch_uncached_bodies(
                     .await
                     {
                         warn!("failed to store prefetched body uid {}: {}", uid, e);
+                    } else if let Err(e) = crate::clean::store(
+                        &pool,
+                        msg_id,
+                        body.text_body.as_deref(),
+                        body.html_body.as_deref(),
+                    )
+                    .await
+                    {
+                        warn!("failed to clean prefetched body uid {}: {}", uid, e);
                     }
                 }
             }
@@ -891,5 +918,204 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(rows, vec![(1, 2, Some("replacement".into()))]);
+    }
+
+    // ── OAuth token lifetime across a long run (WI-586) ──────────────────────
+
+    use crate::auth::token_source::testing::{FakeClock, FakeOAuth};
+    use crate::auth::token_source::{with_fresh_token, AccessTokenSource};
+    use crate::providers::gmail::is_credential_rejection;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Something the fake server does part-way through a run.
+    type ServerAction = Box<dyn Fn(&FakeOAuth) + Send + Sync>;
+
+    /// A mailbox of empty folders behind an XOAUTH2 server. Like
+    /// `GmailProvider`, every operation opens its own connection, which takes
+    /// its token from the shared source; each connection costs `step` seconds
+    /// of fake time.
+    struct OAuthMailbox {
+        oauth: Arc<FakeOAuth>,
+        tokens: AccessTokenSource,
+        folders: usize,
+        step: i64,
+        connects: AtomicUsize,
+        /// Before connection number N, run this against the fake server.
+        on_connect: Option<(usize, ServerAction)>,
+    }
+
+    impl OAuthMailbox {
+        async fn connect(&self) -> Result<()> {
+            let n = self.connects.fetch_add(1, Ordering::SeqCst);
+            if let Some((at, action)) = &self.on_connect {
+                if n == *at {
+                    action(self.oauth.as_ref());
+                }
+            }
+            with_fresh_token(&self.tokens, is_credential_rejection, |token| {
+                let result = self.oauth.authenticate(&token);
+                async move { result }
+            })
+            .await?;
+            self.oauth.clock.advance(self.step);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MailProvider for OAuthMailbox {
+        fn provider_id(&self) -> &str {
+            "gmail"
+        }
+        async fn authenticate(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn list_folders(&self) -> Result<Vec<Folder>> {
+            self.connect().await?;
+            Ok((0..self.folders)
+                .map(|i| Folder {
+                    id: Uuid::new_v4(),
+                    name: format!("Label {i}"),
+                    full_path: format!("Label {i}"),
+                    special_use: None,
+                    unread_count: 0,
+                    total_count: 0,
+                })
+                .collect())
+        }
+        async fn folder_uid_validity(&self, _: &str) -> Result<Option<u32>> {
+            self.connect().await?;
+            Ok(Some(1))
+        }
+        async fn fetch_messages(
+            &self,
+            _: &str,
+            _: Option<chrono::DateTime<Utc>>,
+        ) -> Result<Vec<Message>> {
+            self.connect().await?;
+            Ok(Vec::new())
+        }
+        async fn list_message_uids(&self, _: &str) -> Result<Vec<u32>> {
+            self.connect().await?;
+            Ok(Vec::new())
+        }
+        async fn fetch_message_body(&self, _: &str, _: u32) -> Result<MessageBody> {
+            Err(AppError::NotFound("no bodies".into()))
+        }
+        async fn fetch_bodies_batch(&self, _: &str, _: &[u32]) -> Result<Vec<(u32, MessageBody)>> {
+            Ok(Vec::new())
+        }
+        async fn mark_seen(&self, _: &str, _: u32) -> Result<()> {
+            Ok(())
+        }
+        async fn mark_unseen(&self, _: &str, _: u32) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_message(&self, _: &str, _: u32) -> Result<()> {
+            Ok(())
+        }
+        async fn move_message(&self, _: &str, _: u32, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn set_flagged(&self, _: &str, _: u32, _: bool) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 202 folders like the prod account, each costing three connections of
+    /// `step` seconds, against tokens that live 3600s. The cache is an
+    /// in-memory database: with instant fake IMAP the run is purely
+    /// write-bound, and these tests are about tokens, not SQLite contention.
+    async fn oauth_run(
+        step: i64,
+        on_connect: Option<(usize, ServerAction)>,
+    ) -> (SqlitePool, Arc<FakeOAuth>, Result<()>) {
+        let (pool, _) = crate::db::create_pool("sqlite::memory:").await.unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('a','A','a@example.test','gmail','oauth2')")
+            .execute(&pool).await.unwrap();
+        let clock = FakeClock::new(1_000_000);
+        let oauth = FakeOAuth::new(clock, 3600);
+        let provider = Arc::new(OAuthMailbox {
+            tokens: oauth.source(&format!("a-{}", Uuid::new_v4())),
+            oauth: oauth.clone(),
+            folders: 202,
+            step,
+            connects: AtomicUsize::new(0),
+            on_connect,
+        });
+        let result = ImapSyncEngine::new(pool.clone(), 60)
+            .sync_provider("a", provider, None, None)
+            .await;
+        (pool, oauth, result)
+    }
+
+    async fn synced_labels(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM folders WHERE full_path LIKE 'Label %' AND synced_at IS NOT NULL",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn oauth_sync_run_that_outlives_its_token_keeps_succeeding() {
+        // 1 + 202 * 3 connections at 10s each: ~6070s, well past the first
+        // token's 3600s. Before WI-586 every folder after ~3600s failed.
+        let (pool, oauth, result) = oauth_run(10, None).await;
+        result.unwrap();
+        assert_eq!(synced_labels(&pool).await, 202);
+        assert_eq!(
+            oauth.rejections.load(Ordering::SeqCst),
+            0,
+            "the token is refreshed before it expires, not after a rejection"
+        );
+        assert_eq!(
+            oauth.refresh_count(),
+            1,
+            "one refresh for the one expiry crossed, shared by the four workers"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_sync_auth_rejection_refreshes_and_retries_once() {
+        // Google invalidates the live token early, part-way through the run.
+        let revoke: ServerAction =
+            Box::new(|oauth: &FakeOAuth| oauth.revoke_token(&oauth.current().access_token));
+        let (pool, oauth, result) = oauth_run(1, Some((100, revoke))).await;
+        result.unwrap();
+        assert_eq!(
+            synced_labels(&pool).await,
+            202,
+            "no folder records an error"
+        );
+        assert_eq!(oauth.refresh_count(), 1, "exactly one forced refresh");
+        let rejections = oauth.rejections.load(Ordering::SeqCst);
+        assert!(rejections >= 1);
+        assert_eq!(
+            oauth.auth_calls.load(Ordering::SeqCst),
+            1 + 202 * 3 + rejections,
+            "each rejected connection is retried exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_sync_revoked_grant_reports_reconnect_needed() {
+        let revoke: ServerAction = Box::new(|oauth: &FakeOAuth| {
+            oauth.revoke_token(&oauth.current().access_token);
+            oauth.revoked_grant.store(true, Ordering::SeqCst);
+        });
+        let (pool, oauth, result) = oauth_run(1, Some((100, revoke))).await;
+        let error = result.unwrap_err();
+        assert!(
+            matches!(&error, AppError::Auth(message) if message.contains("invalid_grant")),
+            "a revoked grant must surface as the reconnect-needed auth error, got {error}"
+        );
+        assert_eq!(
+            oauth.refresh_count(),
+            1,
+            "the refused refresh is not repeated by every folder"
+        );
+        assert!(synced_labels(&pool).await < 202);
     }
 }

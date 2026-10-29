@@ -5,7 +5,6 @@ use std::sync::Arc;
 use async_imap::types::{Flag, NameAttribute};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 use uuid::Uuid;
@@ -171,12 +170,7 @@ impl MailProvider for GenericImapProvider {
             .await
             .map_err(|e| AppError::Imap(format!("LIST failed: {}", e)))?;
 
-        let names: Vec<_> = names_stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect();
+        let names = super::drain_imap_stream(names_stream, "LIST").await?;
 
         let mut folders = Vec::new();
         for name in &names {
@@ -258,12 +252,7 @@ impl MailProvider for GenericImapProvider {
             .await
             .map_err(|e| AppError::Imap(format!("UID FETCH failed: {}", e)))?;
 
-        let fetches: Vec<_> = fetch_stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect();
+        let fetches = super::drain_imap_stream(fetch_stream, "UID FETCH").await?;
 
         let mut messages = Vec::new();
         for fetch in &fetches {
@@ -417,12 +406,7 @@ impl MailProvider for GenericImapProvider {
             .await
             .map_err(|e| AppError::Imap(format!("UID FETCH body failed: {}", e)))?;
 
-        let fetches: Vec<_> = fetch_stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect();
+        let fetches = super::drain_imap_stream(fetch_stream, "UID FETCH body").await?;
 
         let fetch = fetches
             .first()
@@ -450,10 +434,9 @@ impl MailProvider for GenericImapProvider {
             .uid_fetch(uid.to_string(), format!("(BODY.PEEK[{part_id}])"))
             .await
             .map_err(|e| AppError::Imap(format!("attachment UID FETCH failed: {e}")))?;
-        let fetches = stream.collect::<Vec<_>>().await;
+        let fetches = super::drain_imap_stream(stream, "attachment UID FETCH").await?;
         let content = fetches
             .into_iter()
-            .filter_map(|item| item.ok())
             .find_map(|fetch| fetch.body().map(ToOwned::to_owned));
         let _ = session.logout().await;
         content
@@ -487,12 +470,7 @@ impl MailProvider for GenericImapProvider {
                 .await
                 .map_err(|e| AppError::Imap(format!("UID FETCH batch failed: {}", e)))?;
 
-            let fetches: Vec<_> = fetch_stream
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .filter_map(|r| r.ok())
-                .collect();
+            let fetches = super::drain_imap_stream(fetch_stream, "UID FETCH batch").await?;
 
             for fetch in &fetches {
                 let uid = match fetch.uid {
@@ -524,7 +502,7 @@ impl MailProvider for GenericImapProvider {
             .uid_store(uid.to_string(), "+FLAGS (\\Seen)")
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE failed: {}", e)))?;
-        stream.collect::<Vec<_>>().await;
+        super::drain_imap_stream(stream, "UID STORE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -539,7 +517,7 @@ impl MailProvider for GenericImapProvider {
             .uid_store(uid.to_string(), "-FLAGS (\\Seen)")
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE failed: {}", e)))?;
-        stream.collect::<Vec<_>>().await;
+        super::drain_imap_stream(stream, "UID STORE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -554,13 +532,12 @@ impl MailProvider for GenericImapProvider {
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {}", e)))?;
-        store_stream.collect::<Vec<_>>().await;
-        session
+        super::drain_imap_stream(store_stream, "UID STORE \\Deleted").await?;
+        let expunged = session
             .expunge()
             .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?
-            .collect::<Vec<_>>()
-            .await;
+            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?;
+        super::drain_imap_stream(expunged, "EXPUNGE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -579,13 +556,12 @@ impl MailProvider for GenericImapProvider {
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {}", e)))?;
-        store_stream.collect::<Vec<_>>().await;
-        session
+        super::drain_imap_stream(store_stream, "UID STORE \\Deleted").await?;
+        let expunged = session
             .expunge()
             .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?
-            .collect::<Vec<_>>()
-            .await;
+            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?;
+        super::drain_imap_stream(expunged, "EXPUNGE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -605,7 +581,7 @@ impl MailProvider for GenericImapProvider {
             .uid_store(uid.to_string(), flag_cmd)
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE failed: {}", e)))?;
-        stream.collect::<Vec<_>>().await;
+        super::drain_imap_stream(stream, "UID STORE").await?;
         let _ = session.logout().await;
         Ok(())
     }

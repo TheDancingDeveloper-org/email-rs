@@ -26,6 +26,7 @@ pub async fn create_webhook(
 ) -> Result<Json<WebhookRow>> {
     let id = Uuid::new_v4().to_string();
     let events = body.events.unwrap_or_else(|| "message.created".to_string());
+    validate_events(&events)?;
 
     sqlx::query(
         r#"INSERT INTO webhooks (id, url, secret, events, account_id)
@@ -69,6 +70,7 @@ pub async fn update_webhook(
             .await?;
     }
     if let Some(ref events) = body.events {
+        validate_events(events)?;
         sqlx::query("UPDATE webhooks SET events = ? WHERE id = ?")
             .bind(events)
             .bind(&id)
@@ -209,12 +211,46 @@ pub async fn list_deliveries(
     Ok(Json(rows))
 }
 
+/// Event names a webhook subscription may list, besides the `all` / `*` wildcards.
+const KNOWN_EVENTS: &[&str] = &[
+    "message.created",
+    "message.updated",
+    "message.moved",
+    "message.deleted",
+    "sync.completed",
+    "new_message",
+];
+
 fn event_matches(configured: &str, event: &str) -> bool {
     configured.split(',').map(str::trim).any(|candidate| {
         candidate == "all"
+            || candidate == "*"
             || candidate == event
             || (candidate == "new_message" && event == "message.created")
     })
+}
+
+/// Reject subscriptions that could never match an event, so a typo cannot
+/// silently disable delivery.
+fn validate_events(configured: &str) -> Result<()> {
+    let unknown: Vec<&str> = configured
+        .split(',')
+        .map(str::trim)
+        .filter(|c| !(c.is_empty() || *c == "all" || *c == "*" || KNOWN_EVENTS.contains(c)))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(AppError::Validation(format!(
+            "unknown webhook event(s): {}; expected all, *, or one of {}",
+            unknown.join(", "),
+            KNOWN_EVENTS.join(", ")
+        )));
+    }
+    if configured.split(',').all(|c| c.trim().is_empty()) {
+        return Err(AppError::Validation(
+            "webhook events must not be empty".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Persist an event and enqueue all matching deliveries before returning.
@@ -556,5 +592,49 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(failure, ("retry".to_string(), 1, 500));
+    }
+
+    #[test]
+    fn wildcard_subscriptions_match_every_event() {
+        for configured in ["*", "all", " * "] {
+            assert!(event_matches(configured, "message.created"));
+            assert!(event_matches(configured, "sync.completed"));
+        }
+        assert!(event_matches("new_message", "message.created"));
+        assert!(!event_matches("message.updated", "message.created"));
+    }
+
+    #[test]
+    fn unknown_event_patterns_are_rejected() {
+        assert!(validate_events("*").is_ok());
+        assert!(validate_events("all").is_ok());
+        assert!(validate_events("new_message, message.updated").is_ok());
+        assert!(validate_events("message.*").is_err());
+        assert!(validate_events("message.create").is_err());
+        assert!(validate_events(" , ").is_err());
+    }
+
+    #[tokio::test]
+    async fn star_subscription_enqueues_delivery() {
+        let pool = setup().await;
+        sqlx::query(
+            "INSERT INTO webhooks (id, url, secret, events) VALUES ('hook-star', 'http://127.0.0.1:1/', NULL, '*')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        fire_webhooks(
+            &pool,
+            "account-1",
+            "message.created",
+            serde_json::json!({"eventId": "star-1"}),
+        )
+        .await;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM webhook_deliveries WHERE event_id = 'star-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
     }
 }

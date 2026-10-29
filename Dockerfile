@@ -1,5 +1,5 @@
 # ── Stage 1: Build frontend ─────────────────────────���──────────────────────────
-FROM node:22-alpine AS frontend-build
+FROM mirror.gcr.io/library/node:22-alpine AS frontend-build
 WORKDIR /build
 COPY frontend/package*.json ./
 RUN npm ci
@@ -8,7 +8,7 @@ COPY frontend/ ./
 RUN npx vite build --outDir /dist --emptyOutDir
 
 # ── Stage 2: Build Rust backend ────────────────────────────────────────────────
-FROM rust:1.86-slim AS rust-build
+FROM mirror.gcr.io/library/rust:1.98-slim-bookworm AS rust-build
 RUN apt-get update && apt-get install -y ca-certificates pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -16,7 +16,7 @@ COPY crates/ ./crates/
 RUN CARGO_BUILD_JOBS=4 cargo build --release --locked -p email-server
 
 # ── Stage 3: Runtime ─────────────────────────────────��─────────────────────────
-FROM debian:bookworm-slim
+FROM mirror.gcr.io/library/debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-build /app/target/release/email-server /usr/local/bin/email-server

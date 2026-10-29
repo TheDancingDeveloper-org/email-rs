@@ -5,12 +5,12 @@ use std::{collections::HashMap, sync::Arc};
 use async_imap::types::{Flag, NameAttribute};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 use uuid::Uuid;
 
 use super::{Folder, MailProvider, Message, MessageBody};
+use crate::auth::token_source::{with_fresh_token, AccessTokenSource};
 use crate::error::{AppError, Result};
 use tracing::{info, warn};
 
@@ -67,51 +67,73 @@ impl async_imap::Authenticator for XOAuth2 {
 
 // ── GmailProvider ────────────────────────────────────────────────────────────
 
+/// Prefix of the error for a server that answered AUTHENTICATE with NO, i.e.
+/// rejected the XOAUTH2 credentials (Gmail: `[AUTHENTICATIONFAILED]`).
+const AUTH_REJECTED: &str = "IMAP auth failed";
+
+/// Did the IMAP server reject the access token (as opposed to a network or
+/// protocol failure)? Only this is worth a forced token refresh.
+pub fn is_credential_rejection(error: &AppError) -> bool {
+    matches!(error, AppError::Imap(message) if message.starts_with(AUTH_REJECTED))
+}
+
 #[derive(Clone)]
 pub struct GmailProvider {
     pub account_id: String,
     pub email: String,
-    pub access_token: String,
+    /// Shared by every connection this provider opens, so each one
+    /// authenticates with a token that is not about to expire.
+    pub tokens: Arc<AccessTokenSource>,
     pub imap_host: String,
     pub imap_port: u16,
     pub provider_type: String,
 }
 
 impl GmailProvider {
-    pub fn new(account_id: String, email: String, access_token: String) -> Self {
+    pub fn new(account_id: String, email: String, tokens: Arc<AccessTokenSource>) -> Self {
         Self {
             account_id,
             email,
-            access_token,
+            tokens,
             imap_host: "imap.gmail.com".to_string(),
             imap_port: 993,
             provider_type: "gmail".to_string(),
         }
     }
 
-    pub fn new_outlook(account_id: String, email: String, access_token: String) -> Self {
+    pub fn new_outlook(account_id: String, email: String, tokens: Arc<AccessTokenSource>) -> Self {
         Self {
             account_id,
             email,
-            access_token,
+            tokens,
             imap_host: "outlook.office365.com".to_string(),
             imap_port: 993,
             provider_type: "microsoft365".to_string(),
         }
     }
 
-    /// Establish an authenticated IMAP session over TLS, with a 30-second timeout.
+    /// Establish an authenticated IMAP session over TLS, with a 30-second
+    /// timeout per attempt. Each connection takes a fresh access token; if the
+    /// server rejects it, the token is force-refreshed and the connection
+    /// retried once.
     async fn connect(
         &self,
     ) -> Result<async_imap::Session<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>> {
-        tokio::time::timeout(std::time::Duration::from_secs(30), self.connect_inner())
+        with_fresh_token(&self.tokens, is_credential_rejection, |token| async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.connect_inner(&token),
+            )
             .await
             .map_err(|_| AppError::Imap("IMAP connection timed out after 30s".to_string()))?
+        })
+        .await
     }
 
     /// Inner connection logic (no timeout; called by `connect`).
     async fn connect_inner(
         &self,
+        access_token: &str,
     ) -> Result<async_imap::Session<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>> {
         info!("connecting to {}:{}", self.imap_host, self.imap_port);
 
@@ -150,12 +172,15 @@ impl GmailProvider {
             .ok_or_else(|| AppError::Imap("IMAP server closed during greeting".to_string()))?
             .map_err(|e| AppError::Imap(format!("IMAP greeting read error: {}", e)))?;
 
-        let authenticator = XOAuth2::new(&self.email, &self.access_token);
+        let authenticator = XOAuth2::new(&self.email, access_token);
 
         let session = client
             .authenticate("XOAUTH2", authenticator)
             .await
-            .map_err(|(e, _)| AppError::Imap(format!("IMAP auth failed: {}", e)))?;
+            .map_err(|(e, _)| match e {
+                async_imap::error::Error::No(_) => AppError::Imap(format!("{AUTH_REJECTED}: {e}")),
+                other => AppError::Imap(format!("IMAP authentication error: {other}")),
+            })?;
 
         info!("IMAP authenticated successfully");
 
@@ -254,7 +279,7 @@ impl MailProvider for GmailProvider {
     async fn authenticate(&mut self) -> Result<()> {
         // Authentication is validated at connection time; here we just verify
         // the token is non-empty.
-        if self.access_token.is_empty() {
+        if self.tokens.peek().is_empty() {
             return Err(AppError::Auth("no access token available".to_string()));
         }
         Ok(())
@@ -269,12 +294,7 @@ impl MailProvider for GmailProvider {
             .await
             .map_err(|e| AppError::Imap(format!("LIST failed: {}", e)))?;
 
-        let names: Vec<_> = names_stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect();
+        let names = super::drain_imap_stream(names_stream, "LIST").await?;
 
         let mut folders = Vec::new();
         for name in &names {
@@ -405,12 +425,7 @@ impl MailProvider for GmailProvider {
             .await
             .map_err(|e| AppError::Imap(format!("UID FETCH failed: {}", e)))?;
 
-        let fetches: Vec<_> = fetch_stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect();
+        let fetches = super::drain_imap_stream(fetch_stream, "UID FETCH").await?;
 
         let mut messages = Vec::new();
         for fetch in &fetches {
@@ -555,12 +570,7 @@ impl MailProvider for GmailProvider {
             .await
             .map_err(|e| AppError::Imap(format!("UID FETCH body failed: {}", e)))?;
 
-        let fetches: Vec<_> = fetch_stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .filter_map(|r| r.ok())
-            .collect();
+        let fetches = super::drain_imap_stream(fetch_stream, "UID FETCH body").await?;
 
         let fetch = fetches
             .first()
@@ -588,10 +598,9 @@ impl MailProvider for GmailProvider {
             .uid_fetch(uid.to_string(), format!("(BODY.PEEK[{part_id}])"))
             .await
             .map_err(|e| AppError::Imap(format!("attachment UID FETCH failed: {e}")))?;
-        let fetches = stream.collect::<Vec<_>>().await;
+        let fetches = super::drain_imap_stream(stream, "attachment UID FETCH").await?;
         let content = fetches
             .into_iter()
-            .filter_map(|item| item.ok())
             .find_map(|fetch| fetch.body().map(ToOwned::to_owned));
         let _ = session.logout().await;
         content
@@ -626,12 +635,7 @@ impl MailProvider for GmailProvider {
                 .await
                 .map_err(|e| AppError::Imap(format!("UID FETCH batch failed: {}", e)))?;
 
-            let fetches: Vec<_> = fetch_stream
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .filter_map(|r| r.ok())
-                .collect();
+            let fetches = super::drain_imap_stream(fetch_stream, "UID FETCH batch").await?;
 
             for fetch in &fetches {
                 let uid = match fetch.uid {
@@ -663,7 +667,7 @@ impl MailProvider for GmailProvider {
             .uid_store(uid.to_string(), "+FLAGS (\\Seen)")
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE failed: {}", e)))?;
-        stream.collect::<Vec<_>>().await;
+        super::drain_imap_stream(stream, "UID STORE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -678,7 +682,7 @@ impl MailProvider for GmailProvider {
             .uid_store(uid.to_string(), "-FLAGS (\\Seen)")
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE failed: {}", e)))?;
-        stream.collect::<Vec<_>>().await;
+        super::drain_imap_stream(stream, "UID STORE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -698,13 +702,12 @@ impl MailProvider for GmailProvider {
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {}", e)))?;
-        store_stream.collect::<Vec<_>>().await;
-        session
+        super::drain_imap_stream(store_stream, "UID STORE \\Deleted").await?;
+        let expunged = session
             .expunge()
             .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?
-            .collect::<Vec<_>>()
-            .await;
+            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?;
+        super::drain_imap_stream(expunged, "EXPUNGE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -723,13 +726,12 @@ impl MailProvider for GmailProvider {
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {}", e)))?;
-        store_stream.collect::<Vec<_>>().await;
-        session
+        super::drain_imap_stream(store_stream, "UID STORE \\Deleted").await?;
+        let expunged = session
             .expunge()
             .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?
-            .collect::<Vec<_>>()
-            .await;
+            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?;
+        super::drain_imap_stream(expunged, "EXPUNGE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -749,7 +751,7 @@ impl MailProvider for GmailProvider {
             .uid_store(uid.to_string(), flag_cmd)
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE failed: {}", e)))?;
-        stream.collect::<Vec<_>>().await;
+        super::drain_imap_stream(stream, "UID STORE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -790,13 +792,12 @@ impl MailProvider for GmailProvider {
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
             .await
             .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {e}")))?;
-        stream.collect::<Vec<_>>().await;
-        session
+        super::drain_imap_stream(stream, "UID STORE \\Deleted").await?;
+        let expunged = session
             .expunge()
             .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))?
-            .collect::<Vec<_>>()
-            .await;
+            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))?;
+        super::drain_imap_stream(expunged, "EXPUNGE").await?;
         let _ = session.logout().await;
         Ok(())
     }
@@ -815,5 +816,23 @@ mod thread_tests {
         ];
         assert_eq!(gmail_thread_identity(&attributes), Some((42, 9_876_543)));
         assert_eq!(gmail_thread_identity(&[AttributeValue::Uid(42)]), None);
+    }
+
+    #[test]
+    fn only_a_no_to_authenticate_counts_as_a_credential_rejection() {
+        let rejected = AppError::Imap(format!(
+            "{AUTH_REJECTED}: {}",
+            async_imap::error::Error::No(
+                "[AUTHENTICATIONFAILED] Invalid credentials (Failure)".into()
+            )
+        ));
+        assert!(is_credential_rejection(&rejected));
+        assert!(!is_credential_rejection(&AppError::Imap(
+            "IMAP authentication error: connection lost".into()
+        )));
+        assert!(!is_credential_rejection(&AppError::Imap(
+            "TCP connect failed: refused".into()
+        )));
+        assert!(!is_credential_rejection(&AppError::Auth("x".into())));
     }
 }

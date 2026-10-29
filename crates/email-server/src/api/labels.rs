@@ -224,7 +224,7 @@ mod tests {
         )
         .bind(id)
         .bind("Test")
-        .bind("test@test.com")
+        .bind("test@example.com")
         .bind("generic_imap")
         .bind("password")
         .execute(pool)
