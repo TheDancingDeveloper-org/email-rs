@@ -130,7 +130,21 @@ fn native_key_bindings() -> Vec<KeyBinding> {
         .collect()
 }
 
+#[cfg(unix)]
+fn restrict_process_umask() {
+    let _ = unsafe { libc::umask(0o077) };
+}
+
+#[cfg(not(unix))]
+fn restrict_process_umask() {}
+
 fn main() -> Result<()> {
+    // SQLite creates the database, WAL, SHM and migration backups with the
+    // process umask. Match the server: owner-only from the first create, so a
+    // later path that forgets to chmod them is still not world-readable.
+    // Unix only; Windows has no umask. libc's mode_t is u16 on macOS, so the
+    // mask goes through libc rather than a u32 declaration.
+    restrict_process_umask();
     let _ = dotenvy::dotenv();
     init_tracing();
 
