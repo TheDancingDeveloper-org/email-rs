@@ -269,6 +269,7 @@ pub(crate) mod testing {
                 access_token: "token-0".into(),
                 refresh_token: Some("refresh".into()),
                 expires_at: Some(clock.now() + lifetime),
+                id_token: None,
             };
             Arc::new(Self {
                 issued: StdMutex::new(HashMap::from([(
@@ -354,6 +355,7 @@ pub(crate) mod testing {
                 access_token: format!("token-{n}"),
                 refresh_token: Some("refresh".into()),
                 expires_at: Some(self.clock.now() + self.lifetime),
+                id_token: None,
             };
             self.issued
                 .lock()

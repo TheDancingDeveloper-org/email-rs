@@ -295,6 +295,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     }
 
     run_message_identity_migration(pool).await?;
+    run_provider_subject_migration(pool).await?;
     run_attachment_metadata_migration(pool).await?;
     run_application_auth_migration(pool).await?;
     run_integration_token_migration(pool).await?;
@@ -302,6 +303,39 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     run_clean_body_migration(pool).await?;
     run_search_index_migration(pool).await?;
 
+    Ok(())
+}
+
+/// Directory identity of an OAuth account (Microsoft tid + oid).
+/// Existing rows stay null until the next successful connect.
+async fn run_provider_subject_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 19")
+            .fetch_optional(pool)
+            .await?;
+    if applied.is_some() {
+        return Ok(());
+    }
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('accounts')")
+        .fetch_all(pool)
+        .await?;
+    for (column, ddl) in [
+        (
+            "provider_tenant_id",
+            "ALTER TABLE accounts ADD COLUMN provider_tenant_id TEXT",
+        ),
+        (
+            "provider_object_id",
+            "ALTER TABLE accounts ADD COLUMN provider_object_id TEXT",
+        ),
+    ] {
+        if !columns.iter().any(|name| name == column) {
+            sqlx::query(ddl).execute(pool).await?;
+        }
+    }
+    sqlx::query("INSERT INTO schema_migrations (version) VALUES (19)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

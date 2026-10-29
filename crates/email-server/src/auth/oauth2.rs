@@ -13,6 +13,9 @@ pub struct TokenResponse {
     pub expires_in: Option<u64>,
     pub token_type: String,
     pub scope: Option<String>,
+    /// Microsoft (and some other) ID tokens. The payload is read only for the
+    /// tenant and object ids; the signature is not checked here.
+    pub id_token: Option<String>,
 }
 
 /// Refresh this long before the stated expiry, so a token handed to a
@@ -61,6 +64,9 @@ pub struct StoredToken {
     pub refresh_token: Option<String>,
     /// Unix timestamp (seconds) when the access token expires.
     pub expires_at: Option<i64>,
+    /// Microsoft ID token, kept so a reconnect can be bound to tid+oid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
 }
 
 impl StoredToken {
@@ -72,6 +78,7 @@ impl StoredToken {
             access_token: resp.access_token,
             refresh_token: resp.refresh_token,
             expires_at,
+            id_token: resp.id_token,
         }
     }
 
@@ -87,6 +94,26 @@ impl StoredToken {
             None => false,
         }
     }
+}
+
+/// Tenant id and object id from a Microsoft ID token payload.
+///
+/// The payload is base64url JSON. This does not verify the signature: the
+/// token arrives from the token endpoint over TLS in the same response as the
+/// access token, and the caller compares it with Graph `/me`.
+pub fn microsoft_tid_oid(id_token: &str) -> Option<(String, String)> {
+    let payload = id_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let tid = value.get("tid")?.as_str()?.to_string();
+    let oid = value.get("oid")?.as_str()?.to_string();
+    if tid.is_empty() || oid.is_empty() {
+        return None;
+    }
+    Some((tid, oid))
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +309,7 @@ mod tests {
             access_token: "tok".into(),
             refresh_token: Some("ref".into()),
             expires_at: Some(Utc::now().timestamp() + offset_secs),
+                    id_token: None,
         }
     }
 
@@ -291,6 +319,7 @@ mod tests {
             access_token: "tok".into(),
             refresh_token: None,
             expires_at: None,
+                    id_token: None,
         };
         assert!(!t.is_expired());
     }
@@ -323,6 +352,7 @@ mod tests {
             expires_in: Some(3600),
             token_type: "Bearer".into(),
             scope: None,
+                    id_token: None,
         };
         let before = Utc::now().timestamp();
         let stored = StoredToken::from_token_response(resp);
@@ -339,6 +369,7 @@ mod tests {
             expires_in: None,
             token_type: "Bearer".into(),
             scope: None,
+                    id_token: None,
         };
         assert!(StoredToken::from_token_response(resp).expires_at.is_none());
     }
@@ -422,6 +453,7 @@ mod tests {
             access_token: "tok".into(),
             refresh_token: None,
             expires_at: Some(10_000),
+                    id_token: None,
         };
         assert!(!token.is_expired_at(10_000 - EXPIRY_MARGIN_SECS - 1));
         assert!(token.is_expired_at(10_000 - EXPIRY_MARGIN_SECS));
