@@ -132,7 +132,9 @@ fn ensure_private_dir(dir: &std::path::Path) -> anyhow::Result<()> {
                             mode & 0o7777
                         );
                     }
-                    if mode & 0o077 != 0 {
+                    // Warn only for the directory the caller named. Parents
+                    // such as /var or /data are often 0755 by design.
+                    if current == dir && mode & 0o077 != 0 {
                         tracing::warn!(
                             path = %current.display(),
                             mode = format!("{:o}", mode & 0o777),
@@ -154,6 +156,21 @@ fn ensure_private_dir(dir: &std::path::Path) -> anyhow::Result<()> {
     {
         std::fs::create_dir_all(dir)?;
     }
+    Ok(())
+}
+
+/// Force a freshly created backup to 0600. Unlike the live database files,
+/// this copy was just written by us, so a mode wider than 0600 is always tightened.
+fn restrict_backup_file(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path)?;
+        let mut perms = meta.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
+    let _ = path;
     Ok(())
 }
 
@@ -200,6 +217,14 @@ fn current_uid() -> u32 {
         safe fn getuid() -> u32;
     }
     getuid()
+}
+
+#[cfg(all(unix, test))]
+fn set_umask(mask: u32) -> u32 {
+    unsafe extern "C" {
+        safe fn umask(mask: u32) -> u32;
+    }
+    umask(mask)
 }
 
 /// Begin a transaction that will write, taking SQLite's write lock up front.
@@ -953,6 +978,10 @@ async fn create_message_identity_backup(
     sqlx::query(&format!("VACUUM INTO '{escaped}'"))
         .execute(pool)
         .await?;
+    // VACUUM INTO creates the file with the process umask. Under umask 022
+    // that is 0644, next to a database that may live in a 0755 data dir.
+    // Restrict it before anything else can read the plaintext copy.
+    restrict_backup_file(&backup_path)?;
     Ok(Some(MigrationBackup {
         id: uuid::Uuid::new_v4().to_string(),
         path: backup_path.to_string_lossy().into_owned(),
@@ -1173,6 +1202,52 @@ mod tests {
         );
         assert_eq!(first, moved);
         assert_ne!(first, distinct_duplicate);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn message_identity_backup_is_owner_only_under_umask_022() {
+        use std::os::unix::fs::PermissionsExt;
+        let _db_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let database_path = _db_dir.path().join("email.db").display().to_string();
+        let options = SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        for statement in [
+            "CREATE TABLE accounts (id TEXT PRIMARY KEY)",
+            "CREATE TABLE folders (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, synced_at TEXT)",
+            r#"CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                folder_id TEXT NOT NULL,
+                uid INTEGER NOT NULL,
+                message_id TEXT UNIQUE
+            )"#,
+            "INSERT INTO accounts (id) VALUES ('account-1')",
+            "INSERT INTO folders (id, account_id, synced_at) VALUES ('folder-1', 'account-1', datetime('now'))",
+            "INSERT INTO messages (id, account_id, folder_id, uid, message_id) VALUES ('message-1', 'account-1', 'folder-1', 7, '<same@example>')",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        let previous = set_umask(0o022);
+        let backup = create_message_identity_backup(&pool).await.unwrap();
+        set_umask(previous);
+        let backup = backup.expect("file database produces a backup");
+        let mode = std::fs::metadata(&backup.path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "backup mode was {mode:o}");
+        pool.close().await;
+        let _ = std::fs::remove_file(backup.path);
+        let _ = std::fs::remove_file(database_path);
     }
 
     #[tokio::test]
