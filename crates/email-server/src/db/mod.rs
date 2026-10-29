@@ -951,6 +951,39 @@ struct MigrationBackup {
     path: String,
 }
 
+/// Create an empty backup file at `0600`, or refuse if the path exists.
+///
+/// `create_new` will not follow a symlink: the open fails when the final
+/// component is already present. On non-Unix the same refusal is an exists
+/// check; the mode is left to the platform.
+fn precreate_backup_file(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "refusing to write message-identity backup at {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
+    #[cfg(not(unix))]
+    {
+        if path.exists() {
+            anyhow::bail!(
+                "refusing to write message-identity backup over existing path {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn create_message_identity_backup(
     pool: &SqlitePool,
 ) -> anyhow::Result<Option<MigrationBackup>> {
@@ -974,13 +1007,17 @@ async fn create_message_identity_backup(
         "{filename}.before-message-identity-{timestamp}-{}.sqlite",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));
+    // Pre-create the target owner-only. VACUUM INTO otherwise creates the file
+    // with the process umask (0644 under 022) in a directory that may be 0755.
+    // create_new also fails when the path already exists, including a planted
+    // symlink, so the backup cannot follow a link. SQLite accepts an empty
+    // existing file as a VACUUM INTO target. The post-chmod stays as a second
+    // layer in case the engine replaces the inode.
+    precreate_backup_file(&backup_path)?;
     let escaped = backup_path.to_string_lossy().replace('\'', "''");
     sqlx::query(&format!("VACUUM INTO '{escaped}'"))
         .execute(pool)
         .await?;
-    // VACUUM INTO creates the file with the process umask. Under umask 022
-    // that is 0644, next to a database that may live in a 0755 data dir.
-    // Restrict it before anything else can read the plaintext copy.
     restrict_backup_file(&backup_path)?;
     Ok(Some(MigrationBackup {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1248,6 +1285,49 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_file(backup.path);
         let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn precreated_backup_file_is_owner_only_before_vacuum() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("email.db.before-message-identity-test.sqlite");
+        let previous = set_umask(0o022);
+        let created = precreate_backup_file(&path);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        set_umask(previous);
+        created.unwrap();
+        assert_eq!(mode, 0o600, "backup mode at creation was {mode:o}");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn precreated_backup_refuses_existing_file_and_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("already.sqlite");
+        std::fs::write(&existing, b"planted").unwrap();
+        let error = precreate_backup_file(&existing).unwrap_err();
+        assert!(
+            error.to_string().contains("refusing"),
+            "existing file error was {error}"
+        );
+        assert_eq!(std::fs::read(&existing).unwrap(), b"planted");
+
+        let target = dir.path().join("secret.sqlite");
+        std::fs::write(&target, b"secret").unwrap();
+        let link = dir.path().join("backup-link.sqlite");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = precreate_backup_file(&link).unwrap_err();
+        assert!(
+            error.to_string().contains("refusing"),
+            "symlink error was {error}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"secret");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
     }
 
     #[tokio::test]

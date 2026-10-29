@@ -1953,6 +1953,7 @@ dependencies = [
  "fluent-primitives",
  "fluent-test-utils",
  "gpui",
+ "libc",
  "tokio",
  "tracing",
  "tracing-subscriber",
