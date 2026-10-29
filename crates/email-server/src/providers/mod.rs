@@ -225,15 +225,16 @@ pub mod google_calendar;
 /// parse errors embed the whole unparsed read buffer, up to 512 MiB.
 const MAX_IMAP_ERROR_CHARS: usize = 500;
 
-/// Drain an IMAP response stream (FETCH, STORE, LIST, EXPUNGE), failing on
-/// its first error.
+/// Drain an IMAP response stream (FETCH, STORE, LIST, EXPUNGE).
 ///
-/// async-imap does not end a response stream after a transport or parse
-/// error: once the server drops the connection mid-response, every further
-/// poll yields the same error again. `collect()` on such a stream never
-/// returns and allocates at memory bandwidth until the host runs out of
-/// memory (WI-892: the server grew to 63–69 GB three times). The connection
-/// is unusable after the first error, so stop there.
+/// A malformed message is one item: log it, count it and skip it, so one bad
+/// message does not fail the rest of the folder. A connection error is not
+/// that. async-imap does not end a response stream after a transport error:
+/// once the server drops the connection mid-response, every further poll
+/// yields the same error again. `collect()` on such a stream never returns
+/// and allocates at memory bandwidth until the host runs out of memory (the
+/// server grew to 63–69 GB three times). The connection is unusable after the
+/// first repeated error, so stop there.
 pub(crate) async fn drain_imap_stream<T, E, S>(stream: S, context: &str) -> Result<Vec<T>>
 where
     S: futures::Stream<Item = std::result::Result<T, E>>,
@@ -243,20 +244,35 @@ where
 
     let mut stream = std::pin::pin!(stream);
     let mut items = Vec::new();
+    let mut skipped = 0usize;
+    let mut last_error: Option<String> = None;
     while let Some(item) = stream.next().await {
         match item {
-            Ok(item) => items.push(item),
+            Ok(item) => {
+                last_error = None;
+                items.push(item);
+            }
             Err(error) => {
                 let detail: String = error
                     .to_string()
                     .chars()
                     .take(MAX_IMAP_ERROR_CHARS)
                     .collect();
-                return Err(crate::error::AppError::Imap(format!(
-                    "{context} failed: {detail}"
-                )));
+                // A dropped connection repeats the same error forever. A
+                // malformed message does not: the stream moves on.
+                if last_error.as_deref() == Some(detail.as_str()) {
+                    return Err(crate::error::AppError::Imap(format!(
+                        "{context} failed: {detail}"
+                    )));
+                }
+                tracing::warn!("{context}: skipping malformed item: {detail}");
+                skipped += 1;
+                last_error = Some(detail);
             }
         }
+    }
+    if skipped > 0 {
+        tracing::warn!("{context}: skipped {skipped} malformed item(s)");
     }
     Ok(items)
 }
@@ -588,8 +604,10 @@ mod tests {
 
     #[tokio::test]
     async fn imap_error_text_is_capped() {
+        // A dropped connection repeats the same error. The text that reaches
+        // the caller is capped even when that error is megabytes long.
         let huge = "x".repeat(10 * 1024 * 1024);
-        let stream = futures::stream::iter([Ok(1), Err(huge)]);
+        let stream = futures::stream::iter([Ok(1), Err(huge.clone()), Err(huge)]);
 
         let error = drain_imap_stream(stream, "UID FETCH").await.unwrap_err();
 
@@ -603,6 +621,20 @@ mod tests {
         assert_eq!(
             drain_imap_stream(stream, "UID FETCH").await.unwrap(),
             vec![1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_malformed_item_does_not_fail_the_rest_of_the_stream() {
+        let stream = futures::stream::iter([
+            Ok::<_, String>(1),
+            Err("unparseable message".to_string()),
+            Ok(3),
+        ]);
+
+        assert_eq!(
+            drain_imap_stream(stream, "UID FETCH").await.unwrap(),
+            vec![1, 3]
         );
     }
 }

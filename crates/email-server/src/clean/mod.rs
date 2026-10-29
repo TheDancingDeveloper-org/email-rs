@@ -1,4 +1,4 @@
-//! Model-ready message bodies (WI-579).
+//! Cleaned message bodies.
 //!
 //! Each message body is cleaned once, when it is cached, rather than by every
 //! consumer that hands mail to a language model. The result is the *current*
@@ -103,7 +103,7 @@ pub fn clean(text: Option<&str>, html: Option<&str>, subject: Option<&str>) -> C
     }
 }
 
-/// A clean body as search-index text (WI-583): links keep their label but not
+/// A clean body as search-index text: links keep their label but not
 /// their target, images go, and a bare URL is reduced to its host. URL paths
 /// and query strings are only noise to full-text search.
 pub fn search_text(body: &str) -> String {
@@ -898,7 +898,7 @@ pub async fn store(
             signature_stripped: false,
         }
     });
-    // The clean body, its search-index entry (WI-583) and the preview change
+    // The clean body, its search-index entry and the preview change
     // together.
     let mut tx = crate::db::begin_write(pool).await?;
     sqlx::query(

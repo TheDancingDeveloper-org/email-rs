@@ -45,8 +45,10 @@ fn parse_refresh_response(status: u16, body: &str) -> Result<TokenResponse> {
             error.error
         )));
     }
+    let excerpt: String = body.chars().take(256).collect();
     Err(AppError::Provider(format!(
-        "OAuth token endpoint returned HTTP {status} with an unreadable body: {body}"
+        "OAuth token endpoint returned HTTP {status} with an unreadable body ({len} bytes): {excerpt}",
+        len = body.len()
     )))
 }
 

@@ -1,8 +1,8 @@
-//! Full-text search over the clean message (WI-583).
+//! Full-text search over the clean message.
 //!
 //! `messages_fts` (see `db::run_fts_migration`) indexes the subject, sender and
 //! recipients of every message through triggers on `messages`. Its `body` and
-//! `quoted` columns come from the clean body (WI-579) and are written here:
+//! `quoted` columns come from the clean body and are written here:
 //! when a body is cleaned ([`crate::clean::store`]) and, for bodies cleaned
 //! before this index existed, by a bounded background reindex.
 

@@ -669,8 +669,8 @@ pub async fn get_message(
         }
     }
 
-    // Clean a body cached before it had a clean form, or under older rules
-    // (WI-579); the startup backfill does the same for bodies nobody reads.
+    // Clean a body cached before it had a clean form, or under older rules.
+    // The startup backfill does the same for bodies nobody reads.
     if let Some(b) = body.as_mut() {
         if b.clean_version < crate::clean::CLEAN_VERSION {
             let cleaned = crate::clean::store(

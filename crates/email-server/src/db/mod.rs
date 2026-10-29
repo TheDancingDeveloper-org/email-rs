@@ -283,7 +283,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Search-index bookkeeping (WI-583): `search_version` records which version
+/// Search-index bookkeeping: `search_version` records which version
 /// of the search document the `messages_fts` row of a cached body holds.
 /// Rows start at 0 and are indexed by the background reindex or when their
 /// body is next cleaned.
@@ -317,7 +317,7 @@ async fn run_search_index_migration(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Model-ready bodies (WI-579). Rows start at `clean_version` 0 and are
+/// Cleaned message bodies. Rows start at `clean_version` 0 and are
 /// cleaned by the background backfill or on their next read.
 async fn run_clean_body_migration(pool: &SqlitePool) -> anyhow::Result<()> {
     let applied: Option<i64> =
@@ -854,13 +854,13 @@ fn recipients_sql(row: &str) -> String {
     format!("{} || ' ' || {}", list("to_json"), list("cc_json"))
 }
 
-/// Migration 005, revised by WI-583: FTS5 full-text search index for messages.
+/// Migration 005: FTS5 full-text search index for messages.
 ///
 /// One row per message, keyed by the `messages` rowid:
 ///
 /// - `subject`, `sender` (from name and address) and `recipients` (to and cc)
 ///   come from `messages` and are kept current by triggers;
-/// - `body` is the clean current message (WI-579) with link targets removed,
+/// - `body` is the clean current message with link targets removed,
 ///   written by [`crate::search_index::index_body`] when a body is cleaned.
 ///   Until then it holds the message preview;
 /// - `quoted` is the quoted history split off the body. It stays searchable so
