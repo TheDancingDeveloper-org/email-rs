@@ -19,8 +19,10 @@ jobs:
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
-      contents: write
+      contents: read
       packages: write
+    outputs:
+      image_digest: ${{ steps.image.outputs.digest }}
     runs-on: [self-hosted, docker, publish]
     env:
       IMAGE: ghcr.io/thedancingdeveloper-org/email-rs
@@ -62,27 +64,6 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build
-
-      - name: Publish the GitHub release with the image digest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-        run: |
-          test -n "$IMAGE_DIGEST"
-          notes="$(mktemp)"
-          {
-            echo "## Image"
-            echo
-            echo "\`${IMAGE}:${GITHUB_REF_NAME}\`"
-            echo
-            echo "Digest: \`${IMAGE}@${IMAGE_DIGEST}\`"
-            echo
-            echo "Immutable tag: \`${IMAGE}:sha-${GITHUB_SHA}\`"
-          } > "$notes"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file "$notes" \
-            clients/python/dist/*
 
   # email-server binaries. Linux amd64 and arm64, plus Windows, are built on
   # the estate rust-heavy pool (cross via cargo). macOS is built only when the
@@ -147,9 +128,7 @@ jobs:
           $APT update
           case "${{ matrix.target }}" in
             aarch64-unknown-linux-gnu)
-              dpkg --add-architecture arm64
-              $APT update
-              $APT install -y gcc-aarch64-linux-gnu pkg-config libssl-dev:arm64
+              $APT install -y gcc-aarch64-linux-gnu
               ;;
             x86_64-pc-windows-gnu)
               $APT install -y gcc-mingw-w64-x86-64
@@ -162,8 +141,6 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
-          PKG_CONFIG_ALLOW_CROSS: "1"
-          PKG_CONFIG_SYSROOT_DIR: /usr/aarch64-linux-gnu
         run: |
           cargo build --locked --release -p email-server --bin email-server --target "${{ matrix.target }}"
 
@@ -202,7 +179,6 @@ jobs:
             --override-filename "email-server-${tag}-${target}-sbom"
           mv "crates/email-server/email-server-${tag}-${target}-sbom.json" \
             "release-artifacts/email-server-${tag}-${target}.cdx.json"
-          (cd release-artifacts && sha256sum -- * > SHA256SUMS)
 
       - uses: actions/upload-artifact@v4
         if: steps.host.outputs.skip != 'true'
@@ -295,7 +271,6 @@ jobs:
               mv "$stage/$name" "release-artifacts/$name"
               ;;
           esac
-          (cd release-artifacts && sha256sum -- * > SHA256SUMS)
 
       - uses: actions/upload-artifact@v4
         if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true'
@@ -327,12 +302,47 @@ jobs:
           merge-multiple: true
         continue-on-error: true
 
-      - name: Attach binaries to the GitHub release
+      - name: Checksum every attached asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          find release-artifacts -name SHA256SUMS -delete
+          (cd release-artifacts && sha256sum -- * > SHA256SUMS)
+          missing=0
+          for asset in release-artifacts/*; do
+            base="$(basename "$asset")"
+            [ "$base" = SHA256SUMS ] && continue
+            if ! grep -q " ${base}$" release-artifacts/SHA256SUMS; then
+              echo "missing from SHA256SUMS: $base" >&2
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+          test -s release-artifacts/SHA256SUMS
+
+      - name: Publish the GitHub release, then attach binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ghcr.io/thedancingdeveloper-org/email-rs
+          IMAGE_DIGEST: ${{ needs.release.outputs.image_digest }}
         shell: bash
         run: |
           set -euo pipefail
           find release-artifacts -type f | sort
           test -n "$(find release-artifacts -type f -print -quit)"
-          gh release upload "$GITHUB_REF_NAME" release-artifacts/* --clobber
+          test -s release-artifacts/SHA256SUMS
+          test -n "$IMAGE_DIGEST"
+          notes="$(mktemp)"
+          {
+            echo "## Image"
+            echo
+            echo "\`${IMAGE}:${GITHUB_REF_NAME}\`"
+            echo
+            echo "Digest: \`${IMAGE}@${IMAGE_DIGEST}\`"
+            echo
+            echo "Immutable tag: \`${IMAGE}:sha-${GITHUB_SHA}\`"
+          } > "$notes"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$notes" \
+            release-artifacts/*

@@ -113,9 +113,7 @@ jobs:
           $APT update
           case "${{ matrix.target }}" in
             aarch64-unknown-linux-gnu)
-              dpkg --add-architecture arm64
-              $APT update
-              $APT install -y gcc-aarch64-linux-gnu pkg-config libssl-dev:arm64
+              $APT install -y gcc-aarch64-linux-gnu
               ;;
             x86_64-pc-windows-gnu)
               $APT install -y gcc-mingw-w64-x86-64
@@ -128,8 +126,6 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
-          PKG_CONFIG_ALLOW_CROSS: "1"
-          PKG_CONFIG_SYSROOT_DIR: /usr/aarch64-linux-gnu
         run: |
           cargo build --locked --release -p email-server --bin email-server --target "${{ matrix.target }}"
 
@@ -163,10 +159,8 @@ jobs:
             --override-filename "email-server-${tag}-${target}-sbom"
           mv "crates/email-server/email-server-${tag}-${target}-sbom.json" \
             "release-artifacts/email-server-${tag}-${target}.cdx.json"
-          (cd release-artifacts && sha256sum -- * > SHA256SUMS)
-          test -s release-artifacts/SHA256SUMS
-          grep -q "${name}" release-artifacts/SHA256SUMS
-          grep -q ".cdx.json" release-artifacts/SHA256SUMS
+          test -s "release-artifacts/${name}"
+          test -s "release-artifacts/email-server-${tag}-${target}.cdx.json"
           echo "dry run packaged ${name}; nothing published"
 
   desktop-binaries:
@@ -245,5 +239,37 @@ jobs:
               mv "$stage/$name" "release-artifacts/$name"
               ;;
           esac
-          (cd release-artifacts && sha256sum -- * > SHA256SUMS)
           echo "dry run packaged ${name}; nothing published"
+
+  checksum-assets:
+    needs: [server-binaries, desktop-binaries]
+    if: always() && needs.server-binaries.result == 'success' && (needs.desktop-binaries.result == 'success' || needs.desktop-binaries.result == 'skipped')
+    runs-on: [self-hosted, rust-heavy]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: server-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: desktop-*
+          merge-multiple: true
+        continue-on-error: true
+      - name: One SHA256SUMS lists every asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          find release-artifacts -name SHA256SUMS -delete
+          (cd release-artifacts && sha256sum -- * > SHA256SUMS)
+          missing=0
+          for asset in release-artifacts/*; do
+            base="$(basename "$asset")"
+            [ "$base" = SHA256SUMS ] && continue
+            grep -q " ${base}$" release-artifacts/SHA256SUMS || missing=1
+          done
+          test "$missing" -eq 0
+          grep -q ".cdx.json" release-artifacts/SHA256SUMS
+          grep -q "email-server-" release-artifacts/SHA256SUMS
+          echo "combined checksum covers every dry-run asset"
