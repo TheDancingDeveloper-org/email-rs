@@ -3,6 +3,11 @@ name: Release dry run
 # Build the image release.yml publishes, without pushing and without a tag.
 # A release tag must not be the first time the packaging path is exercised.
 on:
+  workflow_dispatch:
+  schedule:
+    # Nightly on main. The job's fork guard is a no-op for schedule and
+    # workflow_dispatch; they only run from this repository.
+    - cron: '17 3 * * *'
   pull_request:
     paths:
       - '.github/workflows/release.yml'
