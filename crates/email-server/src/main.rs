@@ -6,6 +6,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use email_server::{run_server, Config};
 
 fn main() -> anyhow::Result<()> {
+    // Defence in depth: files this process creates (SQLite sidecars, the
+    // message-identity backup) must not be group- or world-readable even if
+    // a later path forgets to chmod them. Unix only; Windows has no umask.
+    #[cfg(unix)]
+    restrict_process_umask();
+
     // Snap injects its own (old) libpthread via LD_LIBRARY_PATH, which conflicts
     // with the system glibc. Strip snap paths and re-exec before any libs load.
     #[cfg(target_os = "linux")]
@@ -448,4 +454,12 @@ mod win_instance {
 
         Some(Guard(handle))
     }
+}
+
+#[cfg(unix)]
+fn restrict_process_umask() {
+    unsafe extern "C" {
+        safe fn umask(mask: u32) -> u32;
+    }
+    umask(0o077);
 }
