@@ -59,3 +59,20 @@ email.db.before-message-identity-20260710T120000Z-a1b2c3d4.sqlite
 ```
 
 The path and state are recorded in `migration_backups`; affected accounts are recorded in `account_reconciliation`. The backup remains `retained` until every account completes a successful folder reconciliation, after which it becomes `releasable`. email-rs never deletes the backup automatically. Confirm the migrated application, message counts, and a completed synchronization before removing it manually.
+
+## Outbound webhooks
+
+Webhook URLs are `https` only. `http` is accepted only when `EMAIL_RS_ALLOW_INSECURE_HTTP=true`, the same development flag that permits a non-loopback bind without HTTPS.
+
+Before a delivery is sent, the host is resolved and **every** returned address is checked. Loopback, private (RFC 1918), link-local (including the cloud metadata address `169.254.169.254`), unspecified, multicast, documentation, CGNAT (`100.64.0.0/10`, which covers Tailscale), and IPv6 unique-local / link-local addresses are refused. IPv4-mapped IPv6 addresses are judged as IPv4. The connection is then opened to the address that passed the check, not to a second lookup, so a DNS rebinding answer cannot slip a private address in between check and connect.
+
+Redirects are not followed. A `3xx` response is recorded as a failed delivery; the `Location` is never requested.
+
+An exact-URL allowlist skips the private-address check for development receivers on loopback:
+
+```text
+EMAIL_RS_WEBHOOK_ALLOWLIST=http://127.0.0.1:8080/hook,https://hooks.internal.example/email
+```
+
+When a webhook has a secret, each delivery sets `X-Email-Timestamp` to the unix time of the attempt and `X-Email-Signature` to `sha256=` plus HMAC-SHA256 of `{timestamp}.{body}` using that secret. Receivers should reject timestamps outside a short window (five minutes is plenty) before comparing the signature, which stops a captured body being replayed later. The signature covers the timestamp, so changing the header invalidates it.
+

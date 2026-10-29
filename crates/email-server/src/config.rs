@@ -9,6 +9,36 @@ pub struct Config {
     pub frontend_dist: String,
     pub public_url: Option<String>,
     pub allow_insecure_http: bool,
+    pub webhook_policy: WebhookPolicy,
+}
+
+/// Controls which webhook targets email-rs will store and call.
+///
+/// Private, loopback, link-local and metadata addresses are refused after DNS
+/// resolution unless the exact URL is in `allowlist`. Plain `http` is refused
+/// unless `allow_insecure_http` is set (the same development flag that permits
+/// a non-loopback bind without HTTPS).
+#[derive(Debug, Clone)]
+pub struct WebhookPolicy {
+    pub allow_insecure_http: bool,
+    /// Exact webhook URLs that skip the private-address check. Empty by default.
+    pub allowlist: Vec<String>,
+}
+
+impl WebhookPolicy {
+    pub fn from_env() -> Self {
+        let allowlist = env::var("EMAIL_RS_WEBHOOK_ALLOWLIST")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Self {
+            allow_insecure_http: env_flag("EMAIL_RS_ALLOW_INSECURE_HTTP"),
+            allowlist,
+        }
+    }
 }
 
 impl Config {
@@ -71,6 +101,7 @@ impl Config {
             frontend_dist,
             public_url: env::var("EMAIL_RS_PUBLIC_URL").ok(),
             allow_insecure_http: env_flag("EMAIL_RS_ALLOW_INSECURE_HTTP"),
+            webhook_policy: WebhookPolicy::from_env(),
         }
     }
 
