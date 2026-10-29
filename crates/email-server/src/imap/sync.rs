@@ -201,7 +201,7 @@ impl ImapSyncEngine {
         let folders = provider.list_folders().await?;
 
         // One immediate transaction. A deferred upsert per folder overlaps
-        // the workers and returns SQLITE_BUSY without waiting (WI-587).
+        // the workers and returns SQLITE_BUSY without waiting.
         let mut tx = crate::db::begin_write(&self.pool).await?;
         for folder in &folders {
             let folder_id = Uuid::new_v4().to_string();
@@ -672,7 +672,7 @@ async fn prefetch_uncached_bodies(
             let fetched = bodies.len();
             // One immediate transaction for the folder's body rows. A deferred
             // write per body races other folders' writers and returns
-            // SQLITE_BUSY without waiting out busy_timeout (WI-587).
+            // SQLITE_BUSY without waiting out busy_timeout.
             let mut tx = match crate::db::begin_write(&pool).await {
                 Ok(tx) => tx,
                 Err(e) => {
@@ -948,7 +948,7 @@ mod tests {
         assert_eq!(rows, vec![(1, 2, Some("replacement".into()))]);
     }
 
-    // ── OAuth token lifetime across a long run (WI-586) ──────────────────────
+    // ── OAuth token lifetime across a long run ───────────────────────────────
 
     use crate::auth::token_source::testing::{FakeClock, FakeOAuth};
     use crate::auth::token_source::{with_fresh_token, AccessTokenSource};
@@ -1089,7 +1089,7 @@ mod tests {
     #[tokio::test]
     async fn oauth_sync_run_that_outlives_its_token_keeps_succeeding() {
         // 1 + 202 * 3 connections at 10s each: ~6070s, well past the first
-        // token's 3600s. Before WI-586 every folder after ~3600s failed.
+        // token's 3600s. Before the per-connection refresh, every folder after ~3600s failed.
         let (pool, oauth, result) = oauth_run(10, None).await;
         result.unwrap();
         assert_eq!(synced_labels(&pool).await, 202);
@@ -1149,7 +1149,7 @@ mod tests {
 
     /// File-backed WAL, 202 folders, 4 workers, instant fake IMAP. This is
     /// the case that returned "database is locked" about one run in three
-    /// when writers used a deferred BEGIN (WI-587).
+    /// when writers used a deferred BEGIN.
     #[tokio::test]
     async fn parallel_folder_sync_on_a_file_db_never_reports_database_is_locked() {
         let path = std::env::temp_dir().join(format!("email-rs-wi587-{}.db", Uuid::new_v4()));

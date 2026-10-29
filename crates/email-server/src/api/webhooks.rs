@@ -293,7 +293,7 @@ pub async fn fire_webhooks(
     };
 
     // BEGIN IMMEDIATE: a deferred insert that has already read returns
-    // SQLITE_BUSY immediately and ignores busy_timeout (WI-587).
+    // SQLITE_BUSY immediately and ignores busy_timeout.
     let mut tx = match crate::db::begin_write(pool).await {
         Ok(tx) => tx,
         Err(error) => {

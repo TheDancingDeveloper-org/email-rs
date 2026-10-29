@@ -38,7 +38,10 @@ fn parse_refresh_response(status: u16, body: &str) -> Result<TokenResponse> {
     if let Ok(error) = serde_json::from_str::<TokenErrorResponse>(body) {
         let description = error
             .error_description
-            .map(|text| format!(": {text}"))
+            .map(|text| {
+                let capped: String = text.chars().take(256).collect();
+                format!(": {capped}")
+            })
             .unwrap_or_default();
         return Err(AppError::Auth(format!(
             "OAuth refresh rejected ({}{description}); reconnect the account",

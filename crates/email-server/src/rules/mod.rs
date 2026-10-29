@@ -402,7 +402,7 @@ pub async fn apply_rules_to_message(
 
 async fn apply_action(pool: &SqlitePool, account_id: &str, msg_id: &str, action: &RuleAction) {
     // BEGIN IMMEDIATE so a rule write waits out busy_timeout instead of
-    // failing SQLITE_BUSY after a deferred read (WI-587).
+    // failing SQLITE_BUSY after a deferred read.
     let mut tx = match crate::db::begin_write(pool).await {
         Ok(tx) => tx,
         Err(error) => {
