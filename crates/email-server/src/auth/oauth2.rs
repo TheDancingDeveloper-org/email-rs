@@ -15,6 +15,41 @@ pub struct TokenResponse {
     pub scope: Option<String>,
 }
 
+/// Refresh this long before the stated expiry, so a token handed to a
+/// connection outlives that connection's authentication.
+pub const EXPIRY_MARGIN_SECS: i64 = 300;
+
+/// OAuth 2.0 error response (RFC 6749 section 5.2), e.g. `invalid_grant`.
+#[derive(Debug, Deserialize)]
+struct TokenErrorResponse {
+    error: String,
+    error_description: Option<String>,
+}
+
+/// Parse a refresh-token response. A provider error such as `invalid_grant`
+/// (revoked or expired grant) is an [`AppError::Auth`], which the API reports
+/// as 401 and the backend as "Reconnect Gmail". A body that is neither a token
+/// nor an OAuth error (an outage page, say) is a provider error, not a reason
+/// to ask the user to sign in again.
+fn parse_refresh_response(status: u16, body: &str) -> Result<TokenResponse> {
+    if let Ok(token) = serde_json::from_str::<TokenResponse>(body) {
+        return Ok(token);
+    }
+    if let Ok(error) = serde_json::from_str::<TokenErrorResponse>(body) {
+        let description = error
+            .error_description
+            .map(|text| format!(": {text}"))
+            .unwrap_or_default();
+        return Err(AppError::Auth(format!(
+            "OAuth refresh rejected ({}{description}); reconnect the account",
+            error.error
+        )));
+    }
+    Err(AppError::Provider(format!(
+        "OAuth token endpoint returned HTTP {status} with an unreadable body: {body}"
+    )))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredToken {
     pub access_token: String,
@@ -37,8 +72,13 @@ impl StoredToken {
 
     /// Returns true if the access token is expired or will expire within 5 minutes.
     pub fn is_expired(&self) -> bool {
+        self.is_expired_at(Utc::now().timestamp())
+    }
+
+    /// `is_expired` against an explicit clock (Unix seconds).
+    pub fn is_expired_at(&self, now: i64) -> bool {
         match self.expires_at {
-            Some(exp) => Utc::now().timestamp() >= exp - 300,
+            Some(exp) => now >= exp - EXPIRY_MARGIN_SECS,
             None => false,
         }
     }
@@ -187,18 +227,21 @@ impl OAuthConfig {
             params.push(("client_secret", secret.as_str()));
         }
 
-        let body = client
+        // A transport failure is transient, not a revoked grant: report it as a
+        // provider error so it never reads as "reconnect the account".
+        let response = client
             .post(&self.token_url)
             .form(&params)
             .send()
             .await
-            .map_err(|e| AppError::Auth(e.to_string()))?
+            .map_err(|e| AppError::Provider(format!("OAuth token refresh failed: {e}")))?;
+        let status = response.status().as_u16();
+        let body = response
             .text()
             .await
-            .map_err(|e| AppError::Auth(e.to_string()))?;
+            .map_err(|e| AppError::Provider(format!("OAuth token refresh failed: {e}")))?;
 
-        serde_json::from_str::<TokenResponse>(&body)
-            .map_err(|e| AppError::Auth(format!("token parse error: {} — body: {}", e, body)))
+        parse_refresh_response(status, &body)
     }
 }
 
@@ -335,6 +378,48 @@ mod tests {
         let hash = hmac_sha256::Hash::hash(verifier.as_bytes());
         let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash);
         assert_eq!(challenge, expected);
+    }
+
+    #[test]
+    fn refresh_invalid_grant_is_a_reconnect_needed_auth_error() {
+        let error = parse_refresh_response(
+            400,
+            r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, AppError::Auth(message)
+                if message.contains("invalid_grant") && message.contains("reconnect")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn refresh_outage_body_is_not_reported_as_revoked() {
+        let error = parse_refresh_response(503, "<html>Service Unavailable</html>").unwrap_err();
+        assert!(matches!(error, AppError::Provider(_)), "{error}");
+    }
+
+    #[test]
+    fn refresh_success_parses_token() {
+        let token = parse_refresh_response(
+            200,
+            r#"{"access_token":"new","expires_in":3599,"token_type":"Bearer"}"#,
+        )
+        .unwrap();
+        assert_eq!(token.access_token, "new");
+        assert!(token.refresh_token.is_none());
+    }
+
+    #[test]
+    fn expiry_margin_is_measured_against_the_given_clock() {
+        let token = StoredToken {
+            access_token: "tok".into(),
+            refresh_token: None,
+            expires_at: Some(10_000),
+        };
+        assert!(!token.is_expired_at(10_000 - EXPIRY_MARGIN_SECS - 1));
+        assert!(token.is_expired_at(10_000 - EXPIRY_MARGIN_SECS));
     }
 
     #[test]

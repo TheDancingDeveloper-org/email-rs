@@ -104,6 +104,7 @@ fn test_full_message(id: &str) -> FullMessage {
         body: Some(email_types::MessageBody {
             html_body: None,
             text_body: Some("Plain-text body.".to_string()),
+            ..Default::default()
         }),
         attachments: Vec::new(),
     }

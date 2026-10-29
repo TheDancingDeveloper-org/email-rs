@@ -135,6 +135,9 @@ fn structured_search_parts(params: &SearchQuery) -> Vec<StructuredSearchPart> {
         params.subject.as_deref(),
         params.subject_op.as_deref(),
     );
+    // The explicit body filter matches the raw MIME parts on purpose: the
+    // orders backfill finds schema.org markup (`body=schema.org`) in HTML the
+    // clean body drops. Free-text `q` searches the clean body (WI-583).
     push_text_search_part(
         &mut parts,
         "COALESCE(m.preview, '') || ' ' || COALESCE(mb.text_body, '') || ' ' || COALESCE(mb.html_body, '')",
@@ -340,7 +343,11 @@ async fn search_fts(
 ) -> Result<Vec<MessageRow>> {
     let q = fts_query(term);
 
-    // Column weights: message_id(unindexed)=0, subject=10, from_name=5, from_email=5, preview=2
+    // Column weights: message_id(unindexed)=0, subject=10, sender=5,
+    // recipients=2, body (the clean current message)=2, quoted history=0.2.
+    // Quoted history stays searchable so a reply that quotes mail we don't
+    // hold can still be found, but a message that only quotes a term ranks
+    // below the messages that say it (WI-583).
     let rows = if let Some(aid) = account_id {
         sqlx::query_as::<_, MessageRow>(
             r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
@@ -350,7 +357,7 @@ async fn search_fts(
                FROM messages_fts fts
                JOIN messages m ON m.id = fts.message_id
                WHERE messages_fts MATCH ? AND m.account_id = ?
-               ORDER BY bm25(messages_fts, 0, 10, 5, 5, 2)
+               ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2)
                LIMIT 50"#,
         )
         .bind(&q)
@@ -366,7 +373,7 @@ async fn search_fts(
                FROM messages_fts fts
                JOIN messages m ON m.id = fts.message_id
                WHERE messages_fts MATCH ?
-               ORDER BY bm25(messages_fts, 0, 10, 5, 5, 2)
+               ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2)
                LIMIT 50"#,
         )
         .bind(&q)
@@ -377,6 +384,10 @@ async fn search_fts(
     Ok(rows)
 }
 
+/// The LIKE fallback when SQLite has no FTS5. It searches what the FTS index
+/// holds (subject, sender, recipients, preview, the clean current message and
+/// its quoted history) and ranks alike: a match only in quoted history comes
+/// last (WI-583). Unlike the index it can't drop link targets from the body.
 async fn search_like(
     state: &AppState,
     term: &str,
@@ -385,72 +396,46 @@ async fn search_like(
     let q_sub = format!("%{term}%");
     let q_word_start = format!("{term} %");
     let q_word_mid = format!("% {term}%");
-    let score_expr = r#"CASE
-        WHEN lower(m.subject) LIKE lower(?) OR lower(m.subject) LIKE lower(?) THEN 4
-        WHEN m.subject LIKE ? THEN 3
-        WHEN m.from_name LIKE ? OR m.from_email LIKE ? THEN 2
-        WHEN m.preview LIKE ? THEN 1
-        ELSE 0 END"#;
-
-    let rows = if let Some(aid) = account_id {
-        sqlx::query_as::<_, MessageRow>(&format!(
-            r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
-                      m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
-                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
-                      m.snoozed_until
-               FROM messages m
-               LEFT JOIN message_bodies mb ON mb.message_id = m.id
-               WHERE m.account_id = ?
-                 AND (m.subject LIKE ? OR m.from_name LIKE ? OR m.from_email LIKE ?
-                      OR m.preview LIKE ? OR mb.text_body LIKE ?)
-               GROUP BY m.id
-               ORDER BY {score_expr} DESC, m.date DESC
-               LIMIT 50"#,
-        ))
-        .bind(aid)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_word_start)
-        .bind(&q_word_mid)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .fetch_all(&state.pool)
-        .await?
+    let account_clause = if account_id.is_some() {
+        "m.account_id = ? AND "
     } else {
-        sqlx::query_as::<_, MessageRow>(&format!(
-            r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
-                      m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
-                      m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
-                      m.snoozed_until
-               FROM messages m
-               LEFT JOIN message_bodies mb ON mb.message_id = m.id
-               WHERE m.subject LIKE ? OR m.from_name LIKE ? OR m.from_email LIKE ?
-                  OR m.preview LIKE ? OR mb.text_body LIKE ?
-               GROUP BY m.id
-               ORDER BY {score_expr} DESC, m.date DESC
-               LIMIT 50"#,
-        ))
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_word_start)
-        .bind(&q_word_mid)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .bind(&q_sub)
-        .fetch_all(&state.pool)
-        .await?
+        ""
     };
+    let sql = format!(
+        r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
+                  m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
+                  m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
+                  m.snoozed_until
+           FROM messages m
+           LEFT JOIN message_bodies mb ON mb.message_id = m.id
+           WHERE {account_clause}
+                 (m.subject LIKE ? OR m.from_name LIKE ? OR m.from_email LIKE ?
+                  OR m.to_json LIKE ? OR m.cc_json LIKE ? OR m.preview LIKE ?
+                  OR mb.clean_body LIKE ? OR mb.quoted_history LIKE ?)
+           GROUP BY m.id
+           ORDER BY CASE
+                      WHEN lower(m.subject) LIKE lower(?) OR lower(m.subject) LIKE lower(?) THEN 4
+                      WHEN m.subject LIKE ? THEN 3
+                      WHEN m.from_name LIKE ? OR m.from_email LIKE ? THEN 2
+                      WHEN m.to_json LIKE ? OR m.cc_json LIKE ? OR m.preview LIKE ?
+                           OR mb.clean_body LIKE ? THEN 1
+                      ELSE 0 END DESC,
+                    m.date DESC
+           LIMIT 50"#
+    );
 
-    Ok(rows)
+    let mut query = sqlx::query_as::<_, MessageRow>(&sql);
+    if let Some(aid) = account_id {
+        query = query.bind(aid);
+    }
+    for _ in 0..8 {
+        query = query.bind(q_sub.clone());
+    }
+    query = query.bind(q_word_start).bind(q_word_mid);
+    for _ in 0..8 {
+        query = query.bind(q_sub.clone());
+    }
+    Ok(query.fetch_all(&state.pool).await?)
 }
 
 // ── Search + suggest response types ──────────────────────────────────────────
@@ -520,7 +505,7 @@ pub async fn suggest_messages(
                    FROM messages_fts fts
                    JOIN messages m ON m.id = fts.message_id
                    WHERE messages_fts MATCH ? AND m.account_id = ?
-                   ORDER BY bm25(messages_fts, 0, 10, 5, 5, 2)
+                   ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2)
                    LIMIT 8"#,
             )
             .bind(&q)
@@ -533,7 +518,7 @@ pub async fn suggest_messages(
                    FROM messages_fts fts
                    JOIN messages m ON m.id = fts.message_id
                    WHERE messages_fts MATCH ?
-                   ORDER BY bm25(messages_fts, 0, 10, 5, 5, 2)
+                   ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2)
                    LIMIT 8"#,
             )
             .bind(&q)
@@ -742,7 +727,7 @@ mod tests {
         )
         .bind(account_id)
         .bind("Test")
-        .bind(format!("{account_id}@test.com"))
+        .bind(format!("{account_id}@example.com"))
         .bind("generic_imap")
         .bind("password")
         .execute(pool)
@@ -861,12 +846,12 @@ mod tests {
             "acc1",
             "fld1",
             "Hello",
-            "bob@company.com",
+            "bob@example.com",
             "Bob",
             "preview",
         )
         .await;
-        let (status, body) = do_get(crate::api::router(state), "/search?q=bob%40company.com").await;
+        let (status, body) = do_get(crate::api::router(state), "/search?q=bob%40example.com").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["messages"]
             .as_array()
@@ -903,7 +888,7 @@ mod tests {
             "acca",
             "flda",
             "Project update",
-            "x@x.com",
+            "x@example.com",
             "X",
             "",
         )
@@ -914,7 +899,7 @@ mod tests {
             "accb",
             "fldb",
             "Project update",
-            "y@y.com",
+            "y@example.net",
             "Y",
             "",
         )
@@ -939,7 +924,7 @@ mod tests {
             "acc1",
             "fld1",
             "No clue",
-            "a@b.com",
+            "a@example.com",
             "A",
             "urgent action required",
         )
@@ -983,7 +968,7 @@ mod tests {
             "acca",
             "flda",
             "Budget 2025",
-            "x@x.com",
+            "x@example.com",
             "X",
             "",
         )
@@ -994,7 +979,7 @@ mod tests {
             "accb",
             "fldb",
             "Budget 2025",
-            "y@y.com",
+            "y@example.net",
             "Y",
             "",
         )
@@ -1224,7 +1209,7 @@ mod tests {
             "acc1",
             "fld1",
             "Quarterly review",
-            "mgr@corp.com",
+            "mgr@example.com",
             "Manager",
             "",
         )
@@ -1235,7 +1220,7 @@ mod tests {
             "acc1",
             "fld1",
             "Quarter budget",
-            "fin@corp.com",
+            "fin@example.com",
             "Finance",
             "",
         )
@@ -1255,7 +1240,7 @@ mod tests {
                 "acc1",
                 "fld1",
                 &format!("Newsletter issue {}", i),
-                "news@x.com",
+                "news@example.com",
                 "News",
                 "",
             )
@@ -1288,5 +1273,303 @@ mod tests {
             .unwrap()
             .iter()
             .any(|m| m["id"] == "sl1"));
+    }
+
+    // ── Clean-body search (WI-583) ──────────────────────────────────────────────
+
+    /// Cache a body the way sync does: store the MIME parts, then clean (and
+    /// index) them.
+    async fn seed_body(pool: &sqlx::SqlitePool, id: &str, text: Option<&str>, html: Option<&str>) {
+        sqlx::query("INSERT INTO message_bodies (message_id, text_body, html_body) VALUES (?,?,?)")
+            .bind(id)
+            .bind(text)
+            .bind(html)
+            .execute(pool)
+            .await
+            .unwrap();
+        crate::clean::store(pool, id, text, html).await.unwrap();
+    }
+
+    const SAYS_WALRUS: &str = "Hi Tom,\n\nThe walrus budget is approved.\n\nPriya\n\nOn Mon, 28 Sep 2026 at 17:02, Tom Baker <tom@example.com> wrote:\n> Any news on the venue?\n";
+    const QUOTES_WALRUS: &str = "Sounds good, see you then.\n\nOn Mon, 28 Sep 2026 at 17:02, Tom Baker <tom@example.com> wrote:\n> The walrus budget is still pending.\n> Tom\n";
+    const HTML_WITH_NOISE: &str = r#"<html><head><style>.flamingoclass{color:red}</style></head><body>
+        <div class="flamingoclass" data-campaign="pangolinattr"><p>Your parcel has shipped.</p>
+        <p><a href="https://shop.example/orders/zebracode?ref=mail">Track your parcel</a></p>
+        <img alt="ocelotpic" src="https://cdn.example/ocelot.png"></div></body></html>"#;
+
+    async fn seed_clean_corpus(pool: &sqlx::SqlitePool) {
+        seed(
+            pool,
+            "says",
+            "acc1",
+            "fld1",
+            "Venue",
+            "priya@example.com",
+            "Priya",
+            "",
+        )
+        .await;
+        seed_body(pool, "says", Some(SAYS_WALRUS), None).await;
+        seed(
+            pool,
+            "quotes",
+            "acc1",
+            "fld1",
+            "Venue",
+            "sam@example.com",
+            "Sam",
+            "",
+        )
+        .await;
+        seed_body(pool, "quotes", Some(QUOTES_WALRUS), None).await;
+        seed(
+            pool,
+            "html",
+            "acc1",
+            "fld1",
+            "Dispatch",
+            "orders@shop.example",
+            "Shop Orders",
+            "",
+        )
+        .await;
+        seed_body(pool, "html", None, Some(HTML_WITH_NOISE)).await;
+        // Unrelated mail so term statistics are not degenerate.
+        for i in 0..5 {
+            seed(
+                pool,
+                &format!("other{i}"),
+                "acc1",
+                "fld1",
+                "Weekly note",
+                "n@example.com",
+                "N",
+                "",
+            )
+            .await;
+            seed_body(
+                pool,
+                &format!("other{i}"),
+                Some("Nothing to see here."),
+                None,
+            )
+            .await;
+        }
+    }
+
+    async fn ids(state: Arc<crate::state::AppState>, uri: &str) -> Vec<String> {
+        let (status, body) = do_get(crate::api::router(state), uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn quoted_history_is_split_off_in_the_fixture() {
+        let cleaned = crate::clean::clean(Some(QUOTES_WALRUS), None, Some("Venue"));
+        assert!(!cleaned.body.contains("walrus"), "{}", cleaned.body);
+        assert!(cleaned.quoted_history.unwrap().contains("walrus"));
+    }
+
+    #[tokio::test]
+    async fn fts_ranks_a_quoted_only_match_below_the_clean_body() {
+        let state = make_state(true).await;
+        seed_clean_corpus(&state.pool).await;
+        assert_eq!(ids(state, "/search?q=walrus").await, ["says", "quotes"]);
+    }
+
+    #[tokio::test]
+    async fn fts_matches_the_whole_clean_body_not_only_the_preview() {
+        let state = make_state(true).await;
+        seed(
+            &state.pool,
+            "long",
+            "acc1",
+            "fld1",
+            "Notes",
+            "a@example.com",
+            "A",
+            "",
+        )
+        .await;
+        let text = format!(
+            "{}\n\nThe capybara arrives on Friday.",
+            "Filler words. ".repeat(40)
+        );
+        seed_body(&state.pool, "long", Some(&text), None).await;
+        assert_eq!(ids(state, "/search?q=capybara").await, ["long"]);
+    }
+
+    #[tokio::test]
+    async fn fts_ignores_html_markup_attributes_and_link_targets() {
+        let state = make_state(true).await;
+        seed_clean_corpus(&state.pool).await;
+        for term in [
+            "flamingoclass",
+            "pangolinattr",
+            "zebracode",
+            "ocelotpic",
+            "ocelot",
+        ] {
+            assert!(
+                ids(state.clone(), &format!("/search?q={term}"))
+                    .await
+                    .is_empty(),
+                "{term}"
+            );
+        }
+        assert_eq!(ids(state.clone(), "/search?q=shipped").await, ["html"]);
+        assert_eq!(ids(state, "/search?q=Track%20parcel").await, ["html"]);
+    }
+
+    #[tokio::test]
+    async fn fts_sender_and_recipient_search_still_work() {
+        let state = make_state(true).await;
+        seed_clean_corpus(&state.pool).await;
+        sqlx::query(
+            r#"UPDATE messages SET to_json = '["Jo Bloggs <jo@example.org>"]',
+                                   cc_json = '[{"name":"Kim Lee","email":"kim@example.net"}]'
+               WHERE id = 'says'"#,
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        // An address list that isn't JSON is indexed as it is, not refused.
+        sqlx::query("UPDATE messages SET to_json = 'wombat@example.org' WHERE id = 'quotes'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(state.clone(), "/search?q=orders%40shop.example").await,
+            ["html"]
+        );
+        assert_eq!(
+            ids(state.clone(), "/search?q=Shop%20Orders").await,
+            ["html"]
+        );
+        assert_eq!(ids(state.clone(), "/search?q=Bloggs").await, ["says"]);
+        assert_eq!(
+            ids(state.clone(), "/search?q=kim%40example.net").await,
+            ["says"]
+        );
+        assert_eq!(ids(state.clone(), "/search?q=wombat").await, ["quotes"]);
+        // JSON keys are not indexed.
+        assert!(ids(state.clone(), "/search?q=name").await.is_empty());
+        // The orders backfill searches by sender with the structured filter.
+        assert_eq!(
+            ids(
+                state.clone(),
+                "/search?from=orders%40shop.example&account_id=acc1"
+            )
+            .await,
+            ["html"]
+        );
+    }
+
+    #[tokio::test]
+    async fn fts_keeps_the_clean_body_when_the_preview_changes() {
+        let state = make_state(true).await;
+        seed_clean_corpus(&state.pool).await;
+        // A later sync writes the raw provider preview back.
+        sqlx::query("UPDATE messages SET preview = 'raw zebracode preview' WHERE id = 'html'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        assert!(ids(state.clone(), "/search?q=zebracode").await.is_empty());
+        assert_eq!(ids(state, "/search?q=shipped").await, ["html"]);
+    }
+
+    #[tokio::test]
+    async fn reindex_fills_bodies_cleaned_before_the_index() {
+        let state = make_state(true).await;
+        seed_clean_corpus(&state.pool).await;
+        // As left by WI-579: bodies cleaned, the index holding previews only.
+        sqlx::query("UPDATE messages_fts SET body = '', quoted = ''")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE message_bodies SET search_version = 0")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        assert!(ids(state.clone(), "/search?q=walrus").await.is_empty());
+
+        assert_eq!(crate::search_index::reindex(&state.pool).await.unwrap(), 8);
+        assert_eq!(
+            ids(state.clone(), "/search?q=walrus").await,
+            ["says", "quotes"]
+        );
+        assert_eq!(crate::search_index::reindex(&state.pool).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn first_index_is_replaced_and_bodies_reindexed() {
+        let path = format!("/tmp/email_test_{}.db", uuid::Uuid::new_v4());
+        let url = format!("sqlite:{path}");
+        let (pool, has_fts) = crate::db::create_pool(&url).await.unwrap();
+        assert!(has_fts);
+        seed_clean_corpus(&pool).await;
+        // Put back the first index (raw previews, no bodies).
+        for statement in [
+            "DROP TRIGGER messages_fts_ai",
+            "DROP TRIGGER messages_fts_ad",
+            "DROP TRIGGER messages_fts_au",
+            "DROP TRIGGER messages_fts_au_preview",
+            "DROP TABLE messages_fts",
+            "CREATE VIRTUAL TABLE messages_fts USING fts5(message_id UNINDEXED, subject, from_name, from_email, preview, tokenize = 'unicode61')",
+            "INSERT INTO messages_fts(rowid, message_id, subject, from_name, from_email, preview) SELECT rowid, id, subject, from_name, from_email, preview FROM messages",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+
+        let (pool, has_fts) = crate::db::create_pool(&url).await.unwrap();
+        assert!(has_fts);
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_bodies WHERE search_version = 0")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 8);
+        let indexed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(indexed, 8);
+        assert_eq!(crate::search_index::reindex(&pool).await.unwrap(), 8);
+        let state = Arc::new(crate::state::AppState::new(pool, true));
+        assert_eq!(
+            ids(state.clone(), "/search?q=walrus").await,
+            ["says", "quotes"]
+        );
+        assert_eq!(ids(state, "/search?q=Priya").await, ["says"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn like_fallback_searches_the_clean_body_and_ranks_quotes_last() {
+        let state = make_state(false).await;
+        seed_clean_corpus(&state.pool).await;
+        assert_eq!(
+            ids(state.clone(), "/search?q=walrus").await,
+            ["says", "quotes"]
+        );
+        assert_eq!(ids(state.clone(), "/search?q=shipped").await, ["html"]);
+        for term in ["flamingoclass", "pangolinattr", "ocelotpic"] {
+            assert!(
+                ids(state.clone(), &format!("/search?q={term}"))
+                    .await
+                    .is_empty(),
+                "{term}"
+            );
+        }
+        assert_eq!(
+            ids(state, "/search?q=orders%40shop.example&account_id=acc1").await,
+            ["html"]
+        );
     }
 }

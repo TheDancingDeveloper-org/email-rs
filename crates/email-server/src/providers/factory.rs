@@ -4,6 +4,7 @@ use sqlx::SqlitePool;
 
 use super::{generic_imap::GenericImapProvider, gmail::GmailProvider, MailProvider};
 use crate::auth::oauth2::{OAuthConfig, StoredToken};
+use crate::auth::token_source::{lock_account_refresh, AccessTokenSource, TokenStore};
 use crate::error::{AppError, Result};
 
 #[derive(Debug, sqlx::FromRow)]
@@ -39,10 +40,18 @@ pub async fn load_account_config(pool: &SqlitePool, account_id: &str) -> Result<
             .oauth_token_json
             .as_deref()
             .ok_or_else(|| AppError::Auth("account has no OAuth token".into()))?;
-        let mut token: StoredToken = serde_json::from_str(raw)
+        let token: StoredToken = serde_json::from_str(raw)
             .map_err(|error| AppError::Auth(format!("parse OAuth token: {error}")))?;
         if token.is_expired() {
-            token = refresh_oauth_token(pool, &account, token).await?;
+            // Same per-account lock as the per-connection refresh, so a send or
+            // calendar sync never refreshes alongside a running mail sync.
+            let _guard = lock_account_refresh(&account.id).await;
+            let persisted = load_stored_token(pool, &account.id).await?;
+            let token = if persisted.is_expired() {
+                refresh_oauth_token(pool, &account.id, &account.provider_type, persisted).await?
+            } else {
+                persisted
+            };
             account.oauth_token_json = Some(
                 serde_json::to_string(&token)
                     .map_err(|error| AppError::Auth(format!("serialize OAuth token: {error}")))?,
@@ -94,33 +103,88 @@ pub async fn provider_for_account(
         .ok_or_else(|| AppError::Auth("account has no OAuth token".to_string()))?;
     let token: StoredToken = serde_json::from_str(raw_token)
         .map_err(|error| AppError::Auth(format!("parse OAuth token: {error}")))?;
-    match account.provider_type.as_str() {
-        "gmail" => Ok(Arc::new(GmailProvider::new(
+    if !matches!(account.provider_type.as_str(), "gmail" | "microsoft365") {
+        return Err(AppError::Provider(format!(
+            "unsupported provider {}",
+            account.provider_type
+        )));
+    }
+    // Every IMAP connection the provider opens asks this source for a token,
+    // so a long sync refreshes mid-run instead of outliving its first token.
+    let tokens = Arc::new(AccessTokenSource::new(
+        account.id.clone(),
+        token,
+        Arc::new(DbTokenStore {
+            pool: pool.clone(),
+            account_id: account.id.clone(),
+            provider_type: account.provider_type.clone(),
+        }),
+    ));
+    if account.provider_type == "gmail" {
+        Ok(Arc::new(GmailProvider::new(
             account.id,
             account.email,
-            token.access_token,
-        ))),
-        "microsoft365" => Ok(Arc::new(GmailProvider::new_outlook(
+            tokens,
+        )))
+    } else {
+        Ok(Arc::new(GmailProvider::new_outlook(
             account.id,
             account.email,
-            token.access_token,
-        ))),
-        provider => Err(AppError::Provider(format!(
-            "unsupported provider {provider}"
-        ))),
+            tokens,
+        )))
     }
 }
 
+/// The account's OAuth token as persisted in `accounts.oauth_token_json`.
+struct DbTokenStore {
+    pool: SqlitePool,
+    account_id: String,
+    provider_type: String,
+}
+
+#[async_trait::async_trait]
+impl TokenStore for DbTokenStore {
+    async fn load(&self) -> Result<StoredToken> {
+        load_stored_token(&self.pool, &self.account_id).await
+    }
+
+    async fn refresh(&self, current: &StoredToken) -> Result<StoredToken> {
+        refresh_oauth_token(
+            &self.pool,
+            &self.account_id,
+            &self.provider_type,
+            current.clone(),
+        )
+        .await
+    }
+}
+
+async fn load_stored_token(pool: &SqlitePool, account_id: &str) -> Result<StoredToken> {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT oauth_token_json FROM accounts WHERE id = ?")
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    let raw = crate::credentials::open_optional(raw)?
+        .ok_or_else(|| AppError::Auth("account has no OAuth token".to_string()))?;
+    serde_json::from_str(&raw)
+        .map_err(|error| AppError::Auth(format!("parse OAuth token: {error}")))
+}
+
+/// Exchange the refresh token and persist the new token. Callers hold
+/// `lock_account_refresh` for the account.
 async fn refresh_oauth_token(
     pool: &SqlitePool,
-    account: &AccountConfig,
+    account_id: &str,
+    provider_type: &str,
     token: StoredToken,
 ) -> Result<StoredToken> {
     let refresh_token = token
         .refresh_token
         .clone()
         .ok_or_else(|| AppError::Auth("OAuth refresh token is missing".to_string()))?;
-    let oauth = match account.provider_type.as_str() {
+    let oauth = match provider_type {
         "gmail" => OAuthConfig::gmail(
             crate::auth::google_client_id()
                 .ok_or_else(|| AppError::Auth("GOOGLE_CLIENT_ID is not configured".to_string()))?,
@@ -154,7 +218,7 @@ async fn refresh_oauth_token(
     sqlx::query("UPDATE accounts SET oauth_token_json = ?, token_expiry = ? WHERE id = ?")
         .bind(crate::credentials::seal(&json)?)
         .bind(refreshed.expires_at.map(|value| value.to_string()))
-        .bind(&account.id)
+        .bind(account_id)
         .execute(pool)
         .await?;
     Ok(refreshed)

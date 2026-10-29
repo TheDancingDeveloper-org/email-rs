@@ -33,8 +33,10 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool
         }
     }
 
+    let in_memory = file_path == ":memory:";
+
     // WAL mode is not supported for in-memory databases; use Memory journal instead.
-    let journal_mode = if file_path == ":memory:" {
+    let journal_mode = if in_memory {
         SqliteJournalMode::Memory
     } else {
         SqliteJournalMode::Wal
@@ -49,23 +51,65 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool
 
     // In-memory databases are per-connection in SQLite: limit to 1 connection so all
     // operations share the same database rather than each getting an empty one.
-    let max_conns = if file_path == ":memory:" { 1 } else { 5 };
+    if in_memory {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await?;
+        let has_fts = migrate(&pool).await?;
+        return Ok((pool, has_fts));
+    }
+
+    // Migrate a file database through a dedicated single-connection pool and
+    // close it before the serving pool opens (WI-497). Migrating through the
+    // serving pool let it open extra connections part-way through the schema
+    // build. Such a connection keeps a stale schema, and the first statement it
+    // runs that reaches the FTS5 table (for example `DELETE FROM accounts`,
+    // which cascades through the `messages_fts` triggers) can fail once with
+    // "no such table" instead of being re-prepared.
+    let migration_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts.clone())
+        .await?;
+    let migrated = migrate(&migration_pool).await;
+    migration_pool.close().await;
+    let has_fts = migrated?;
+
     let pool = SqlitePoolOptions::new()
-        .max_connections(max_conns)
+        .max_connections(5)
         .connect_with(opts)
         .await?;
 
-    run_migrations(&pool).await?;
+    Ok((pool, has_fts))
+}
 
-    let has_fts = match run_fts_migration(&pool).await {
+/// Run every schema migration; returns whether FTS5 search is available.
+async fn migrate(pool: &SqlitePool) -> anyhow::Result<bool> {
+    run_migrations(pool).await?;
+
+    Ok(match run_fts_migration(pool).await {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!("FTS5 unavailable ({e}) — search will use LIKE fallback");
             false
         }
-    };
+    })
+}
 
-    Ok((pool, has_fts))
+/// Begin a transaction that will write, taking SQLite's write lock up front.
+///
+/// A deferred `BEGIN` takes the write lock at the first write. If the
+/// transaction has read by then, it can't wait for another connection that
+/// holds the lock: SQLite returns `SQLITE_BUSY` (or `SQLITE_BUSY_SNAPSHOT`) at
+/// once, without calling the busy handler. That read doesn't have to be one of
+/// our queries. Preparing a statement that reaches `messages_fts` on a
+/// connection that hasn't opened the FTS5 table yet reads its config. With
+/// `BEGIN IMMEDIATE` the lock is taken before anything is read, so it waits
+/// out `busy_timeout` like any other writer (WI-497).
+pub async fn begin_write(
+    pool: &SqlitePool,
+) -> std::result::Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
 }
 
 async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
@@ -233,7 +277,90 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     run_application_auth_migration(pool).await?;
     run_integration_token_migration(pool).await?;
     run_logical_message_id_migration(pool).await?;
+    run_clean_body_migration(pool).await?;
+    run_search_index_migration(pool).await?;
 
+    Ok(())
+}
+
+/// Search-index bookkeeping (WI-583): `search_version` records which version
+/// of the search document the `messages_fts` row of a cached body holds.
+/// Rows start at 0 and are indexed by the background reindex or when their
+/// body is next cleaned.
+async fn run_search_index_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 18")
+            .fetch_optional(pool)
+            .await?;
+    if applied.is_some() {
+        return Ok(());
+    }
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('message_bodies')")
+            .fetch_all(pool)
+            .await?;
+    if !columns.iter().any(|c| c == "search_version") {
+        sqlx::query(
+            "ALTER TABLE message_bodies ADD COLUMN search_version INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_message_bodies_search_version ON message_bodies(search_version)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("INSERT INTO schema_migrations (version) VALUES (18)")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Model-ready bodies (WI-579). Rows start at `clean_version` 0 and are
+/// cleaned by the background backfill or on their next read.
+async fn run_clean_body_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 17")
+            .fetch_optional(pool)
+            .await?;
+    if applied.is_some() {
+        return Ok(());
+    }
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('message_bodies')")
+            .fetch_all(pool)
+            .await?;
+    for (column, ddl) in [
+        (
+            "clean_body",
+            "ALTER TABLE message_bodies ADD COLUMN clean_body TEXT",
+        ),
+        (
+            "quoted_history",
+            "ALTER TABLE message_bodies ADD COLUMN quoted_history TEXT",
+        ),
+        (
+            "signature_stripped",
+            "ALTER TABLE message_bodies ADD COLUMN signature_stripped INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "clean_version",
+            "ALTER TABLE message_bodies ADD COLUMN clean_version INTEGER NOT NULL DEFAULT 0",
+        ),
+    ] {
+        if !columns.iter().any(|c| c == column) {
+            sqlx::query(ddl).execute(pool).await?;
+        }
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_message_bodies_clean_version ON message_bodies(clean_version)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("INSERT INTO schema_migrations (version) VALUES (17)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -520,7 +647,7 @@ async fn run_message_identity_migration(pool: &SqlitePool) -> anyhow::Result<()>
             )
             .execute(&mut *conn)
             .await?;
-            for trigger in ["messages_fts_ai", "messages_fts_ad", "messages_fts_au"] {
+            for trigger in FTS_TRIGGERS {
                 sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
                     .execute(&mut *conn)
                     .await?;
@@ -694,35 +821,108 @@ pub async fn mark_account_reconciled(pool: &SqlitePool, account_id: &str) -> any
     Ok(())
 }
 
-/// Migration 005: FTS5 full-text search index for messages.
+/// Every trigger that keeps `messages_fts` in step with `messages`.
+const FTS_TRIGGERS: [&str; 4] = [
+    "messages_fts_ai",
+    "messages_fts_ad",
+    "messages_fts_au",
+    "messages_fts_au_preview",
+];
+
+/// The sender of a message as indexed text: display name and address.
+fn sender_sql(row: &str) -> String {
+    format!("coalesce({row}.from_name, '') || ' ' || coalesce({row}.from_email, '')")
+}
+
+/// The recipients of a message (to and cc) as indexed text. The address lists
+/// are JSON (`["Name <a@b>", ...]`, or objects with `name`/`email`); only the
+/// names and addresses are indexed, not the JSON punctuation or keys. A value
+/// that isn't valid JSON is indexed as it is rather than failing the write.
+fn recipients_sql(row: &str) -> String {
+    let list = |column: &str| {
+        format!(
+            "CASE WHEN json_valid({row}.{column}) THEN coalesce((
+                 SELECT group_concat(CASE type
+                          WHEN 'text' THEN value
+                          WHEN 'object' THEN coalesce(json_extract(value, '$.name'), '') || ' ' ||
+                                             coalesce(json_extract(value, '$.email'), '')
+                          ELSE '' END, ' ')
+                 FROM json_each({row}.{column})), '')
+             ELSE coalesce({row}.{column}, '') END"
+        )
+    };
+    format!("{} || ' ' || {}", list("to_json"), list("cc_json"))
+}
+
+/// Migration 005, revised by WI-583: FTS5 full-text search index for messages.
+///
+/// One row per message, keyed by the `messages` rowid:
+///
+/// - `subject`, `sender` (from name and address) and `recipients` (to and cc)
+///   come from `messages` and are kept current by triggers;
+/// - `body` is the clean current message (WI-579) with link targets removed,
+///   written by [`crate::search_index::index_body`] when a body is cleaned.
+///   Until then it holds the message preview;
+/// - `quoted` is the quoted history split off the body. It stays searchable so
+///   a reply quoting mail that isn't synced can still be found, but is weighted
+///   far below `body` (see `api::search`), so a message that only quotes a term
+///   ranks under the messages that say it.
+///
 /// Written in Rust rather than a SQL file so we can execute each statement
 /// individually — SQLite triggers contain embedded semicolons that confuse
 /// a naive split-by-';' runner.
 async fn run_fts_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('messages_fts')")
+            .fetch_all(pool)
+            .await?;
+    // The first index (subject, from_name, from_email, preview) held raw
+    // previews only. Replace it; bodies are indexed again in the background.
+    if !columns.is_empty() && !columns.iter().any(|c| c == "quoted") {
+        for trigger in FTS_TRIGGERS {
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
+                .execute(pool)
+                .await?;
+        }
+        sqlx::query("DROP TABLE messages_fts").execute(pool).await?;
+    }
+    let existed: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'",
+    )
+    .fetch_optional(pool)
+    .await?;
+
     sqlx::query(
         "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
             message_id UNINDEXED,
             subject,
-            from_name,
-            from_email,
-            preview,
+            sender,
+            recipients,
+            body,
+            quoted,
             tokenize = 'unicode61'
         )",
     )
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    if existed.is_none() {
+        // A new index holds no clean body yet, whatever an earlier one held.
+        sqlx::query("UPDATE message_bodies SET search_version = 0 WHERE search_version <> 0")
+            .execute(pool)
+            .await?;
+    }
+
+    sqlx::query(&format!(
         "CREATE TRIGGER IF NOT EXISTS messages_fts_ai
          AFTER INSERT ON messages BEGIN
-           INSERT INTO messages_fts(rowid, message_id, subject, from_name, from_email, preview)
-           VALUES (new.rowid, new.id,
-                   coalesce(new.subject,   ''),
-                   coalesce(new.from_name, ''),
-                   coalesce(new.from_email,''),
-                   coalesce(new.preview,   ''));
+           INSERT INTO messages_fts(rowid, message_id, subject, sender, recipients, body, quoted)
+           VALUES (new.rowid, new.id, coalesce(new.subject, ''), {}, {},
+                   coalesce(new.preview, ''), '');
          END",
-    )
+        sender_sql("new"),
+        recipients_sql("new"),
+    ))
     .execute(pool)
     .await?;
 
@@ -735,33 +935,42 @@ async fn run_fts_migration(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::query(&format!(
         "CREATE TRIGGER IF NOT EXISTS messages_fts_au
-         AFTER UPDATE OF subject, from_name, from_email, preview ON messages BEGIN
-           DELETE FROM messages_fts WHERE rowid = old.rowid;
-           INSERT INTO messages_fts(rowid, message_id, subject, from_name, from_email, preview)
-           VALUES (new.rowid, new.id,
-                   coalesce(new.subject,   ''),
-                   coalesce(new.from_name, ''),
-                   coalesce(new.from_email,''),
-                   coalesce(new.preview,   ''));
+         AFTER UPDATE OF subject, from_name, from_email, to_json, cc_json ON messages BEGIN
+           UPDATE messages_fts
+              SET subject = coalesce(new.subject, ''), sender = {}, recipients = {}
+            WHERE rowid = new.rowid;
+         END",
+        sender_sql("new"),
+        recipients_sql("new"),
+    ))
+    .execute(pool)
+    .await?;
+
+    // The preview stands in for the body only until the clean body is indexed.
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS messages_fts_au_preview
+         AFTER UPDATE OF preview ON messages BEGIN
+           UPDATE messages_fts SET body = coalesce(new.preview, '')
+            WHERE rowid = new.rowid
+              AND NOT EXISTS (SELECT 1 FROM message_bodies
+                               WHERE message_id = new.id AND search_version > 0);
          END",
     )
     .execute(pool)
     .await?;
 
-    // Backfill any messages not yet in the index (idempotent).
-    sqlx::query(
-        "INSERT INTO messages_fts(rowid, message_id, subject, from_name, from_email, preview)
-         SELECT rowid,
-                id,
-                coalesce(subject,   ''),
-                coalesce(from_name, ''),
-                coalesce(from_email,''),
-                coalesce(preview,   '')
-         FROM messages
-         WHERE id NOT IN (SELECT message_id FROM messages_fts)",
-    )
+    // Add any message not yet in the index (idempotent). Clean bodies follow
+    // in the background (`search_index::spawn_reindex`).
+    sqlx::query(&format!(
+        "INSERT INTO messages_fts(rowid, message_id, subject, sender, recipients, body, quoted)
+         SELECT m.rowid, m.id, coalesce(m.subject, ''), {}, {}, coalesce(m.preview, ''), ''
+         FROM messages m
+         WHERE m.rowid NOT IN (SELECT rowid FROM messages_fts)",
+        sender_sql("m"),
+        recipients_sql("m"),
+    ))
     .execute(pool)
     .await?;
 

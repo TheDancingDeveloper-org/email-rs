@@ -313,6 +313,7 @@ async fn save_draft(
     .bind(String::from_utf8_lossy(&raw).split("\r\n\r\n").next())
     .execute(&state.pool)
     .await?;
+    crate::clean::store(&state.pool, &id, text_body.as_deref(), html_body.as_deref()).await?;
     let provider_attachments = attachments
         .into_iter()
         .enumerate()

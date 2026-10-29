@@ -453,7 +453,7 @@ pub(crate) async fn cache_provider_attachments(
     message_id: &str,
     attachments: &[ProviderAttachment],
 ) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     cache_provider_attachments_tx(&mut tx, message_id, attachments).await?;
     tx.commit().await?;
     Ok(())
@@ -542,6 +542,14 @@ pub struct MessageBodyRow {
     pub text_body: Option<String>,
     pub raw_headers: Option<String>,
     pub fetched_at: String,
+    #[sqlx(default)]
+    pub clean_body: Option<String>,
+    #[sqlx(default)]
+    pub quoted_history: Option<String>,
+    #[sqlx(default)]
+    pub signature_stripped: bool,
+    #[sqlx(default)]
+    pub clean_version: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -608,7 +616,9 @@ pub async fn get_message(
 
     // Check body cache.
     let mut body = sqlx::query_as::<_, MessageBodyRow>(
-        "SELECT message_id, html_body, text_body, raw_headers, fetched_at FROM message_bodies WHERE message_id = ?",
+        r#"SELECT message_id, html_body, text_body, raw_headers, fetched_at,
+                  clean_body, quoted_history, signature_stripped, clean_version
+           FROM message_bodies WHERE message_id = ?"#,
     )
     .bind(&message_id)
     .fetch_optional(&state.pool)
@@ -646,12 +656,34 @@ pub async fn get_message(
                         text_body: fetched.text_body,
                         raw_headers: fetched.raw_headers,
                         fetched_at: chrono::Utc::now().to_rfc3339(),
+                        clean_body: None,
+                        quoted_history: None,
+                        signature_stripped: false,
+                        clean_version: 0,
                     });
                 }
                 Err(e) => {
                     tracing::warn!("failed to fetch IMAP body for {}: {}", message_id, e);
                 }
             }
+        }
+    }
+
+    // Clean a body cached before it had a clean form, or under older rules
+    // (WI-579); the startup backfill does the same for bodies nobody reads.
+    if let Some(b) = body.as_mut() {
+        if b.clean_version < crate::clean::CLEAN_VERSION {
+            let cleaned = crate::clean::store(
+                &state.pool,
+                &message_id,
+                b.text_body.as_deref(),
+                b.html_body.as_deref(),
+            )
+            .await?;
+            b.clean_body = Some(cleaned.body);
+            b.quoted_history = cleaned.quoted_history;
+            b.signature_stripped = cleaned.signature_stripped;
+            b.clean_version = crate::clean::CLEAN_VERSION;
         }
     }
 
@@ -693,6 +725,9 @@ pub async fn get_message(
         "body": body.map(|b| serde_json::json!({
             "htmlBody": b.html_body,
             "textBody": b.text_body,
+            "cleanBody": b.clean_body,
+            "quotedHistory": b.quoted_history,
+            "signatureStripped": b.signature_stripped,
         })),
         "attachments": attachments,
     });
@@ -723,7 +758,7 @@ mod tests {
         )
         .bind(id)
         .bind("T")
-        .bind("t@t.com")
+        .bind("t@example.com")
         .bind("test")
         .bind("test")
         .execute(pool)
@@ -986,6 +1021,96 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["id"], "msg-get");
         assert_eq!(body["subject"], "Subject of msg-get");
+    }
+
+    async fn seed_body(
+        pool: &SqlitePool,
+        message_id: &str,
+        text: Option<&str>,
+        html: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO message_bodies (message_id, html_body, text_body) VALUES (?, ?, ?)",
+        )
+        .bind(message_id)
+        .bind(html)
+        .bind(text)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_message_cleans_a_body_cached_before_cleaning_existed() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "msg-clean", "acc1", "fld1").await;
+        seed_body(
+            &state.pool,
+            "msg-clean",
+            Some("Yes, 3pm works.\n\n-- \nAda\n\nOn Mon, 28 Sep 2026 at 17:02, Tom <t@example.com> wrote:\n> Does 3pm work?\n"),
+            None,
+        )
+        .await;
+
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "GET",
+            "/messages/msg-clean",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["body"]["cleanBody"], "Yes, 3pm works.");
+        assert_eq!(body["body"]["signatureStripped"], true);
+        assert!(body["body"]["quotedHistory"]
+            .as_str()
+            .unwrap()
+            .contains("Does 3pm work?"));
+        assert!(body["body"]["textBody"]
+            .as_str()
+            .unwrap()
+            .contains("Does 3pm work?"));
+
+        let (version, preview): (i64, Option<String>) = sqlx::query_as(
+            "SELECT mb.clean_version, m.preview FROM message_bodies mb JOIN messages m ON m.id = mb.message_id WHERE m.id = ?",
+        )
+        .bind("msg-clean")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(version, crate::clean::CLEAN_VERSION);
+        assert_eq!(preview.as_deref(), Some("Yes, 3pm works."));
+    }
+
+    #[tokio::test]
+    async fn backfill_cleans_every_stale_body() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        for i in 0..60 {
+            let id = format!("msg-{i}");
+            seed_message(&state.pool, &id, "acc1", "fld1").await;
+            seed_body(
+                &state.pool,
+                &id,
+                None,
+                Some("<html><head><style>p{color:red}</style></head><body><p>Hello</p></body></html>"),
+            )
+            .await;
+        }
+
+        assert_eq!(crate::clean::backfill(&state.pool).await.unwrap(), 60);
+        let stale: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_bodies WHERE clean_version < ? OR clean_body != 'Hello'",
+        )
+        .bind(crate::clean::CLEAN_VERSION)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(stale, 0);
+        assert_eq!(crate::clean::backfill(&state.pool).await.unwrap(), 0);
     }
 
     #[tokio::test]

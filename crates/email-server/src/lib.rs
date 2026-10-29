@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod calendar;
+pub mod clean;
 pub mod config;
 pub mod credentials;
 pub mod db;
@@ -8,6 +9,7 @@ pub mod error;
 pub mod imap;
 pub mod providers;
 pub mod rules;
+pub mod search_index;
 pub mod smtp;
 pub mod state;
 pub mod sync;
@@ -36,6 +38,10 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
     let auth_settings = auth::app::AuthSettings::from_env(cfg.public_url.as_deref());
     let app_state = Arc::new(AppState::with_auth(pool.clone(), has_fts, auth_settings));
     api::webhooks::spawn_delivery_worker(pool.clone());
+    clean::spawn_backfill(pool.clone());
+    if has_fts {
+        search_index::spawn_reindex(pool.clone());
+    }
     SyncOrchestrator::spawn_background(pool, app_state.event_tx.clone());
 
     let app = build_app(app_state, &cfg.frontend_dist);
