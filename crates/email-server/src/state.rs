@@ -5,6 +5,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::auth::app::AuthSettings;
+use crate::config::WebhookPolicy;
 
 #[derive(Clone, Debug)]
 pub struct OAuthState {
@@ -26,6 +27,8 @@ pub struct AppState {
     /// Broadcast channel for push-notifying connected SSE clients of sync events.
     pub event_tx: broadcast::Sender<String>,
     pub auth: AuthSettings,
+    /// SSRF policy applied when a webhook URL is stored.
+    pub webhook_policy: WebhookPolicy,
 }
 
 impl AppState {
@@ -41,6 +44,7 @@ impl AppState {
             oauth_states: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
             auth,
+            webhook_policy: WebhookPolicy::from_env(),
         }
     }
 }

@@ -27,6 +27,7 @@ pub async fn create_webhook(
     let id = Uuid::new_v4().to_string();
     let events = body.events.unwrap_or_else(|| "message.created".to_string());
     validate_events(&events)?;
+    validate_webhook_url(&body.url, &state.webhook_policy)?;
 
     sqlx::query(
         r#"INSERT INTO webhooks (id, url, secret, events, account_id)
@@ -56,6 +57,7 @@ pub async fn update_webhook(
     Json(body): Json<UpdateWebhook>,
 ) -> Result<Json<WebhookRow>> {
     if let Some(ref url) = body.url {
+        validate_webhook_url(url, &state.webhook_policy)?;
         sqlx::query("UPDATE webhooks SET url = ? WHERE id = ?")
             .bind(url)
             .bind(&id)
@@ -337,14 +339,183 @@ pub async fn fire_webhooks(
     }
 }
 
-fn signature(body: &str, secret: &str) -> String {
+/// HMAC-SHA256 over `{timestamp}.{body}`, so a receiver can reject a replay
+/// of an old body by checking the timestamp window before verifying the MAC.
+pub fn signature(timestamp: &str, body: &str, secret: &str) -> String {
     use std::fmt::Write as _;
-    let key = hmac_sha256::HMAC::mac(body.as_bytes(), secret.as_bytes());
+    let mut message = Vec::with_capacity(timestamp.len() + 1 + body.len());
+    message.extend_from_slice(timestamp.as_bytes());
+    message.push(b'.');
+    message.extend_from_slice(body.as_bytes());
+    let key = hmac_sha256::HMAC::mac(&message, secret.as_bytes());
     let mut hex = String::with_capacity(64);
     for byte in key {
         let _ = write!(hex, "{byte:02x}");
     }
     format!("sha256={hex}")
+}
+
+/// True when `presented` is the signature of `timestamp` and `body`.
+pub fn signature_matches(timestamp: &str, body: &str, secret: &str, presented: &str) -> bool {
+    let expected = signature(timestamp, body, secret);
+    // Constant-time compare of equal-length hex strings.
+    expected.len() == presented.len()
+        && expected
+            .bytes()
+            .zip(presented.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+#[derive(Debug)]
+struct VettedUrl {
+    host: String,
+    socket: std::net::SocketAddr,
+}
+
+fn policy() -> crate::config::WebhookPolicy {
+    crate::config::WebhookPolicy::from_env()
+}
+
+fn validate_webhook_url(url: &str, policy: &crate::config::WebhookPolicy) -> Result<()> {
+    parse_webhook_url(url, policy).map(|_| ())
+}
+
+fn parse_webhook_url(
+    url: &str,
+    policy: &crate::config::WebhookPolicy,
+) -> Result<(String, u16, bool)> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| AppError::Validation("webhook url is not a valid absolute URL".into()))?;
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(AppError::Validation(
+            "webhook url must not contain credentials".into(),
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| AppError::Validation("webhook url has no host".into()))?
+        .to_string();
+    let https = parsed.scheme() == "https";
+    let http = parsed.scheme() == "http";
+    if https {
+        // always allowed
+    } else if http && policy.allow_insecure_http {
+        // explicit development opt-in
+    } else {
+        return Err(AppError::Validation(
+            "webhook url must be https (http only when EMAIL_RS_ALLOW_INSECURE_HTTP is set)".into(),
+        ));
+    }
+    if policy.allowlist.iter().any(|allowed| allowed == url) {
+        let port = parsed
+            .port_or_known_default()
+            .unwrap_or(if https { 443 } else { 80 });
+        return Ok((host, port, true));
+    }
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| AppError::Validation("webhook url has no port".into()))?;
+    Ok((host, port, false))
+}
+
+fn ip_is_blocked(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                // CGNAT (Tailscale and similar overlays sit in 100.64.0.0/10).
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+                // Cloud metadata (169.254.169.254 is link-local; also block the
+                // whole 169.254.0.0/16 via is_link_local) and 0.0.0.0/8.
+                || v4.octets()[0] == 0
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+                || (v6.segments()[0] & 0xffc0) == 0xfec0 // fec0::/10 deprecated site-local
+                // IPv4-mapped addresses must be judged as IPv4.
+                || v6.to_ipv4_mapped().is_some_and(|v4| ip_is_blocked(v4.into()))
+        }
+    }
+}
+
+async fn vet_delivery_url(url: &str) -> std::result::Result<VettedUrl, String> {
+    let policy = policy();
+    let (host, port, allowlisted) = parse_webhook_url(url, &policy).map_err(|e| e.to_string())?;
+    if allowlisted {
+        let socket = resolve_first(&host, port)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(VettedUrl { host, socket });
+    }
+    let addresses = lookup_host(&host, port).await.map_err(|e| e.to_string())?;
+    if addresses.is_empty() {
+        return Err(format!("webhook host {host} did not resolve"));
+    }
+    if let Some(blocked) = addresses.iter().find(|addr| ip_is_blocked(addr.ip())) {
+        return Err(format!(
+            "webhook target {blocked} is a private, loopback, link-local or metadata address"
+        ));
+    }
+    Ok(VettedUrl {
+        host,
+        socket: addresses[0],
+    })
+}
+
+async fn lookup_host(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(vec![std::net::SocketAddr::new(ip, port)]);
+    }
+    tokio::net::lookup_host((host, port))
+        .await
+        .map(|iter| iter.collect())
+        .map_err(|error| AppError::Validation(format!("webhook host did not resolve: {error}")))
+}
+
+async fn resolve_first(host: &str, port: u16) -> Result<std::net::SocketAddr> {
+    lookup_host(host, port)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::Validation(format!("webhook host {host} did not resolve")))
+}
+
+async fn record_failure(
+    pool: &sqlx::SqlitePool,
+    row: &PendingDelivery,
+    attempt: i64,
+    response_status: Option<i64>,
+    error: String,
+) {
+    let dead = attempt >= MAX_DELIVERY_ATTEMPTS;
+    let delay = (5_i64 * 2_i64.pow((attempt.min(7) - 1) as u32)).min(300);
+    let modifier = format!("+{delay} seconds");
+    let _ = sqlx::query(
+        r#"UPDATE webhook_deliveries
+           SET status = ?, attempts = ?, response_status = ?, last_error = ?,
+               next_attempt_at = datetime('now', ?)
+           WHERE event_id = ? AND webhook_id = ?"#,
+    )
+    .bind(if dead { "dead_letter" } else { "retry" })
+    .bind(attempt)
+    .bind(response_status)
+    .bind(error.chars().take(2000).collect::<String>())
+    .bind(modifier)
+    .bind(&row.event_id)
+    .bind(&row.webhook_id)
+    .execute(pool)
+    .await;
 }
 
 async fn deliver_one(pool: &sqlx::SqlitePool, row: PendingDelivery) {
@@ -383,8 +554,17 @@ async fn deliver_one(pool: &sqlx::SqlitePool, row: PendingDelivery) {
             return;
         }
     };
+    let vetted = match vet_delivery_url(&row.url).await {
+        Ok(vetted) => vetted,
+        Err(error) => {
+            record_failure(pool, &row, row.attempts + 1, None, error).await;
+            return;
+        }
+    };
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(&vetted.host, vetted.socket)
         .build()
     {
         Ok(client) => client,
@@ -393,14 +573,19 @@ async fn deliver_one(pool: &sqlx::SqlitePool, row: PendingDelivery) {
             return;
         }
     };
+    let sent_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string());
     let mut request = client
         .post(&row.url)
         .header("Content-Type", "application/json")
         .header("X-Email-Event", &row.event_type)
         .header("X-Email-Event-ID", &row.event_id)
+        .header("X-Email-Timestamp", &sent_at)
         .body(body.clone());
     if let Some(secret) = &row.secret {
-        request = request.header("X-Email-Signature", signature(&body, secret));
+        request = request.header("X-Email-Signature", signature(&sent_at, &body, secret));
     }
 
     let attempt = row.attempts + 1;
@@ -565,7 +750,10 @@ mod tests {
     #[tokio::test]
     async fn dispatcher_records_success_and_retryable_failure() {
         let success_pool = setup().await;
-        webhook(&success_pool, &server(StatusCode::NO_CONTENT).await, None).await;
+        let success_url = server(StatusCode::NO_CONTENT).await;
+        std::env::set_var("EMAIL_RS_ALLOW_INSECURE_HTTP", "true");
+        std::env::set_var("EMAIL_RS_WEBHOOK_ALLOWLIST", &success_url);
+        webhook(&success_pool, &success_url, None).await;
         fire_webhooks(
             &success_pool,
             "account-1",
@@ -583,12 +771,9 @@ mod tests {
         assert_eq!(success, ("delivered".to_string(), 1, 204));
 
         let failure_pool = setup().await;
-        webhook(
-            &failure_pool,
-            &server(StatusCode::INTERNAL_SERVER_ERROR).await,
-            None,
-        )
-        .await;
+        let failure_url = server(StatusCode::INTERNAL_SERVER_ERROR).await;
+        std::env::set_var("EMAIL_RS_WEBHOOK_ALLOWLIST", &failure_url);
+        webhook(&failure_pool, &failure_url, None).await;
         fire_webhooks(
             &failure_pool,
             "account-1",
@@ -604,6 +789,147 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(failure, ("retry".to_string(), 1, 500));
+    }
+
+    #[test]
+    fn private_loopback_and_metadata_literals_are_blocked() {
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.1.9",
+            "172.16.0.1",
+            "169.254.169.254",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+        ] {
+            let parsed: std::net::IpAddr = ip.parse().unwrap();
+            assert!(ip_is_blocked(parsed), "{ip} should be blocked");
+        }
+        for ip in ["1.1.1.1", "8.8.8.8", "2001:4860:4860::8888"] {
+            let parsed: std::net::IpAddr = ip.parse().unwrap();
+            assert!(!ip_is_blocked(parsed), "{ip} should be public");
+        }
+    }
+
+    #[test]
+    fn webhook_urls_must_be_https_unless_the_dev_flag_is_set() {
+        let locked = crate::config::WebhookPolicy {
+            allow_insecure_http: false,
+            allowlist: vec![],
+        };
+        let open = crate::config::WebhookPolicy {
+            allow_insecure_http: true,
+            allowlist: vec![],
+        };
+        assert!(parse_webhook_url("https://hooks.example.com/email", &locked).is_ok());
+        assert!(parse_webhook_url("http://hooks.example.com/email", &locked).is_err());
+        assert!(parse_webhook_url("http://hooks.example.com/email", &open).is_ok());
+        assert!(parse_webhook_url("ftp://hooks.example.com/email", &open).is_err());
+        assert!(parse_webhook_url("https://user:pass@hooks.example.com/", &locked).is_err());
+    }
+
+    #[tokio::test]
+    async fn delivery_refuses_a_loopback_target_that_is_not_allowlisted() {
+        std::env::remove_var("EMAIL_RS_ALLOW_INSECURE_HTTP");
+        std::env::remove_var("EMAIL_RS_WEBHOOK_ALLOWLIST");
+        let err = vet_delivery_url("http://127.0.0.1:9/hook")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("private") || err.contains("https") || err.contains("loopback"),
+            "{err}"
+        );
+        let literal = vet_delivery_url("https://127.0.0.1/hook")
+            .await
+            .unwrap_err();
+        assert!(
+            literal.contains("private") || literal.contains("loopback"),
+            "{literal}"
+        );
+        let metadata = vet_delivery_url("https://169.254.169.254/latest")
+            .await
+            .unwrap_err();
+        assert!(
+            metadata.contains("private")
+                || metadata.contains("metadata")
+                || metadata.contains("link-local"),
+            "{metadata}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_refuses_a_redirect_and_pins_the_resolved_address() {
+        std::env::set_var("EMAIL_RS_ALLOW_INSECURE_HTTP", "true");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/",
+                    post(|| async {
+                        (
+                            StatusCode::FOUND,
+                            [("Location", "http://169.254.169.254/latest")],
+                            "nope",
+                        )
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let url = format!("http://{address}/");
+        std::env::set_var("EMAIL_RS_WEBHOOK_ALLOWLIST", &url);
+        let pool = setup().await;
+        webhook(&pool, &url, Some("topsecret")).await;
+        fire_webhooks(
+            &pool,
+            "account-1",
+            "message.updated",
+            serde_json::json!({"eventId": "redir-1"}),
+        )
+        .await;
+        assert_eq!(dispatch_due(&pool).await.unwrap(), 1);
+        let status: (String, i64) = sqlx::query_as(
+            "SELECT status, response_status FROM webhook_deliveries WHERE event_id = 'redir-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Redirects are not followed, so a 302 is a failed delivery, not a call
+        // to the metadata address in Location.
+        assert_eq!(status.0, "retry");
+        assert_eq!(status.1, 302);
+        std::env::remove_var("EMAIL_RS_WEBHOOK_ALLOWLIST");
+    }
+
+    #[test]
+    fn timestamped_signature_covers_timestamp_and_body_and_rejects_replay() {
+        let body = r#"{"id":"event-1"}"#;
+        let signed = signature("1700000000", body, "topsecret");
+        assert!(signature_matches("1700000000", body, "topsecret", &signed));
+        // A body-only MAC of the same bytes does not verify.
+        let body_only = {
+            let key = hmac_sha256::HMAC::mac(body.as_bytes(), b"topsecret");
+            key.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        assert!(!signature_matches(
+            "1700000000",
+            body,
+            "topsecret",
+            &format!("sha256={body_only}")
+        ));
+        // Replaying the same body under a different timestamp fails.
+        assert!(!signature_matches("1700000099", body, "topsecret", &signed));
+        assert!(!signature_matches("1700000000", body, "other", &signed));
+        assert!(signed.starts_with("sha256="));
     }
 
     #[test]
