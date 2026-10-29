@@ -10,11 +10,10 @@ jobs:
   clean-checkout:
     name: Clean checkout workspace
     # The bare self-hosted pool has no Rust toolchain (job 123467070998:
-    # `cargo: command not found`). rdpapp's Rust jobs pin the rust-labelled
-    # runner; rustnzb and vogt install a pinned toolchain on a bare runner.
-    # Do both: the label selects a runner that can link native deps, and
-    # dtolnay/rust-toolchain makes `cargo` present even when the image has none.
-    runs-on: [self-hosted, rust]
+    # `cargo: command not found`). rdpapp, rustnzb and rustTorrent pin the
+    # rust-heavy runner; dtolnay/rust-toolchain makes `cargo` present even
+    # when the image has none.
+    runs-on: [self-hosted, rust-heavy]
     env:
       DATABASE_URL: sqlite:///tmp/email-test.db
     steps:
@@ -27,7 +26,7 @@ jobs:
             exit 1
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: '1.88.0'
           components: rustfmt, clippy
