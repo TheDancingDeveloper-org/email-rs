@@ -11,7 +11,7 @@ permissions:
 jobs:
   linux-binary:
     name: Linux server and Fluent desktop binaries
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +27,7 @@ jobs:
       - name: Build binary
         run: |
           cargo build --release --locked -p email-server -p email-desktop-fluent
+          mkdir -p release
           cp target/release/email-server release/email-server
           cp target/release/email-desktop-fluent release/email-desktop-fluent
           cd release && tar czf ../email-rs-linux-x86_64.tar.gz .
@@ -38,7 +39,9 @@ jobs:
 
   docker:
     name: Docker image (GHCR)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, docker, publish]
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +54,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/ausagentsmith-org/email-rs
+          images: ghcr.io/thedancingdeveloper-org/email-rs
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -60,6 +63,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/build-push-action@v6
+        id: image
         with:
           context: .
           push: true
@@ -67,3 +71,21 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Record the published digest
+        run: |
+          set -euo pipefail
+          test -n "${{ steps.image.outputs.digest }}"
+          echo "digest ${{ steps.image.outputs.digest }}"
+
+  release-notes:
+    name: Put the image digest in the release notes
+    needs: docker
+    runs-on: [self-hosted]
+    steps:
+      - name: Append digest
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            Container image: `ghcr.io/thedancingdeveloper-org/email-rs@${{ needs.docker.outputs.digest }}`
+          append_body: true
