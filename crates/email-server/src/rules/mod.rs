@@ -401,80 +401,103 @@ pub async fn apply_rules_to_message(
 }
 
 async fn apply_action(pool: &SqlitePool, account_id: &str, msg_id: &str, action: &RuleAction) {
-    let result: std::result::Result<_, sqlx::Error> = match action.action_type.as_str() {
-        "mark_read" => sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
-            .bind(msg_id)
-            .execute(pool)
-            .await
-            .map(|_| ()),
-        "mark_unread" => sqlx::query("UPDATE messages SET is_read = 0 WHERE id = ?")
-            .bind(msg_id)
-            .execute(pool)
-            .await
-            .map(|_| ()),
-        "flag" => sqlx::query("UPDATE messages SET is_flagged = 1 WHERE id = ?")
-            .bind(msg_id)
-            .execute(pool)
-            .await
-            .map(|_| ()),
-        "unflag" => sqlx::query("UPDATE messages SET is_flagged = 0 WHERE id = ?")
-            .bind(msg_id)
-            .execute(pool)
-            .await
-            .map(|_| ()),
-        "archive" => {
-            // Look up the archive folder for this account.
-            let folder_id: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM folders WHERE account_id = ? AND special_use = 'archive' LIMIT 1",
-            )
-            .bind(account_id)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-
-            if let Some(folder_id) = folder_id {
-                sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
-                    .bind(&folder_id)
-                    .bind(msg_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ())
-            } else {
-                // No archive folder — skip silently.
-                return;
-            }
-        }
-        "delete" => sqlx::query("DELETE FROM messages WHERE id = ?")
-            .bind(msg_id)
-            .execute(pool)
-            .await
-            .map(|_| ()),
-        "move_to_folder" => {
-            if let Some(folder_id) = &action.action_value {
-                sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
-                    .bind(folder_id)
-                    .bind(msg_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ())
-            } else {
-                // No folder specified — skip.
-                return;
-            }
-        }
-        other => {
-            tracing::warn!("unknown rule action type: {}", other);
+    // BEGIN IMMEDIATE so a rule write waits out busy_timeout instead of
+    // failing SQLITE_BUSY after a deferred read (WI-587).
+    let mut tx = match crate::db::begin_write(pool).await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!("rule action transaction failed: {}", error);
             return;
         }
     };
 
-    if let Err(e) = result {
-        tracing::warn!(
-            "rule action '{}' failed for message {}: {}",
-            action.action_type,
-            msg_id,
-            e
-        );
+    let written: std::result::Result<bool, sqlx::Error> = async {
+        match action.action_type.as_str() {
+            "mark_read" => {
+                sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            "mark_unread" => {
+                sqlx::query("UPDATE messages SET is_read = 0 WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            "flag" => {
+                sqlx::query("UPDATE messages SET is_flagged = 1 WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            "unflag" => {
+                sqlx::query("UPDATE messages SET is_flagged = 0 WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            "archive" => {
+                let folder_id: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM folders WHERE account_id = ? AND special_use = 'archive' LIMIT 1",
+                )
+                .bind(account_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(folder_id) = folder_id else {
+                    return Ok(false);
+                };
+                sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
+                    .bind(&folder_id)
+                    .bind(msg_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            "delete" => {
+                sqlx::query("DELETE FROM messages WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            "move_to_folder" => {
+                let Some(folder_id) = &action.action_value else {
+                    return Ok(false);
+                };
+                sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
+                    .bind(folder_id)
+                    .bind(msg_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            other => {
+                tracing::warn!("unknown rule action type: {}", other);
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    .await;
+
+    match written {
+        Ok(true) => {
+            if let Err(error) = tx.commit().await {
+                tracing::warn!(
+                    "rule action '{}' commit failed for message {}: {}",
+                    action.action_type,
+                    msg_id,
+                    error
+                );
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(
+                "rule action '{}' failed for message {}: {}",
+                action.action_type,
+                msg_id,
+                error
+            );
+        }
     }
 }
 

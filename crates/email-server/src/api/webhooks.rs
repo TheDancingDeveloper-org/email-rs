@@ -275,21 +275,6 @@ pub async fn fire_webhooks(
             return;
         }
     };
-    if let Err(error) = sqlx::query(
-        r#"INSERT OR IGNORE INTO webhook_events (id, event_type, account_id, data_json)
-           VALUES (?, ?, ?, ?)"#,
-    )
-    .bind(&event_id)
-    .bind(event)
-    .bind(account_id)
-    .bind(data_json)
-    .execute(pool)
-    .await
-    {
-        tracing::warn!(%error, "failed to persist webhook event");
-        return;
-    }
-
     let rows = match sqlx::query_as::<_, WebhookRow>(
         r#"SELECT id, url, secret, events, account_id, enabled, created_at
            FROM webhooks
@@ -307,6 +292,30 @@ pub async fn fire_webhooks(
         }
     };
 
+    // BEGIN IMMEDIATE: a deferred insert that has already read returns
+    // SQLITE_BUSY immediately and ignores busy_timeout (WI-587).
+    let mut tx = match crate::db::begin_write(pool).await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(%error, "webhook event transaction failed");
+            return;
+        }
+    };
+    if let Err(error) = sqlx::query(
+        r#"INSERT OR IGNORE INTO webhook_events (id, event_type, account_id, data_json)
+           VALUES (?, ?, ?, ?)"#,
+    )
+    .bind(&event_id)
+    .bind(event)
+    .bind(account_id)
+    .bind(&data_json)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::warn!(%error, "failed to persist webhook event");
+        return;
+    }
+
     for webhook in rows
         .into_iter()
         .filter(|webhook| event_matches(&webhook.events, event))
@@ -317,11 +326,14 @@ pub async fn fire_webhooks(
         )
         .bind(&event_id)
         .bind(&webhook.id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         {
             tracing::warn!(%error, "failed to enqueue webhook delivery");
         }
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(%error, "webhook event commit failed");
     }
 }
 

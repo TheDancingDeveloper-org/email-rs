@@ -200,6 +200,9 @@ impl ImapSyncEngine {
         // so the first fetch uses "ALL" and pulls full history).
         let folders = provider.list_folders().await?;
 
+        // One immediate transaction. A deferred upsert per folder overlaps
+        // the workers and returns SQLITE_BUSY without waiting (WI-587).
+        let mut tx = crate::db::begin_write(&self.pool).await?;
         for folder in &folders {
             let folder_id = Uuid::new_v4().to_string();
             sqlx::query(
@@ -214,9 +217,10 @@ impl ImapSyncEngine {
             .bind(&folder.name)
             .bind(&folder.full_path)
             .bind(&folder.special_use)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
+        tx.commit().await?;
 
         // Reload folder records so we have the actual DB ids; skip excluded folders.
         let db_folders: Vec<FolderRecord> = sqlx::query_as::<_, FolderRecord>(
@@ -548,6 +552,28 @@ async fn sync_folder(
                 .await?;
         }
     }
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE folder_id = ?")
+        .bind(&db_folder.id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(message_count);
+
+    let unread: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_read = 0")
+            .bind(&db_folder.id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap_or(unread_count);
+
+    sqlx::query(
+        "UPDATE folders SET unread_count = ?, total_count = ?, synced_at = datetime('now') WHERE id = ?",
+    )
+    .bind(unread)
+    .bind(total)
+    .bind(&db_folder.id)
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
 
     // Apply rules to newly inserted messages now that the transaction is committed.
@@ -580,28 +606,6 @@ async fn sync_folder(
             }
         });
     }
-
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE folder_id = ?")
-        .bind(&db_folder.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap_or(message_count);
-
-    let unread: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_read = 0")
-            .bind(&db_folder.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(unread_count);
-
-    sqlx::query(
-        "UPDATE folders SET unread_count = ?, total_count = ?, synced_at = datetime('now') WHERE id = ?",
-    )
-    .bind(unread)
-    .bind(total)
-    .bind(&db_folder.id)
-    .execute(&pool)
-    .await?;
 
     // Background: pre-fetch bodies for the most recent uncached messages so they open instantly.
     let pf_provider = provider;
@@ -666,10 +670,24 @@ async fn prefetch_uncached_bodies(
     match provider.fetch_bodies_batch(folder_path, &uids).await {
         Ok(bodies) => {
             let fetched = bodies.len();
+            // One immediate transaction for the folder's body rows. A deferred
+            // write per body races other folders' writers and returns
+            // SQLITE_BUSY without waiting out busy_timeout (WI-587).
+            let mut tx = match crate::db::begin_write(&pool).await {
+                Ok(tx) => tx,
+                Err(e) => {
+                    warn!(
+                        "body prefetch transaction failed for {}: {}",
+                        folder_path, e
+                    );
+                    return;
+                }
+            };
+            let mut stored: Vec<(u32, String, Option<String>, Option<String>)> = Vec::new();
             for (uid, body) in bodies {
                 if let Some(msg_id) = id_by_uid.get(&uid) {
-                    if let Err(error) = crate::api::messages::cache_provider_attachments(
-                        &pool,
+                    if let Err(error) = crate::api::messages::cache_provider_attachments_tx(
+                        &mut tx,
                         msg_id,
                         &body.attachments,
                     )
@@ -686,20 +704,30 @@ async fn prefetch_uncached_bodies(
                     .bind(&body.html_body)
                     .bind(&body.text_body)
                     .bind(&body.raw_headers)
-                    .execute(&pool)
+                    .execute(&mut *tx)
                     .await
                     {
                         warn!("failed to store prefetched body uid {}: {}", uid, e);
-                    } else if let Err(e) = crate::clean::store(
-                        &pool,
-                        msg_id,
-                        body.text_body.as_deref(),
-                        body.html_body.as_deref(),
-                    )
-                    .await
-                    {
-                        warn!("failed to clean prefetched body uid {}: {}", uid, e);
+                    } else {
+                        stored.push((
+                            uid,
+                            msg_id.clone(),
+                            body.text_body.clone(),
+                            body.html_body.clone(),
+                        ));
                     }
+                }
+            }
+            if let Err(e) = tx.commit().await {
+                warn!("body prefetch commit failed for {}: {}", folder_path, e);
+                return;
+            }
+            for (uid, msg_id, text_body, html_body) in stored {
+                if let Err(e) =
+                    crate::clean::store(&pool, &msg_id, text_body.as_deref(), html_body.as_deref())
+                        .await
+                {
+                    warn!("failed to clean prefetched body uid {}: {}", uid, e);
                 }
             }
             info!("pre-fetched {} bodies for folder {}", fetched, folder_path);
@@ -1117,5 +1145,43 @@ mod tests {
             "the refused refresh is not repeated by every folder"
         );
         assert!(synced_labels(&pool).await < 202);
+    }
+
+    /// File-backed WAL, 202 folders, 4 workers, instant fake IMAP. This is
+    /// the case that returned "database is locked" about one run in three
+    /// when writers used a deferred BEGIN (WI-587).
+    #[tokio::test]
+    async fn parallel_folder_sync_on_a_file_db_never_reports_database_is_locked() {
+        let path = std::env::temp_dir().join(format!("email-rs-wi587-{}.db", Uuid::new_v4()));
+        let url = format!("sqlite://{}", path.display());
+        let (pool, _) = crate::db::create_pool(&url).await.unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('a','A','a@example.test','gmail','oauth2')")
+            .execute(&pool).await.unwrap();
+        let clock = FakeClock::new(1_000_000);
+        let oauth = FakeOAuth::new(clock, 3600);
+        let provider = Arc::new(OAuthMailbox {
+            tokens: oauth.source(&format!("a-{}", Uuid::new_v4())),
+            oauth,
+            folders: 202,
+            step: 0,
+            connects: AtomicUsize::new(0),
+            on_connect: None,
+        });
+        let result = ImapSyncEngine::new(pool.clone(), 60)
+            .sync_provider("a", provider, None, None)
+            .await;
+        let error = result
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        assert!(
+            !error.to_lowercase().contains("database is locked"),
+            "file-backed parallel sync must not report a lock: {error}"
+        );
+        assert!(error.is_empty(), "sync failed: {error}");
+        assert_eq!(synced_labels(&pool).await, 202);
     }
 }
