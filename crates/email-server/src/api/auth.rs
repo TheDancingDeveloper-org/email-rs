@@ -339,9 +339,6 @@ pub async fn gmail_callback(
         )
             .into_response();
     }
-    if let Some(account_id) = pending.account_id {
-        return update_account_token(&app_state, &account_id, &token_json, token_expiry).await;
-    }
 
     let (email, name) = match fetch_google_userinfo(&stored.access_token).await {
         Ok(u) => u,
@@ -354,8 +351,9 @@ pub async fn gmail_callback(
         }
     };
 
-    match upsert_account(
-        &app_state.pool,
+    finish_oauth(
+        &app_state,
+        pending.account_id.as_deref(),
         &email,
         &name,
         "gmail",
@@ -363,17 +361,6 @@ pub async fn gmail_callback(
         token_expiry,
     )
     .await
-    {
-        Ok(aid) => {
-            spawn_sync(app_state.pool.clone(), app_state.event_tx.clone(), aid);
-            Redirect::to("/?oauth=success").into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
 }
 
 // ── Microsoft / Outlook ───────────────────────────────────────────────────────
@@ -471,9 +458,6 @@ pub async fn microsoft_callback(
         )
             .into_response();
     }
-    if let Some(account_id) = pending.account_id {
-        return update_account_token(&app_state, &account_id, &token_json, token_expiry).await;
-    }
 
     let (email, name) = match fetch_microsoft_userinfo(&stored.access_token).await {
         Ok(u) => u,
@@ -486,12 +470,74 @@ pub async fn microsoft_callback(
         }
     };
 
-    match upsert_account(
-        &app_state.pool,
+    finish_oauth(
+        &app_state,
+        pending.account_id.as_deref(),
         &email,
         &name,
         "microsoft365",
         &token_json,
+        token_expiry,
+    )
+    .await
+}
+
+/// Bind a completed OAuth grant. A reconnect (`account_id` set) may only
+/// refresh the token of the account it named: the verified mailbox and the
+/// provider must already be that account's. A different identity is refused
+/// and the stored token is left untouched, so a `mail.accounts.connect`
+/// holder cannot silently re-point an account at another mailbox or provider.
+/// A first connect (no account id) still upserts by verified email and provider.
+async fn finish_oauth(
+    app_state: &Arc<AppState>,
+    account_id: Option<&str>,
+    email: &str,
+    name: &str,
+    provider_type: &str,
+    token_json: &str,
+    token_expiry: Option<String>,
+) -> Response {
+    if let Some(account_id) = account_id {
+        let existing: Option<(String, String)> =
+            match sqlx::query_as("SELECT email, provider_type FROM accounts WHERE id = ?")
+                .bind(account_id)
+                .fetch_optional(&app_state.pool)
+                .await
+            {
+                Ok(row) => row,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": e.to_string() })),
+                    )
+                        .into_response()
+                }
+            };
+        let Some((account_email, account_provider)) = existing else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "account not found" })),
+            )
+                .into_response();
+        };
+        if !account_email.eq_ignore_ascii_case(email) || account_provider != provider_type {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "OAuth identity does not match this account"
+                })),
+            )
+                .into_response();
+        }
+        return update_account_token(app_state, account_id, token_json, token_expiry).await;
+    }
+
+    match upsert_account(
+        &app_state.pool,
+        email,
+        name,
+        provider_type,
+        token_json,
         token_expiry,
     )
     .await
@@ -547,5 +593,141 @@ async fn update_account_token(
             );
             Redirect::to("/?oauth=success").into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{finish_oauth, upsert_account};
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+
+    async fn pool() -> sqlx::SqlitePool {
+        let path = format!("/tmp/email_oauth_identity_{}.db", uuid::Uuid::new_v4());
+        let (pool, _) = crate::db::create_pool(&format!("sqlite:{path}"))
+            .await
+            .unwrap();
+        pool
+    }
+
+    async fn body_error(response: axum::response::Response) -> (StatusCode, String) {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, value["error"].as_str().unwrap().to_string())
+    }
+
+    /// Reconnecting an existing account with a token whose verified identity is
+    /// a different mailbox (or a different provider) must be rejected, and the
+    /// account's stored token must be left as it was.
+    #[tokio::test]
+    async fn reconnect_rejects_a_different_identity_and_keeps_the_token() {
+        let pool = pool().await;
+        let state = std::sync::Arc::new(crate::state::AppState::new(pool.clone(), false));
+        let account_id = upsert_account(
+            &pool,
+            "owner@example.com",
+            "Owner",
+            "gmail",
+            r#"{"access_token":"original"}"#,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let response = finish_oauth(
+            &state,
+            Some(&account_id),
+            "attacker@example.com",
+            "Attacker",
+            "gmail",
+            r#"{"access_token":"stolen"}"#,
+            None,
+        )
+        .await;
+        let (status, error) = body_error(response).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error, "OAuth identity does not match this account");
+
+        // Same mailbox, different provider: still a re-point, still rejected.
+        let response = finish_oauth(
+            &state,
+            Some(&account_id),
+            "owner@example.com",
+            "Owner",
+            "microsoft365",
+            r#"{"access_token":"other-provider"}"#,
+            None,
+        )
+        .await;
+        let (status, _) = body_error(response).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let stored: String =
+            sqlx::query_scalar("SELECT oauth_token_json FROM accounts WHERE id = ?")
+                .bind(&account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let opened = crate::credentials::open(&stored).unwrap();
+        assert!(opened.contains("original"), "{opened}");
+        assert!(!opened.contains("stolen"));
+        assert!(!opened.contains("other-provider"));
+    }
+
+    #[tokio::test]
+    async fn reconnect_accepts_the_same_identity() {
+        let pool = pool().await;
+        let state = std::sync::Arc::new(crate::state::AppState::new(pool.clone(), false));
+        let account_id = upsert_account(
+            &pool,
+            "owner@example.com",
+            "Owner",
+            "gmail",
+            r#"{"access_token":"original"}"#,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let response = finish_oauth(
+            &state,
+            Some(&account_id),
+            "Owner@Example.com",
+            "Owner",
+            "gmail",
+            r#"{"access_token":"refreshed"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let stored: String =
+            sqlx::query_scalar("SELECT oauth_token_json FROM accounts WHERE id = ?")
+                .bind(&account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let opened = crate::credentials::open(&stored).unwrap();
+        assert!(opened.contains("refreshed"), "{opened}");
+    }
+
+    #[tokio::test]
+    async fn reconnect_of_an_unknown_account_is_not_found() {
+        let pool = pool().await;
+        let state = std::sync::Arc::new(crate::state::AppState::new(pool, false));
+        let response = finish_oauth(
+            &state,
+            Some("does-not-exist"),
+            "owner@example.com",
+            "Owner",
+            "gmail",
+            r#"{"access_token":"x"}"#,
+            None,
+        )
+        .await;
+        let (status, error) = body_error(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error, "account not found");
     }
 }
