@@ -1,0 +1,13 @@
+[package]
+name = "email-ui"
+version = "0.7.0"
+edition = "2021"
+publish = false
+description = "F0 spike: fluent2-egui client skeleton. Not part of the default workspace build."
+
+[features]
+default = []
+# Opt-in only. The workspace default members do not build this crate.
+spike = []
+
+[dependencies]

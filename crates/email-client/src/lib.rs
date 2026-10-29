@@ -44,6 +44,26 @@ pub enum EmailClientError {
     SyncEvent(#[from] serde_json::Error),
 }
 
+/// Credential owned by one client. A wasm host must pass this instead of
+/// [`set_default_bearer_token`], which is process-wide and not available
+/// when several instances share a JS worker.
+#[derive(Clone, Debug, Default)]
+pub struct ClientCredential {
+    bearer_token: Option<String>,
+}
+
+impl ClientCredential {
+    pub fn bearer(token: impl Into<String>) -> Self {
+        Self {
+            bearer_token: Some(token.into()),
+        }
+    }
+
+    pub fn anonymous() -> Self {
+        Self { bearer_token: None }
+    }
+}
+
 #[derive(Clone)]
 pub struct EmailClient {
     base_url: Url,
@@ -70,6 +90,14 @@ impl EmailClient {
 
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
         self.bearer_token = Some(token.into());
+        self
+    }
+
+    /// Per-instance credential. Unlike [`set_default_bearer_token`], this
+    /// never writes process state, so two clients (and a wasm instance)
+    /// cannot clobber each other.
+    pub fn with_credential(mut self, credential: ClientCredential) -> Self {
+        self.bearer_token = credential.bearer_token;
         self
     }
 
@@ -691,6 +719,25 @@ mod tests {
             request.headers()[reqwest::header::AUTHORIZATION],
             "Bearer test-token"
         );
+    }
+
+    #[test]
+    fn credential_is_per_instance_and_does_not_touch_the_process_default() {
+        set_default_bearer_token(Some("process".into()));
+        let isolated = EmailClient::new("https://mail.example.test")
+            .unwrap()
+            .with_credential(ClientCredential::bearer("instance"));
+        let request = isolated
+            .authorized(isolated.http.get(isolated.endpoint_url("accounts")))
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer instance"
+        );
+        let other = EmailClient::new("https://mail.example.test").unwrap();
+        assert_eq!(other.bearer_token(), Some("process"));
+        set_default_bearer_token(None);
     }
 
     #[test]
