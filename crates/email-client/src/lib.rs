@@ -47,9 +47,25 @@ pub enum EmailClientError {
 /// Credential owned by one client. A wasm host must pass this instead of
 /// [`set_default_bearer_token`], which is process-wide and not available
 /// when several instances share a JS worker.
-#[derive(Clone, Debug, Default)]
+///
+/// [`EmailClient::with_credential`] replaces the token the client copied
+/// from the process default at construction. Passing
+/// [`ClientCredential::anonymous`] (or [`ClientCredential::none`], the same
+/// value) clears that default, so the client sends no `Authorization` header.
+#[derive(Clone, Default)]
 pub struct ClientCredential {
     bearer_token: Option<String>,
+}
+
+impl std::fmt::Debug for ClientCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientCredential")
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl ClientCredential {
@@ -59,8 +75,15 @@ impl ClientCredential {
         }
     }
 
+    /// No bearer token. [`EmailClient::with_credential`] with this value
+    /// clears a process default the client picked up at construction.
     pub fn anonymous() -> Self {
         Self { bearer_token: None }
+    }
+
+    /// Alias of [`Self::anonymous`].
+    pub fn none() -> Self {
+        Self::anonymous()
     }
 }
 
@@ -96,6 +119,11 @@ impl EmailClient {
     /// Per-instance credential. Unlike [`set_default_bearer_token`], this
     /// never writes process state, so two clients (and a wasm instance)
     /// cannot clobber each other.
+    ///
+    /// This replaces the token copied from the process default.
+    /// `with_credential(ClientCredential::none())` (and
+    /// [`ClientCredential::anonymous`]) clears that default: the client
+    /// then sends no `Authorization` header.
     pub fn with_credential(mut self, credential: ClientCredential) -> Self {
         self.bearer_token = credential.bearer_token;
         self
@@ -723,21 +751,40 @@ mod tests {
 
     #[test]
     fn credential_is_per_instance_and_does_not_touch_the_process_default() {
-        set_default_bearer_token(Some("process".into()));
+        let secret = "instance-secret-token";
+        let cred = ClientCredential::bearer(secret);
+        let rendered = format!("{cred:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains(secret));
+        assert_eq!(
+            format!("{:?}", ClientCredential::none()),
+            format!("{:?}", ClientCredential::anonymous())
+        );
+
         let isolated = EmailClient::new("https://mail.example.test")
             .unwrap()
-            .with_credential(ClientCredential::bearer("instance"));
+            .with_credential(cred);
         let request = isolated
             .authorized(isolated.http.get(isolated.endpoint_url("accounts")))
             .build()
             .unwrap();
         assert_eq!(
             request.headers()[reqwest::header::AUTHORIZATION],
-            "Bearer instance"
+            "Bearer instance-secret-token"
         );
-        let other = EmailClient::new("https://mail.example.test").unwrap();
-        assert_eq!(other.bearer_token(), Some("process"));
-        set_default_bearer_token(None);
+        // Construction still copies whatever the process default is, and
+        // with_credential replaces it without writing the global.
+        let cleared = EmailClient::new("https://mail.example.test")
+            .unwrap()
+            .with_credential(ClientCredential::none());
+        assert_eq!(cleared.bearer_token(), None);
+        let request = cleared
+            .authorized(cleared.http.get(cleared.endpoint_url("accounts")))
+            .build()
+            .unwrap();
+        assert!(!request
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
     }
 
     #[test]
