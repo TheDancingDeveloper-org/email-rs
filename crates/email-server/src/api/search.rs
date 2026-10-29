@@ -135,9 +135,9 @@ fn structured_search_parts(params: &SearchQuery) -> Vec<StructuredSearchPart> {
         params.subject.as_deref(),
         params.subject_op.as_deref(),
     );
-    // The explicit body filter matches the raw MIME parts on purpose: the
-    // orders backfill finds schema.org markup (`body=schema.org`) in HTML the
-    // clean body drops. Free-text `q` searches the clean body (WI-583).
+    // The explicit body filter matches the raw MIME parts on purpose: a
+    // structured search finds markup such as schema.org (`body=schema.org`) in
+    // HTML the clean body drops. Free-text `q` searches the clean body.
     push_text_search_part(
         &mut parts,
         "COALESCE(m.preview, '') || ' ' || COALESCE(mb.text_body, '') || ' ' || COALESCE(mb.html_body, '')",
@@ -347,7 +347,7 @@ async fn search_fts(
     // recipients=2, body (the clean current message)=2, quoted history=0.2.
     // Quoted history stays searchable so a reply that quotes mail we don't
     // hold can still be found, but a message that only quotes a term ranks
-    // below the messages that say it (WI-583).
+    // below the messages that say it.
     let rows = if let Some(aid) = account_id {
         sqlx::query_as::<_, MessageRow>(
             r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
@@ -387,7 +387,7 @@ async fn search_fts(
 /// The LIKE fallback when SQLite has no FTS5. It searches what the FTS index
 /// holds (subject, sender, recipients, preview, the clean current message and
 /// its quoted history) and ranks alike: a match only in quoted history comes
-/// last (WI-583). Unlike the index it can't drop link targets from the body.
+/// last. Unlike the index it can't drop link targets from the body.
 async fn search_like(
     state: &AppState,
     term: &str,
@@ -1275,7 +1275,7 @@ mod tests {
             .any(|m| m["id"] == "sl1"));
     }
 
-    // ── Clean-body search (WI-583) ──────────────────────────────────────────────
+    // ── Clean-body search ───────────────────────────────────────────────────────
 
     /// Cache a body the way sync does: store the MIME parts, then clean (and
     /// index) them.
@@ -1459,7 +1459,7 @@ mod tests {
         assert_eq!(ids(state.clone(), "/search?q=wombat").await, ["quotes"]);
         // JSON keys are not indexed.
         assert!(ids(state.clone(), "/search?q=name").await.is_empty());
-        // The orders backfill searches by sender with the structured filter.
+        // Structured sender search uses the structured filter.
         assert_eq!(
             ids(
                 state.clone(),
@@ -1487,7 +1487,7 @@ mod tests {
     async fn reindex_fills_bodies_cleaned_before_the_index() {
         let state = make_state(true).await;
         seed_clean_corpus(&state.pool).await;
-        // As left by WI-579: bodies cleaned, the index holding previews only.
+        // Bodies cleaned, the index holding previews only.
         sqlx::query("UPDATE messages_fts SET body = '', quoted = ''")
             .execute(&state.pool)
             .await
