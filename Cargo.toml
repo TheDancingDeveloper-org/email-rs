@@ -6,3 +6,4 @@ members = [
     "crates/email-types",
 ]
 resolver = "2"
+exclude = ["crates/email-ui"]
