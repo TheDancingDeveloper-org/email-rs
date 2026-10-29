@@ -28,7 +28,9 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool
     if file_path != ":memory:" && !file_path.is_empty() {
         if let Some(parent) = std::path::Path::new(&file_path).parent() {
             if parent != std::path::Path::new("") {
-                std::fs::create_dir_all(parent)?;
+                // Plaintext bodies and attachment blobs live here, so the
+                // directory must be private to this user.
+                ensure_private_dir(parent)?;
             }
         }
     }
@@ -80,6 +82,11 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool
         .connect_with(opts)
         .await?;
 
+    // SQLite creates the database, WAL and SHM with the process umask. Restrict
+    // the files we own to 0600 after opening so a checkpoint that recreates the
+    // WAL cannot leave them readable by other users.
+    restrict_database_files(std::path::Path::new(&file_path))?;
+
     Ok((pool, has_fts))
 }
 
@@ -94,6 +101,82 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<bool> {
             false
         }
     })
+}
+
+/// Create `dir` (and missing parents) and require it to be private (0700).
+fn ensure_private_dir(dir: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(dir)?;
+        if is_owned_by_us(&meta) {
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o700);
+                std::fs::set_permissions(dir, perms)?;
+            }
+        } else {
+            tracing::warn!(
+                path = %dir.display(),
+                "data directory is not owned by this process; leaving its permissions unchanged"
+            );
+        }
+        let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            anyhow::bail!(
+                "data directory {} is accessible to other users (mode {mode:o}); it must be 0700",
+                dir.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Restrict the database file and its WAL/SHM sidecars to 0600 when we own them.
+fn restrict_database_files(db: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["", "-wal", "-shm"] {
+            let path = std::path::PathBuf::from(format!("{}{suffix}", db.display()));
+            let meta = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !is_owned_by_us(&meta) {
+                tracing::warn!(
+                    path = %path.display(),
+                    "database file is not owned by this process; leaving its permissions unchanged"
+                );
+                continue;
+            }
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o600);
+                std::fs::set_permissions(&path, perms)?;
+            }
+        }
+    }
+    let _ = db;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_owned_by_us(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.uid() == current_uid()
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    unsafe extern "C" {
+        safe fn getuid() -> u32;
+    }
+    getuid()
 }
 
 /// Begin a transaction that will write, taking SQLite's write lock up front.
@@ -1212,5 +1295,77 @@ mod tests {
 
         pool.close().await;
         let _ = std::fs::remove_file(database_path);
+    }
+
+    #[tokio::test]
+    async fn file_database_is_private_to_the_owner() {
+        let dir = std::env::temp_dir().join(format!("email-rs-perms-{}", uuid::Uuid::new_v4()));
+        let database_path = dir.join("email.db");
+        let url = format!("sqlite://{}", database_path.display());
+
+        let (pool, _) = super::create_pool(&url).await.unwrap();
+        pool.close().await;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700, "data dir mode {dir_mode:o}");
+            for suffix in ["", "-wal", "-shm"] {
+                let path = std::path::PathBuf::from(format!("{}{suffix}", database_path.display()));
+                if path.exists() {
+                    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                    assert_eq!(mode, 0o600, "{} mode {mode:o}", path.display());
+                }
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn existing_world_readable_database_is_tightened() {
+        let dir = std::env::temp_dir().join(format!("email-rs-perms-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database_path = dir.join("email.db");
+        std::fs::write(&database_path, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+        }
+
+        let url = format!("sqlite://{}", database_path.display());
+        let (pool, _) = super::create_pool(&url).await.unwrap();
+        pool.close().await;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            let file_mode = std::fs::metadata(&database_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file_mode, 0o600);
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", database_path.display()));
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn unwritable_data_dir_fails() {
+        let blocker = std::env::temp_dir().join(format!("email-rs-file-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let url = format!("sqlite://{}/email.db", blocker.display());
+        let error = super::create_pool(&url).await.unwrap_err();
+        assert!(!error.to_string().is_empty());
+        let _ = std::fs::remove_file(&blocker);
     }
 }

@@ -7,6 +7,31 @@ Provider secrets require `EMAIL_RS_CREDENTIAL_KEY`, a stable base64-encoded
 IMAP/SMTP passwords are encrypted with AES-256-GCM before SQLite writes.
 Existing plaintext rows are migrated at startup. Store and back up the key in
 secrets management; losing it makes provider credentials unrecoverable.
+Existing plaintext rows are migrated at startup. Store and back up the key in
+secrets management; losing it makes provider credentials unrecoverable.
+
+## Data at rest
+
+What is encrypted: provider credentials only. OAuth token JSON and IMAP/SMTP
+passwords are AES-256-GCM ciphertext, and application passwords are Argon2id
+hashes. Session tokens are stored as SHA-256 hashes.
+
+What is not encrypted: message bodies, attachment blobs, calendar data, search
+indexes and account metadata sit in SQLite as plaintext. The protection is file
+permissions, not encryption. On startup the server creates the data directory
+at mode 0700 and the database file, its `-wal` and its `-shm` at mode 0600 on
+Unix. An existing file or directory is tightened to those modes only when this
+process owns it; anything owned by another user is left untouched and a warning
+is logged. Startup refuses to serve a data directory that is group- or
+world-accessible.
+
+There is no `/tmp` fallback. `DATABASE_URL` must point at a directory this
+process can create or already owns (the default is `$XDG_DATA_HOME/email-rs`,
+then `$HOME/.local/share/email-rs`). If none of those is set, startup
+fails with a clear error instead of writing mail to a shared directory. A deployment
+that already mounts its database at `/data` keeps that path; set
+`DATABASE_URL=sqlite:///data/email.db` as before.
+
 
 ## First user
 

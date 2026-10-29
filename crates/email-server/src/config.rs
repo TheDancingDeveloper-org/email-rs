@@ -76,13 +76,17 @@ impl Config {
             }
             #[cfg(not(target_os = "windows"))]
             {
-                // XDG_DATA_HOME/email-rs/email.db  →  ~/.local/share/email-rs/email.db
+                // No /tmp fallback: plaintext mail must not land in a
+                // directory shared with every local user.
                 let data_home = env::var("XDG_DATA_HOME")
                     .map(PathBuf::from)
+                    .or_else(|_| {
+                        env::var("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+                    })
                     .unwrap_or_else(|_| {
-                        env::var("HOME")
-                            .map(|h| PathBuf::from(h).join(".local/share"))
-                            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+                        panic!(
+                            "no data directory configured: set DATABASE_URL, or XDG_DATA_HOME or HOME (email-rs will not use /tmp)"
+                        )
                     });
                 format!(
                     "sqlite://{}",
@@ -135,4 +139,66 @@ fn exe_dir() -> PathBuf {
         .ok()
         .and_then(|p| p.parent().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(pairs: &[(&str, Option<&str>)]) -> Self {
+            let saved = ["DATABASE_URL", "XDG_DATA_HOME", "HOME"]
+                .into_iter()
+                .map(|name| (name, std::env::var(name).ok()))
+                .collect();
+            for (name, value) in pairs {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn database_url_from_env_is_used_verbatim() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let url = "sqlite:///var/lib/email-rs/email.db";
+        let _guard = EnvGuard::set(&[("DATABASE_URL", Some(url))]);
+        assert_eq!(Config::from_env().database_url, url);
+    }
+
+    #[test]
+    fn missing_data_dir_env_fails_instead_of_tmp() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("DATABASE_URL", None),
+            ("XDG_DATA_HOME", None),
+            ("HOME", None),
+        ]);
+        let result = std::panic::catch_unwind(Config::from_env);
+        assert!(
+            result.is_err(),
+            "from_env returned a config with no data dir"
+        );
+    }
 }
