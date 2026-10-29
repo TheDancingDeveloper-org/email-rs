@@ -24,8 +24,10 @@ jobs:
 
       - name: Install native desktop build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+          # Self-hosted runners execute as root and have no sudoers entry.
+          if [ "$(id -u)" -eq 0 ]; then APT=apt-get; else APT="sudo apt-get"; fi
+          $APT update
+          $APT install -y pkg-config libssl-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
       - name: Verify locked dependency resolution
         run: cargo metadata --locked --format-version 1 > /dev/null
