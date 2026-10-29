@@ -58,6 +58,8 @@ jobs:
   # Same server binary build as release.yml, publishing nothing.
   server-binaries:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
     runs-on: [self-hosted, rust-heavy]
     timeout-minutes: 180
     strategy:
@@ -79,11 +81,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: '1.95.0'
-          targets: ${{ matrix.target }}
-
       - name: Skip macOS when this runner is not macOS
         id: host
         shell: bash
@@ -102,6 +99,12 @@ jobs:
               ;;
           esac
 
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        if: steps.host.outputs.skip != 'true'
+        with:
+          toolchain: '1.95.0'
+          targets: ${{ matrix.target }}
+
       - name: Install the cross linker
         if: steps.host.outputs.skip != 'true' && matrix.native == false && !contains(matrix.target, 'apple')
         shell: bash
@@ -110,10 +113,12 @@ jobs:
           $APT update
           case "${{ matrix.target }}" in
             aarch64-unknown-linux-gnu)
-              $APT install -y gcc-aarch64-linux-gnu pkg-config libssl-dev
+              dpkg --add-architecture arm64
+              $APT update
+              $APT install -y gcc-aarch64-linux-gnu pkg-config libssl-dev:arm64
               ;;
             x86_64-pc-windows-gnu)
-              $APT install -y gcc-mingw-w64-x86-64 pkg-config libssl-dev
+              $APT install -y gcc-mingw-w64-x86-64
               ;;
           esac
 
@@ -123,6 +128,8 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_SYSROOT_DIR: /usr/aarch64-linux-gnu
         run: |
           cargo build --locked --release -p email-server --bin email-server --target "${{ matrix.target }}"
 
@@ -151,17 +158,21 @@ jobs:
           fi
           mkdir -p release-artifacts
           mv "$stage/$name" "release-artifacts/$name"
-          (cd release-artifacts && sha256sum "$name" > "${name}.sha256")
           cargo cyclonedx --manifest-path crates/email-server/Cargo.toml \
             --format json --spec-version 1.5 \
             --override-filename "email-server-${tag}-${target}-sbom"
           mv "crates/email-server/email-server-${tag}-${target}-sbom.json" \
             "release-artifacts/email-server-${tag}-${target}.cdx.json"
-          test -s "release-artifacts/${name}.sha256"
+          (cd release-artifacts && sha256sum -- * > SHA256SUMS)
+          test -s release-artifacts/SHA256SUMS
+          grep -q "${name}" release-artifacts/SHA256SUMS
+          grep -q ".cdx.json" release-artifacts/SHA256SUMS
           echo "dry run packaged ${name}; nothing published"
 
   desktop-binaries:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
     runs-on: [self-hosted, rust-heavy]
     timeout-minutes: 180
     strategy:
@@ -224,13 +235,15 @@ jobs:
             zip)
               cp "${bin}.exe" "$stage/email-desktop.exe"
               name="email-desktop-dry-run-${target}.zip"
-              (cd "$stage" && zip -q -r "../release-artifacts/$name" email-desktop.exe)
+              (cd "$stage" && zip -q -r "$name" email-desktop.exe)
+              mv "$stage/$name" "release-artifacts/$name"
               ;;
             *)
               cp "$bin" "$stage/email-desktop"
               name="email-desktop-dry-run-${target}.tar.gz"
-              tar -C "$stage" -czf "release-artifacts/$name" email-desktop
+              tar -C "$stage" -czf "$stage/$name" email-desktop
+              mv "$stage/$name" "release-artifacts/$name"
               ;;
           esac
-          (cd release-artifacts && sha256sum "$name" > "${name}.sha256")
+          (cd release-artifacts && sha256sum -- * > SHA256SUMS)
           echo "dry run packaged ${name}; nothing published"
