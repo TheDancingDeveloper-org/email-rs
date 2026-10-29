@@ -401,7 +401,8 @@ mod tests {
     use super::*;
 
     async fn setup_draft_state() -> Arc<AppState> {
-        let path = format!("/tmp/email_draft_test_{}.db", uuid::Uuid::new_v4());
+        let _db_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let path = _db_dir.path().join("email.db").display().to_string();
         let (pool, has_fts) = crate::db::create_pool(&format!("sqlite:{path}"))
             .await
             .unwrap();

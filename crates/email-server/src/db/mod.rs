@@ -103,33 +103,56 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<bool> {
     })
 }
 
-/// Create `dir` (and missing parents) and require it to be private (0700).
+/// Create `dir` (and missing parents) when they are missing, and set 0700
+/// only on directories this process creates. An existing directory is left
+/// as it is: group or other access is a warning, and startup refuses only
+/// a world-writable directory that has no sticky bit. Shared parents such
+/// as `/tmp` or `/var/lib` are never chmodded.
 fn ensure_private_dir(dir: &std::path::Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(dir)?;
-        if is_owned_by_us(&meta) {
-            let mode = meta.permissions().mode();
-            if mode & 0o077 != 0 {
-                let mut perms = meta.permissions();
-                perms.set_mode(0o700);
-                std::fs::set_permissions(dir, perms)?;
+        let mut current = std::path::PathBuf::new();
+        for component in dir.components() {
+            current.push(component);
+            if current.as_os_str().is_empty() {
+                continue;
             }
-        } else {
-            tracing::warn!(
-                path = %dir.display(),
-                "data directory is not owned by this process; leaving its permissions unchanged"
-            );
+            match std::fs::metadata(&current) {
+                Ok(meta) => {
+                    if !meta.is_dir() {
+                        anyhow::bail!("{} is not a directory", current.display());
+                    }
+                    let mode = meta.permissions().mode();
+                    // World-writable and not sticky: anyone can replace files.
+                    if mode & 0o002 != 0 && mode & 0o1000 == 0 {
+                        anyhow::bail!(
+                            "data directory {} is world-writable without the sticky bit (mode {:o})",
+                            current.display(),
+                            mode & 0o7777
+                        );
+                    }
+                    if mode & 0o077 != 0 {
+                        tracing::warn!(
+                            path = %current.display(),
+                            mode = format!("{:o}", mode & 0o777),
+                            "existing data directory is accessible to group or other users; leaving its permissions unchanged"
+                        );
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&current)?;
+                    let mut perms = std::fs::metadata(&current)?.permissions();
+                    perms.set_mode(0o700);
+                    std::fs::set_permissions(&current, perms)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
-        let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            anyhow::bail!(
-                "data directory {} is accessible to other users (mode {mode:o}); it must be 0700",
-                dir.display()
-            );
-        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)?;
     }
     Ok(())
 }
@@ -1154,7 +1177,8 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_identity_migration_creates_backup_and_reconciliation_marker() {
-        let database_path = format!("/tmp/email_legacy_{}.db", uuid::Uuid::new_v4());
+        let _db_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let database_path = _db_dir.path().join("email.db").display().to_string();
         let options = SqliteConnectOptions::new()
             .filename(&database_path)
             .create_if_missing(true);
@@ -1248,7 +1272,8 @@ mod tests {
 
     #[tokio::test]
     async fn full_migrations_upgrade_messages_without_logical_id() {
-        let database_path = format!("/tmp/email_logical_id_{}.db", uuid::Uuid::new_v4());
+        let _db_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let database_path = _db_dir.path().join("email.db").display().to_string();
         let options = SqliteConnectOptions::new()
             .filename(&database_path)
             .create_if_missing(true);
@@ -1324,19 +1349,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_world_readable_database_is_tightened() {
-        let dir = std::env::temp_dir().join(format!("email-rs-perms-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let database_path = dir.join("email.db");
-        std::fs::write(&database_path, b"").unwrap();
+    async fn existing_shared_parent_is_left_alone() {
+        let parent = std::env::temp_dir().join(format!("email-rs-shared-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&parent).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-            std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o644))
-                .unwrap();
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-
+        let dir = parent.join("data");
+        let database_path = dir.join("email.db");
         let url = format!("sqlite://{}", database_path.display());
         let (pool, _) = super::create_pool(&url).await.unwrap();
         pool.close().await;
@@ -1344,19 +1366,36 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let parent_mode = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                parent_mode, 0o755,
+                "pre-existing parent must not be chmodded"
+            );
             let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-            assert_eq!(dir_mode, 0o700);
-            let file_mode = std::fs::metadata(&database_path)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777;
-            assert_eq!(file_mode, 0o600);
+            assert_eq!(dir_mode, 0o700, "created directory mode {dir_mode:o}");
         }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", database_path.display()));
         }
         let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir(&parent);
+    }
+
+    #[tokio::test]
+    async fn world_writable_unsticky_directory_is_refused() {
+        let dir = std::env::temp_dir().join(format!("email-rs-ww-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let url = format!("sqlite://{}/email.db", dir.display());
+            let error = super::create_pool(&url).await.unwrap_err();
+            assert!(error.to_string().contains("world-writable"), "{error}");
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o777, "refused directory must not be chmodded");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
