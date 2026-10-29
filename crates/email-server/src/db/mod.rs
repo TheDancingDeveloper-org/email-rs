@@ -109,7 +109,29 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<bool> {
 pub async fn begin_write(
     pool: &SqlitePool,
 ) -> std::result::Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
-    pool.begin_with("BEGIN IMMEDIATE").await
+    // A reserved lock can still fail immediately (SQLITE_BUSY_SNAPSHOT) when
+    // another writer commits between this connection's last read and the
+    // upgrade. Retry a few times inside the busy timeout rather than failing
+    // the folder and dropping its mail.
+    let mut last = None;
+    for attempt in 0..8 {
+        match pool.begin_with("BEGIN IMMEDIATE").await {
+            Ok(tx) => return Ok(tx),
+            Err(error) if is_sqlite_locked(&error) && attempt < 7 => {
+                last = Some(error);
+                tokio::time::sleep(Duration::from_millis(50 * (attempt as u64 + 1))).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.expect("retry loop records the last lock error"))
+}
+
+fn is_sqlite_locked(error: &sqlx::Error) -> bool {
+    let message = error.to_string().to_lowercase();
+    message.contains("database is locked")
+        || message.contains("database is busy")
+        || message.contains("sqlite_busy")
 }
 
 async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {

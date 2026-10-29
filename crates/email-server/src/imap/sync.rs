@@ -295,6 +295,15 @@ impl ImapSyncEngine {
         if let Some(message) = auth_failure.get() {
             return Err(AppError::Auth(message.clone()));
         }
+        // A folder that failed to write is missing mail, not a successful
+        // sync. Dropping these errors left the account looking complete
+        // while folders were lost under writer contention.
+        if let Some(message) = errors.first() {
+            return Err(AppError::Provider(format!(
+                "{} folder(s) failed to sync: {message}",
+                errors.len()
+            )));
+        }
 
         if errors.is_empty() {
             if let Err(error) = crate::db::mark_account_reconciled(&pool, &account_id).await {
