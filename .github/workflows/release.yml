@@ -83,3 +83,218 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file "$notes" \
             clients/python/dist/*
+
+  # email-server binaries. Linux amd64 and arm64, plus Windows, are built on
+  # the estate rust-heavy pool (cross via cargo). macOS is built only when the
+  # runner is already macOS; the estate pool is Linux, so that target is
+  # skipped with a message rather than failing the release.
+  # email-desktop-fluent is not built (WI-722 retires it).
+  server-binaries:
+    needs: release
+    permissions:
+      contents: write
+    runs-on: [self-hosted, rust-heavy]
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            native: true
+          - target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            native: false
+          - target: x86_64-pc-windows-gnu
+            archive: zip
+            native: false
+          - target: aarch64-apple-darwin
+            archive: tar.gz
+            native: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: '1.95.0'
+          targets: ${{ matrix.target }}
+
+      - name: Skip macOS when this runner is not macOS
+        id: host
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            *-apple-darwin)
+              if [ "$(uname -s)" != Darwin ]; then
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                echo "The estate rust-heavy pool is not macOS; ${{ matrix.target }} is skipped."
+                echo "A macOS runner will build this target when one is in the pool."
+              else
+                echo "skip=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Install the cross linker
+        if: steps.host.outputs.skip != 'true' && matrix.native == false && !contains(matrix.target, 'apple')
+        shell: bash
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then APT=apt-get; else APT="sudo apt-get"; fi
+          $APT update
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              $APT install -y gcc-aarch64-linux-gnu pkg-config libssl-dev
+              ;;
+            x86_64-pc-windows-gnu)
+              $APT install -y gcc-mingw-w64-x86-64 pkg-config libssl-dev
+              ;;
+          esac
+
+      - name: Build email-server
+        if: steps.host.outputs.skip != 'true'
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: |
+          cargo build --locked --release -p email-server --bin email-server --target "${{ matrix.target }}"
+
+      - name: Install cargo-cyclonedx once
+        if: steps.host.outputs.skip != 'true'
+        shell: bash
+        run: |
+          if ! command -v cargo-cyclonedx >/dev/null 2>&1; then
+            cargo install --locked cargo-cyclonedx --version 0.5.7 --root "$RUNNER_TEMP/cyclonedx"
+            echo "$RUNNER_TEMP/cyclonedx/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Package, checksum and SBOM
+        if: steps.host.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          tag="$GITHUB_REF_NAME"
+          stage="$(mktemp -d)"
+          bin="target/${target}/release/email-server"
+          if [ "${{ matrix.archive }}" = zip ]; then
+            bin="${bin}.exe"
+            name="email-server-${tag}-${target}.zip"
+            cp "$bin" "$stage/email-server.exe"
+            (cd "$stage" && zip -q -r "$name" email-server.exe)
+          else
+            name="email-server-${tag}-${target}.tar.gz"
+            cp "$bin" "$stage/email-server"
+            tar -C "$stage" -czf "$stage/$name" email-server
+          fi
+          mkdir -p release-artifacts
+          mv "$stage/$name" "release-artifacts/$name"
+          (cd release-artifacts && sha256sum "$name" > "${name}.sha256")
+          cargo cyclonedx --manifest-path crates/email-server/Cargo.toml \
+            --format json --spec-version 1.5 \
+            --override-filename "email-server-${tag}-${target}-sbom"
+          mv "crates/email-server/email-server-${tag}-${target}-sbom.json" \
+            "release-artifacts/email-server-${tag}-${target}.cdx.json"
+
+      - name: Attach server binaries to the GitHub release
+        if: steps.host.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload "$GITHUB_REF_NAME" release-artifacts/* --clobber
+
+  # The egui desktop crate does not exist yet (F0 spike). Skip cleanly until
+  # crates/email-desktop/Cargo.toml lands. Never build email-desktop-fluent.
+  desktop-binaries:
+    needs: release
+    permissions:
+      contents: write
+    runs-on: [self-hosted, rust-heavy]
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            target: x86_64-unknown-linux-gnu
+            package: tar.gz
+          - os: windows
+            target: x86_64-pc-windows-gnu
+            package: zip
+          - os: macos
+            target: aarch64-apple-darwin
+            package: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip until the egui desktop crate exists
+        id: crate
+        shell: bash
+        run: |
+          if [ ! -f crates/email-desktop/Cargo.toml ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "crates/email-desktop/Cargo.toml is not in this revision."
+            echo "Desktop packaging is skipped until the egui app lands. email-desktop-fluent is not built."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip macOS when this runner is not macOS
+        if: steps.crate.outputs.skip != 'true'
+        id: host
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = macos ] && [ "$(uname -s)" != Darwin ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "The estate rust-heavy pool is not macOS; the macOS desktop package is skipped."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true'
+        with:
+          toolchain: '1.95.0'
+          targets: ${{ matrix.target }}
+
+      - name: Build the egui desktop app
+        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true'
+        shell: bash
+        run: |
+          cargo build --locked --release -p email-desktop --bin email-desktop --target "${{ matrix.target }}"
+
+      - name: Package the desktop app
+        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          tag="$GITHUB_REF_NAME"
+          stage="$(mktemp -d)"
+          bin="target/${target}/release/email-desktop"
+          mkdir -p release-artifacts
+          case "${{ matrix.package }}" in
+            zip)
+              cp "${bin}.exe" "$stage/email-desktop.exe"
+              name="email-desktop-${tag}-${target}.zip"
+              (cd "$stage" && zip -q -r "../release-artifacts/$name" email-desktop.exe)
+              ;;
+            *)
+              cp "$bin" "$stage/email-desktop"
+              name="email-desktop-${tag}-${target}.tar.gz"
+              tar -C "$stage" -czf "release-artifacts/$name" email-desktop
+              ;;
+          esac
+          (cd release-artifacts && sha256sum "$name" > "${name}.sha256")
+
+      - name: Attach desktop packages to the GitHub release
+        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload "$GITHUB_REF_NAME" release-artifacts/* --clobber
