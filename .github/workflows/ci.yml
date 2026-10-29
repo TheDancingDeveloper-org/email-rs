@@ -9,7 +9,7 @@ on:
 jobs:
   clean-checkout:
     name: Clean checkout workspace
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     env:
       DATABASE_URL: sqlite:///tmp/email-test.db
     steps:
@@ -43,14 +43,14 @@ jobs:
         run: cargo test --workspace --locked
 
   docker:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, docker]
     steps:
       - uses: actions/checkout@v4
       - name: Build production image from a clean checkout
         run: docker build --tag email-rs-ci .
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     defaults:
       run:
         working-directory: frontend
@@ -67,7 +67,7 @@ jobs:
       - run: npx vite build --outDir /tmp/frontend-dist --emptyOutDir
 
   mobile:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     defaults:
       run:
         working-directory: mobile
@@ -81,3 +81,43 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+
+  ci:
+    name: ci
+    needs: [clean-checkout, docker, frontend, mobile]
+    if: always()
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    steps:
+      - name: gate
+        env:
+          CLEAN: ${{ needs.clean-checkout.result }}
+          DOCKER: ${{ needs.docker.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+          MOBILE: ${{ needs.mobile.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for half in \
+            "clean-checkout:$CLEAN" \
+            "docker:$DOCKER" \
+            "frontend:$FRONTEND" \
+            "mobile:$MOBILE"
+          do
+            name="${half%%:*}"
+            result="${half#*:}"
+            case "$result" in
+              success|skipped)
+                echo "$name: $result"
+                ;;
+              *)
+                echo "$name: $result"
+                failed=1
+                ;;
+            esac
+          done
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+          echo "every required job passed or was skipped"
+
