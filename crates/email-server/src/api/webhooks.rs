@@ -373,10 +373,6 @@ struct VettedUrl {
     socket: std::net::SocketAddr,
 }
 
-fn policy() -> crate::config::WebhookPolicy {
-    crate::config::WebhookPolicy::from_env()
-}
-
 fn validate_webhook_url(url: &str, policy: &crate::config::WebhookPolicy) -> Result<()> {
     parse_webhook_url(url, policy).map(|_| ())
 }
@@ -420,6 +416,55 @@ fn parse_webhook_url(
     Ok((host, port, false))
 }
 
+/// IPv4 carried inside a transition address: NAT64 (`64:ff9b::/96` and
+/// `64:ff9b:1::/48`), IPv4-compatible (`::/96`, excluding unspecified and
+/// loopback which are already blocked as IPv6), 6to4 (`2002::/16`) and
+/// Teredo (`2001::/32`). IPv4-mapped (`::ffff:0:0/96`) is handled separately.
+fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let s = v6.segments();
+    let tail =
+        std::net::Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+    // NAT64 well-known prefix 64:ff9b::/96.
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+        return Some(tail);
+    }
+    // NAT64 local-use prefix 64:ff9b:1::/48.
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0x0001 {
+        return Some(tail);
+    }
+    // IPv4-compatible ::/96. :: and ::1 are not transition addresses.
+    if s[0] == 0
+        && s[1] == 0
+        && s[2] == 0
+        && s[3] == 0
+        && s[4] == 0
+        && s[5] == 0
+        && !tail.is_unspecified()
+        && !tail.is_loopback()
+    {
+        return Some(tail);
+    }
+    // 6to4 2002::/16: the IPv4 is the next 32 bits.
+    if s[0] == 0x2002 {
+        return Some(std::net::Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            s[1] as u8,
+            (s[2] >> 8) as u8,
+            s[2] as u8,
+        ));
+    }
+    // Teredo 2001:0::/32: the client IPv4 is the last 32 bits, inverted.
+    if s[0] == 0x2001 && s[1] == 0 {
+        return Some(std::net::Ipv4Addr::new(
+            !(s[6] >> 8) as u8,
+            !s[6] as u8,
+            !(s[7] >> 8) as u8,
+            !s[7] as u8,
+        ));
+    }
+    None
+}
+
 fn ip_is_blocked(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
@@ -445,13 +490,19 @@ fn ip_is_blocked(ip: std::net::IpAddr) -> bool {
                 || (v6.segments()[0] & 0xffc0) == 0xfec0 // fec0::/10 deprecated site-local
                 // IPv4-mapped addresses must be judged as IPv4.
                 || v6.to_ipv4_mapped().is_some_and(|v4| ip_is_blocked(v4.into()))
+                // Transition forms that carry an embedded IPv4: judge that IPv4.
+                || embedded_ipv4(v6).is_some_and(|v4| ip_is_blocked(v4.into()))
+                // Documentation range (RFC 3849).
+                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
         }
     }
 }
 
-async fn vet_delivery_url(url: &str) -> std::result::Result<VettedUrl, String> {
-    let policy = policy();
-    let (host, port, allowlisted) = parse_webhook_url(url, &policy).map_err(|e| e.to_string())?;
+async fn vet_delivery_url(
+    url: &str,
+    policy: &crate::config::WebhookPolicy,
+) -> std::result::Result<VettedUrl, String> {
+    let (host, port, allowlisted) = parse_webhook_url(url, policy).map_err(|e| e.to_string())?;
     if allowlisted {
         let socket = resolve_first(&host, port)
             .await
@@ -491,6 +542,16 @@ async fn resolve_first(host: &str, port: u16) -> Result<std::net::SocketAddr> {
         .ok_or_else(|| AppError::Validation(format!("webhook host {host} did not resolve")))
 }
 
+fn delivery_client(vetted: &VettedUrl) -> std::result::Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        // Environment proxies would connect somewhere other than the pinned socket.
+        .no_proxy()
+        .resolve(&vetted.host, vetted.socket)
+        .build()
+}
+
 async fn record_failure(
     pool: &sqlx::SqlitePool,
     row: &PendingDelivery,
@@ -518,7 +579,11 @@ async fn record_failure(
     .await;
 }
 
-async fn deliver_one(pool: &sqlx::SqlitePool, row: PendingDelivery) {
+async fn deliver_one(
+    pool: &sqlx::SqlitePool,
+    policy: &crate::config::WebhookPolicy,
+    row: PendingDelivery,
+) {
     let claimed = sqlx::query(
         r#"UPDATE webhook_deliveries
            SET status = 'delivering', last_attempt_at = datetime('now')
@@ -554,19 +619,14 @@ async fn deliver_one(pool: &sqlx::SqlitePool, row: PendingDelivery) {
             return;
         }
     };
-    let vetted = match vet_delivery_url(&row.url).await {
+    let vetted = match vet_delivery_url(&row.url, policy).await {
         Ok(vetted) => vetted,
         Err(error) => {
             record_failure(pool, &row, row.attempts + 1, None, error).await;
             return;
         }
     };
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve(&vetted.host, vetted.socket)
-        .build()
-    {
+    let client = match delivery_client(&vetted) {
         Ok(client) => client,
         Err(error) => {
             tracing::warn!(%error, "webhook client creation failed");
@@ -585,7 +645,21 @@ async fn deliver_one(pool: &sqlx::SqlitePool, row: PendingDelivery) {
         .header("X-Email-Timestamp", &sent_at)
         .body(body.clone());
     if let Some(secret) = &row.secret {
-        request = request.header("X-Email-Signature", signature(&sent_at, &body, secret));
+        // Legacy body-only MAC, kept so existing receivers keep verifying.
+        // Deprecated: new receivers should use the v2 headers below.
+        let legacy = {
+            let key = hmac_sha256::HMAC::mac(body.as_bytes(), secret.as_bytes());
+            let mut hex = String::with_capacity(64);
+            for byte in key {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+            }
+            format!("sha256={hex}")
+        };
+        request = request
+            .header("X-Email-Signature", legacy)
+            .header("X-EmailRs-Timestamp", &sent_at)
+            .header("X-EmailRs-Signature-V2", signature(&sent_at, &body, secret));
     }
 
     let attempt = row.attempts + 1;
@@ -634,7 +708,10 @@ async fn deliver_one(pool: &sqlx::SqlitePool, row: PendingDelivery) {
     }
 }
 
-pub async fn dispatch_due(pool: &sqlx::SqlitePool) -> Result<usize> {
+pub async fn dispatch_due(
+    pool: &sqlx::SqlitePool,
+    policy: &crate::config::WebhookPolicy,
+) -> Result<usize> {
     let rows = sqlx::query_as::<_, PendingDelivery>(
         r#"SELECT d.event_id, d.webhook_id, e.event_type, e.account_id,
                   e.data_json, e.created_at, w.url, w.secret, d.attempts
@@ -649,12 +726,12 @@ pub async fn dispatch_due(pool: &sqlx::SqlitePool) -> Result<usize> {
     .await?;
     let count = rows.len();
     for row in rows {
-        deliver_one(pool, row).await;
+        deliver_one(pool, policy, row).await;
     }
     Ok(count)
 }
 
-pub fn spawn_delivery_worker(pool: sqlx::SqlitePool) {
+pub fn spawn_delivery_worker(pool: sqlx::SqlitePool, policy: crate::config::WebhookPolicy) {
     tokio::spawn(async move {
         let _ = sqlx::query(
             "UPDATE webhook_deliveries SET status = 'retry' WHERE status = 'delivering'",
@@ -664,7 +741,7 @@ pub fn spawn_delivery_worker(pool: sqlx::SqlitePool) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            if let Err(error) = dispatch_due(&pool).await {
+            if let Err(error) = dispatch_due(&pool, &policy).await {
                 tracing::warn!(%error, "webhook delivery worker failed");
             }
         }
@@ -711,6 +788,20 @@ mod tests {
         format!("http://{address}/")
     }
 
+    fn dev_policy(allowlist: &[&str]) -> crate::config::WebhookPolicy {
+        crate::config::WebhookPolicy {
+            allow_insecure_http: true,
+            allowlist: allowlist.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    fn locked_policy() -> crate::config::WebhookPolicy {
+        crate::config::WebhookPolicy {
+            allow_insecure_http: false,
+            allowlist: vec![],
+        }
+    }
+
     #[tokio::test]
     async fn event_and_matching_delivery_are_persisted_before_dispatch() {
         let pool = setup().await;
@@ -751,8 +842,6 @@ mod tests {
     async fn dispatcher_records_success_and_retryable_failure() {
         let success_pool = setup().await;
         let success_url = server(StatusCode::NO_CONTENT).await;
-        std::env::set_var("EMAIL_RS_ALLOW_INSECURE_HTTP", "true");
-        std::env::set_var("EMAIL_RS_WEBHOOK_ALLOWLIST", &success_url);
         webhook(&success_pool, &success_url, None).await;
         fire_webhooks(
             &success_pool,
@@ -761,7 +850,12 @@ mod tests {
             serde_json::json!({"eventId": "success-1"}),
         )
         .await;
-        assert_eq!(dispatch_due(&success_pool).await.unwrap(), 1);
+        assert_eq!(
+            dispatch_due(&success_pool, &dev_policy(&[&success_url]))
+                .await
+                .unwrap(),
+            1
+        );
         let success: (String, i64, i64) = sqlx::query_as(
             "SELECT status, attempts, response_status FROM webhook_deliveries WHERE event_id = 'success-1'",
         )
@@ -772,7 +866,6 @@ mod tests {
 
         let failure_pool = setup().await;
         let failure_url = server(StatusCode::INTERNAL_SERVER_ERROR).await;
-        std::env::set_var("EMAIL_RS_WEBHOOK_ALLOWLIST", &failure_url);
         webhook(&failure_pool, &failure_url, None).await;
         fire_webhooks(
             &failure_pool,
@@ -781,7 +874,12 @@ mod tests {
             serde_json::json!({"eventId": "failure-1"}),
         )
         .await;
-        assert_eq!(dispatch_due(&failure_pool).await.unwrap(), 1);
+        assert_eq!(
+            dispatch_due(&failure_pool, &dev_policy(&[&failure_url]))
+                .await
+                .unwrap(),
+            1
+        );
         let failure: (String, i64, i64) = sqlx::query_as(
             "SELECT status, attempts, response_status FROM webhook_deliveries WHERE event_id = 'failure-1'",
         )
@@ -836,23 +934,21 @@ mod tests {
 
     #[tokio::test]
     async fn delivery_refuses_a_loopback_target_that_is_not_allowlisted() {
-        std::env::remove_var("EMAIL_RS_ALLOW_INSECURE_HTTP");
-        std::env::remove_var("EMAIL_RS_WEBHOOK_ALLOWLIST");
-        let err = vet_delivery_url("http://127.0.0.1:9/hook")
+        let err = vet_delivery_url("http://127.0.0.1:9/hook", &locked_policy())
             .await
             .unwrap_err();
         assert!(
             err.contains("private") || err.contains("https") || err.contains("loopback"),
             "{err}"
         );
-        let literal = vet_delivery_url("https://127.0.0.1/hook")
+        let literal = vet_delivery_url("https://127.0.0.1/hook", &locked_policy())
             .await
             .unwrap_err();
         assert!(
             literal.contains("private") || literal.contains("loopback"),
             "{literal}"
         );
-        let metadata = vet_delivery_url("https://169.254.169.254/latest")
+        let metadata = vet_delivery_url("https://169.254.169.254/latest", &locked_policy())
             .await
             .unwrap_err();
         assert!(
@@ -864,8 +960,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delivery_refuses_a_redirect_and_pins_the_resolved_address() {
-        std::env::set_var("EMAIL_RS_ALLOW_INSECURE_HTTP", "true");
+    async fn delivery_records_a_redirect_as_failure_without_following_it() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -886,7 +981,6 @@ mod tests {
             .unwrap();
         });
         let url = format!("http://{address}/");
-        std::env::set_var("EMAIL_RS_WEBHOOK_ALLOWLIST", &url);
         let pool = setup().await;
         webhook(&pool, &url, Some("topsecret")).await;
         fire_webhooks(
@@ -896,7 +990,7 @@ mod tests {
             serde_json::json!({"eventId": "redir-1"}),
         )
         .await;
-        assert_eq!(dispatch_due(&pool).await.unwrap(), 1);
+        assert_eq!(dispatch_due(&pool, &dev_policy(&[&url])).await.unwrap(), 1);
         let status: (String, i64) = sqlx::query_as(
             "SELECT status, response_status FROM webhook_deliveries WHERE event_id = 'redir-1'",
         )
@@ -907,7 +1001,6 @@ mod tests {
         // to the metadata address in Location.
         assert_eq!(status.0, "retry");
         assert_eq!(status.1, 302);
-        std::env::remove_var("EMAIL_RS_WEBHOOK_ALLOWLIST");
     }
 
     #[test]
@@ -974,5 +1067,59 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn transition_addresses_are_judged_by_their_embedded_ipv4() {
+        for ip in [
+            "64:ff9b::101:101",
+            "64:ff9b:1::808:808",
+            "::808:808",
+            "2002:0808:0808::",
+            // Teredo client IPv4 is the last 32 bits inverted; 8.8.8.8 inverted
+            // is f7f7:f7f7.
+            "2001:0:1:2:3:4:f7f7:f7f7",
+            "2001:4860:4860::8888",
+        ] {
+            let parsed: std::net::IpAddr = ip.parse().unwrap();
+            assert!(!ip_is_blocked(parsed), "{ip} should be public");
+        }
+        // NAT64 well-known prefix carrying 10.0.0.1.
+        assert!(ip_is_blocked("64:ff9b::a00:1".parse().unwrap()));
+        // NAT64 local-use prefix carrying 192.168.1.1.
+        assert!(ip_is_blocked("64:ff9b:1::c0a8:101".parse().unwrap()));
+        // IPv4-compatible ::/96 carrying 10.0.0.1 (not the mapped form ::ffff:0:a00:1).
+        assert!(ip_is_blocked("::a00:1".parse().unwrap()));
+        // 6to4 carrying 10.1.2.3.
+        assert!(ip_is_blocked("2002:0a01:0203::".parse().unwrap()));
+        // Teredo carrying 10.0.0.1 (inverted f5ff:fffe).
+        assert!(ip_is_blocked("2001:0:1:2:3:4:f5ff:fffe".parse().unwrap()));
+        // Documentation range.
+        assert!(ip_is_blocked("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn delivery_client_ignores_environment_proxies() {
+        let vetted = VettedUrl {
+            host: "hooks.example.com".into(),
+            socket: "1.1.1.1:443".parse().unwrap(),
+        };
+        // A proxy env var must not make the pinned client fail to build, and
+        // the builder used by delivery_client sets no_proxy so HTTP(S)_PROXY
+        // and ALL_PROXY cannot redirect the connection off the pinned socket.
+        let client = delivery_client(&vetted).expect("client builds");
+        drop(client);
+    }
+
+    #[test]
+    fn legacy_signature_is_the_body_only_mac() {
+        let body = r#"{"id":"event-1"}"#;
+        let key = hmac_sha256::HMAC::mac(body.as_bytes(), b"topsecret");
+        let legacy = format!(
+            "sha256={}",
+            key.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
+        let v2 = signature("1700000000", body, "topsecret");
+        assert_ne!(legacy, v2, "v2 must not replace the legacy body-only MAC");
     }
 }

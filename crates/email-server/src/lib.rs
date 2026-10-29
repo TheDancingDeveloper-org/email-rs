@@ -37,7 +37,7 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
     auth::app::bootstrap_from_env(&pool).await?;
     let auth_settings = auth::app::AuthSettings::from_env(cfg.public_url.as_deref());
     let app_state = Arc::new(AppState::with_auth(pool.clone(), has_fts, auth_settings));
-    api::webhooks::spawn_delivery_worker(pool.clone());
+    api::webhooks::spawn_delivery_worker(pool.clone(), cfg.webhook_policy.clone());
     clean::spawn_backfill(pool.clone());
     if has_fts {
         search_index::spawn_reindex(pool.clone());

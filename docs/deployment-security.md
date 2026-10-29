@@ -64,15 +64,19 @@ The path and state are recorded in `migration_backups`; affected accounts are re
 
 Webhook URLs are `https` only. `http` is accepted only when `EMAIL_RS_ALLOW_INSECURE_HTTP=true`, the same development flag that permits a non-loopback bind without HTTPS.
 
-Before a delivery is sent, the host is resolved and **every** returned address is checked. Loopback, private (RFC 1918), link-local (including the cloud metadata address `169.254.169.254`), unspecified, multicast, documentation, CGNAT (`100.64.0.0/10`, which covers Tailscale), and IPv6 unique-local / link-local addresses are refused. IPv4-mapped IPv6 addresses are judged as IPv4. The connection is then opened to the address that passed the check, not to a second lookup, so a DNS rebinding answer cannot slip a private address in between check and connect.
+Before a delivery is sent, the host is resolved and **every** returned address is checked. Loopback, private (RFC 1918), link-local (including the cloud metadata address `169.254.169.254`), unspecified, multicast, documentation (IPv4 and the IPv6 range `2001:db8::/32`), CGNAT (`100.64.0.0/10`, which covers Tailscale), and IPv6 unique-local / link-local addresses are refused. IPv4-mapped IPv6 addresses are judged as IPv4, and so is the IPv4 embedded in NAT64 (`64:ff9b::/96` and `64:ff9b:1::/48`), IPv4-compatible (`::/96`), 6to4 (`2002::/16`) and Teredo (`2001::/32`) addresses. The connection is then opened to the address that passed the check, not to a second lookup, so a DNS rebinding answer cannot slip a private address in between check and connect. The delivery client sets no proxy, so `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` cannot move that connection off the pinned address.
 
 Redirects are not followed. A `3xx` response is recorded as a failed delivery; the `Location` is never requested.
 
-An exact-URL allowlist skips the private-address check for development receivers on loopback:
+An exact-URL allowlist skips the private-address check for development receivers on loopback. An `http://` entry is only honoured when `EMAIL_RS_ALLOW_INSECURE_HTTP=true`; without that flag the URL is refused before the allowlist is consulted:
 
 ```text
 EMAIL_RS_WEBHOOK_ALLOWLIST=http://127.0.0.1:8080/hook,https://hooks.internal.example/email
 ```
 
-When a webhook has a secret, each delivery sets `X-Email-Timestamp` to the unix time of the attempt and `X-Email-Signature` to `sha256=` plus HMAC-SHA256 of `{timestamp}.{body}` using that secret. Receivers should reject timestamps outside a short window (five minutes is plenty) before comparing the signature, which stops a captured body being replayed later. The signature covers the timestamp, so changing the header invalidates it.
+When a webhook has a secret, each delivery sets two signatures.
+
+`X-Email-Signature` is the legacy body-only HMAC-SHA256 (`sha256=` plus the hex digest of the raw body). Existing receivers, including myaiagent's `email_rs_webhooks.py`, keep verifying this header. It is deprecated: it does not cover a timestamp, so a captured delivery can be replayed.
+
+`X-EmailRs-Timestamp` is the unix time of the attempt and `X-EmailRs-Signature-V2` is `sha256=` plus HMAC-SHA256 of `{timestamp}.{body}` using the same secret. New receivers should reject timestamps outside a short window (five minutes is plenty) and then compare the v2 signature. The signature covers the timestamp, so changing either header invalidates it. The legacy header will be removed in a later release.
 
