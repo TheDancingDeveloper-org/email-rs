@@ -520,10 +520,7 @@ mod tests {
         let mut polled = 0usize;
         stream.inspect(move |_| {
             polled += 1;
-            assert!(
-                polled < 10_000,
-                "IMAP stream drained past its first error (WI-892)"
-            );
+            assert!(polled < 10_000, "IMAP stream drained past its first error");
         })
     }
 

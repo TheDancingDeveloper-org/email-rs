@@ -61,7 +61,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool
     }
 
     // Migrate a file database through a dedicated single-connection pool and
-    // close it before the serving pool opens (WI-497). Migrating through the
+    // close it before the serving pool opens. Migrating through the
     // serving pool let it open extra connections part-way through the schema
     // build. Such a connection keeps a stale schema, and the first statement it
     // runs that reaches the FTS5 table (for example `DELETE FROM accounts`,
@@ -105,7 +105,7 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<bool> {
 /// our queries. Preparing a statement that reaches `messages_fts` on a
 /// connection that hasn't opened the FTS5 table yet reads its config. With
 /// `BEGIN IMMEDIATE` the lock is taken before anything is read, so it waits
-/// out `busy_timeout` like any other writer (WI-497).
+/// out `busy_timeout` like any other writer.
 pub async fn begin_write(
     pool: &SqlitePool,
 ) -> std::result::Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
