@@ -64,11 +64,22 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build
+          test -n "$(find dist -name '*.whl' | head -n 1)"
+          test -n "$(find dist -name '*.tar.gz' | head -n 1)"
+
+      # attach-binaries downloads python-* with the server-* binaries.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-client
+          path: clients/python/dist/*
+          if-no-files-found: error
 
   # email-server binaries. Linux amd64 and arm64, plus Windows, are built on
   # the estate rust-heavy pool (cross via cargo-zigbuild). macOS is built only when the
   # runner is already macOS; the estate pool is Linux, so that target is
-  # skipped with a message rather than failing the release.
+  # skipped with a notice rather than failing the release. The leg then
+  # reports success but uploads no artifact. It can't be cross-built from
+  # Linux: zigbuild needs the macOS SDK, which isn't on the runners.
   # email-desktop-fluent is not built (WI-722 retires it).
   server-binaries:
     needs: release
@@ -103,7 +114,7 @@ jobs:
             *-apple-darwin)
               if [ "$(uname -s)" != Darwin ]; then
                 echo "skip=true" >> "$GITHUB_OUTPUT"
-                echo "The estate rust-heavy pool is not macOS; ${{ matrix.target }} is skipped."
+                echo "::notice::The estate rust-heavy pool is not macOS; ${{ matrix.target }} is skipped and uploads no artifact."
                 echo "A macOS runner will build this target when one is in the pool."
               else
                 echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -303,6 +314,7 @@ jobs:
 
   # rust-heavy builds only read the repo. Attaching release assets needs
   # contents: write, and that token stays on the publish runner.
+  # This job has no checkout, so every gh call takes the repo from GH_REPO.
   attach-binaries:
     needs: [release, server-binaries, desktop-binaries]
     if: always() && needs.release.result == 'success' && needs.server-binaries.result == 'success' && (needs.desktop-binaries.result == 'success' || needs.desktop-binaries.result == 'skipped')
@@ -310,12 +322,19 @@ jobs:
       contents: write
     runs-on: [self-hosted, publish]
     timeout-minutes: 30
+    env:
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: release-artifacts
           pattern: server-*
           merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          name: python-client
 
       - uses: actions/download-artifact@v4
         with:
@@ -346,6 +365,13 @@ jobs:
           test "$missing" -eq 0
           test -s release-artifacts/SHA256SUMS
 
+      - name: Python client wheel and sdist are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$(find release-artifacts -maxdepth 1 -name '*.whl' | head -n 1)"
+          test -n "$(find release-artifacts -maxdepth 1 -name 'email_rs_client-*.tar.gz' | head -n 1)"
+
       - name: Publish the GitHub release, then attach binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -369,6 +395,8 @@ jobs:
             echo "Immutable tag: \`${IMAGE}:sha-${GITHUB_SHA}\`"
           } > "$notes"
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GH_REPO" \
+            --verify-tag \
             --title "$GITHUB_REF_NAME" \
             --notes-file "$notes" \
             release-artifacts/*
