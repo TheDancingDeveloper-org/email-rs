@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.7.3
+
+- 0.7.1 and 0.7.2 were tagged but never published, because of release-workflow bugs. 0.7.3 is the first published release with that content.
+- Includes the release-path fixes from #116, #118 and #119, so the release workflow and the release dry run build and publish correctly.
+
 ## 0.7.2
 
 - 0.7.1 was tagged but its release never published: the Windows zip packaging broke. 0.7.2 has the same content as 0.7.1, and the release packaging fix (#116) is included.
