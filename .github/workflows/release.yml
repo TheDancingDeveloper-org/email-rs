@@ -153,6 +153,27 @@ jobs:
             cargo build --locked --release -p email-server --bin email-server --target "${{ matrix.target }}"
           fi
 
+      # The shared runners have no system zip and their apt state must not be
+      # changed, so the .zip is written with Python's zipfile module.
+      - uses: actions/setup-python@v5
+        if: steps.host.outputs.skip != 'true' && matrix.archive == 'zip'
+        with:
+          python-version: '3.12'
+
+      # The shared runners have no system zip and their apt state must not be
+      # changed, so the .zip is written with Python's zipfile module.
+      - uses: actions/setup-python@v5
+        if: steps.host.outputs.skip != 'true' && matrix.archive == 'zip'
+        with:
+          python-version: '3.12'
+
+      # The shared runners have no system zip and their apt state must not be
+      # changed, so the .zip is written with Python's zipfile module.
+      - uses: actions/setup-python@v5
+        if: steps.host.outputs.skip != 'true' && matrix.archive == 'zip'
+        with:
+          python-version: '3.12'
+
       - name: Install cargo-cyclonedx once
         if: steps.host.outputs.skip != 'true'
         shell: bash
@@ -175,7 +196,7 @@ jobs:
             bin="${bin}.exe"
             name="email-server-${tag}-${target}.zip"
             cp "$bin" "$stage/email-server.exe"
-            (cd "$stage" && zip -q -r "$name" email-server.exe)
+            (cd "$stage" && python -m zipfile -c "$name" email-server.exe)
           else
             name="email-server-${tag}-${target}.tar.gz"
             cp "$bin" "$stage/email-server"
@@ -250,6 +271,24 @@ jobs:
           toolchain: '1.95.0'
           targets: ${{ matrix.target }}
 
+      # No system zip on the shared runners; see server-binaries.
+      - uses: actions/setup-python@v5
+        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true' && matrix.package == 'zip'
+        with:
+          python-version: '3.12'
+
+      # No system zip on the shared runners; see server-binaries.
+      - uses: actions/setup-python@v5
+        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true' && matrix.package == 'zip'
+        with:
+          python-version: '3.12'
+
+      # No system zip on the shared runners; see server-binaries.
+      - uses: actions/setup-python@v5
+        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true' && matrix.package == 'zip'
+        with:
+          python-version: '3.12'
+
       - name: Build the egui desktop app
         if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true'
         shell: bash
@@ -270,7 +309,7 @@ jobs:
             zip)
               cp "${bin}.exe" "$stage/email-desktop.exe"
               name="email-desktop-${tag}-${target}.zip"
-              (cd "$stage" && zip -q -r "$name" email-desktop.exe)
+              (cd "$stage" && python -m zipfile -c "$name" email-desktop.exe)
               mv "$stage/$name" "release-artifacts/$name"
               ;;
             *)
