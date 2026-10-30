@@ -16,20 +16,44 @@ pub enum AuthMode {
 /// sees the rule before a round trip.
 pub const MIN_PASSWORD_LEN: usize = 12;
 
-/// Username and password typed into the sign-in screen.
-#[derive(Clone, Debug, Default)]
+/// Username and password typed into the sign-in screen. `Debug` redacts the
+/// password.
+#[derive(Clone, Default)]
 pub struct LoginForm {
     pub username: String,
     pub password: String,
     pub mode: AuthMode,
 }
 
-/// Credentials ready to send.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Credentials ready to send. `Debug` redacts the password.
+#[derive(Clone, Eq, PartialEq)]
 pub struct Credentials {
     pub username: String,
     pub password: String,
     pub mode: AuthMode,
+}
+
+/// What `Debug` prints in place of a secret.
+pub(crate) const REDACTED: &str = "<redacted>";
+
+impl std::fmt::Debug for LoginForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginForm")
+            .field("username", &self.username)
+            .field("password", &REDACTED)
+            .field("mode", &self.mode)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("username", &self.username)
+            .field("password", &REDACTED)
+            .field("mode", &self.mode)
+            .finish()
+    }
 }
 
 impl LoginForm {
@@ -105,5 +129,17 @@ mod tests {
         assert_eq!(f.mode, AuthMode::FirstRun);
         f.toggle_mode();
         assert_eq!(f.mode, AuthMode::SignIn);
+    }
+
+    #[test]
+    fn debug_redacts_the_password() {
+        let f = form("admin", "hunter2-secret", AuthMode::SignIn);
+        let shown = format!("{f:?}");
+        assert!(!shown.contains("hunter2-secret"), "{shown}");
+        assert!(shown.contains(REDACTED) && shown.contains("admin"));
+        let creds = f.submit().unwrap();
+        let shown = format!("{creds:?}");
+        assert!(!shown.contains("hunter2-secret"), "{shown}");
+        assert!(shown.contains(REDACTED));
     }
 }

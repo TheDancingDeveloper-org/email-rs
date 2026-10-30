@@ -20,7 +20,8 @@ pub enum Exec {
     Inline,
 }
 
-/// What the window shows.
+/// What the window shows. The derived `Debug` is safe: [`SignedIn`] redacts
+/// its token.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Screen {
     /// Checking a stored token with `GET /app-auth/me`.
@@ -633,7 +634,18 @@ fn sentence(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sentence;
+    use super::{sentence, Screen, SignedIn};
+
+    #[test]
+    fn screen_debug_redacts_the_token() {
+        let screen = Screen::SignedIn(SignedIn {
+            token: "bearer-secret-token".into(),
+            user_id: "u1".into(),
+        });
+        let shown = format!("{screen:?}");
+        assert!(!shown.contains("bearer-secret-token"), "{shown}");
+        assert!(shown.contains("<redacted>"));
+    }
 
     #[test]
     fn sentence_capitalises_and_ends_with_a_stop() {
