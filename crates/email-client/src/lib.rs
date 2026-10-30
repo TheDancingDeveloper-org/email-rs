@@ -87,6 +87,52 @@ impl ClientCredential {
     }
 }
 
+/// True for an `https` URL, or an `http` URL whose host is loopback
+/// (`localhost`, `127.0.0.0/8`, `::1`).
+pub fn is_https_or_loopback(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => match url.host() {
+            Some(url::Host::Domain(domain)) => domain == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// reqwest keeps the `Authorization` header across a same-host redirect,
+/// so an https -> http redirect would send the bearer token in the clear.
+/// Follow a redirect only to https, or to http on loopback.
+#[cfg(not(target_arch = "wasm32"))]
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if !is_https_or_loopback(attempt.url()) {
+            let refused = format!("refused redirect to non-https URL {}", attempt.url());
+            attempt.error(refused)
+        } else if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(redirect_policy())
+        .build()
+        .expect("reqwest client builds")
+}
+
+// The browser follows redirects itself; reqwest has no policy on wasm.
+#[cfg(target_arch = "wasm32")]
+fn default_http_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
 #[derive(Clone)]
 pub struct EmailClient {
     base_url: Url,
@@ -98,7 +144,7 @@ impl EmailClient {
     pub fn new(base_url: impl AsRef<str>) -> Result<Self> {
         Ok(Self {
             base_url: Url::parse(base_url.as_ref())?,
-            http: reqwest::Client::new(),
+            http: default_http_client(),
             bearer_token: default_bearer_token(),
         })
     }
@@ -711,6 +757,84 @@ fn match_mode_param(mode: &MatchMode) -> String {
 mod tests {
     use super::*;
     use email_types::{Condition, ConditionOperator, CreateAccount};
+
+    /// Serves one redirect per connection: `/<n>` answers 302 to the n-th
+    /// target, anything else answers 200.
+    fn redirect_server(targets: Vec<String>) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                reader.read_line(&mut line).unwrap();
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap() <= 2 {
+                        break;
+                    }
+                }
+                let path = line.split_whitespace().nth(1).unwrap_or("/");
+                let response = match path
+                    .trim_start_matches('/')
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| targets.get(i))
+                {
+                    Some(target) => format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    None => "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string(),
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn redirect_to_plain_http_on_a_remote_host_is_refused() {
+        let base = redirect_server(vec![
+            "http://mail.example.com/".to_string(),
+            "/done".to_string(),
+        ]);
+        let http = default_http_client();
+
+        let err = http
+            .get(format!("{base}/0"))
+            .bearer_auth("secret")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_redirect(), "{err}");
+        assert!(format!("{err:?}").contains("non-https"), "{err:?}");
+
+        let ok = http.get(format!("{base}/1")).send().await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn https_or_loopback_accepts_only_safe_targets() {
+        for url in [
+            "https://mail.example.com/",
+            "http://localhost:8585/",
+            "http://127.0.0.1/",
+            "http://[::1]/",
+        ] {
+            assert!(is_https_or_loopback(&Url::parse(url).unwrap()), "{url}");
+        }
+        for url in [
+            "http://mail.example.com/",
+            "http://localhost.example.com/",
+            "http://192.168.1.10/",
+            "ftp://localhost/",
+        ] {
+            assert!(!is_https_or_loopback(&Url::parse(url).unwrap()), "{url}");
+        }
+    }
 
     #[test]
     fn endpoint_url_joins_base_and_api_prefix() {

@@ -19,6 +19,7 @@ email-types = { path = "../email-types" }
 fluent2-egui = { git = "https://github.com/TheDancingDeveloper-org/fluent2-egui.git", tag = "v0.4.1", features = ["html"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+url = "2"
 
 [dev-dependencies]
 egui_kittest = "0.37"
