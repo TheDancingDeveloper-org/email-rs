@@ -4,6 +4,6 @@ members = [
     "crates/email-desktop-fluent",
     "crates/email-server",
     "crates/email-types",
+    "crates/email-ui",
 ]
 resolver = "2"
-exclude = ["crates/email-ui"]
