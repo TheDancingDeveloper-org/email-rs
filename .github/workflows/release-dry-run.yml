@@ -8,18 +8,9 @@ on:
     # Nightly on main. The job's fork guard is a no-op for schedule and
     # workflow_dispatch; they only run from this repository.
     - cron: '17 3 * * *'
+  # Every PR, so the release-dry-run gate can be a required check. The
+  # changes job decides whether the heavy jobs run.
   pull_request:
-    paths:
-      - '.github/workflows/release.yml'
-      - '.github/workflows/release-dry-run.yml'
-      - 'Dockerfile'
-      - 'frontend/**'
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'clients/python/**'
-      - 'scripts/**'
-      - '.github/actionlint.yaml'
 
 permissions:
   contents: read
@@ -29,8 +20,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cheap path check. Schedule and dispatch always run the dry run; a PR runs
+  # it only when it touches the release packaging path.
+  changes:
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    outputs:
+      release: ${{ steps.filter.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+      - name: Detect release path changes
+        id: filter
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          release=false
+          while IFS= read -r f; do
+            case "$f" in
+              .github/workflows/release.yml|.github/workflows/release-dry-run.yml|Dockerfile|\
+              frontend/*|crates/*|Cargo.toml|Cargo.lock|clients/python/*|scripts/*|\
+              .github/actionlint.yaml)
+                release=true
+                echo "release path changed: $f"
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE...$HEAD")
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
   dry-run:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: needs.changes.outputs.release == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, docker]
     timeout-minutes: 120
     steps:
@@ -57,7 +87,8 @@ jobs:
 
   # Same server binary build as release.yml, publishing nothing.
   server-binaries:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: needs.changes.outputs.release == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: read
     runs-on: [self-hosted, rust-heavy]
@@ -190,7 +221,8 @@ jobs:
           retention-days: 1
 
   desktop-binaries:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: needs.changes.outputs.release == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: read
     runs-on: [self-hosted, rust-heavy]
@@ -282,8 +314,8 @@ jobs:
           retention-days: 1
 
   checksum-assets:
-    needs: [server-binaries, desktop-binaries]
-    if: always() && needs.server-binaries.result == 'success' && (needs.desktop-binaries.result == 'success' || needs.desktop-binaries.result == 'skipped')
+    needs: [changes, server-binaries, desktop-binaries]
+    if: always() && needs.changes.outputs.release == 'true' && needs.server-binaries.result == 'success' && (needs.desktop-binaries.result == 'success' || needs.desktop-binaries.result == 'skipped')
     runs-on: [self-hosted, rust-heavy]
     steps:
       - uses: actions/download-artifact@v4
@@ -317,3 +349,24 @@ jobs:
           grep -q ".cdx.json" release-artifacts/SHA256SUMS
           grep -q "email-server-" release-artifacts/SHA256SUMS
           echo "combined checksum covers every dry-run asset"
+
+  # The required check. Fails if any job that ran failed or was cancelled;
+  # passes when the heavy jobs were skipped because no release path changed.
+  release-dry-run:
+    needs: [changes, dry-run, server-binaries, desktop-binaries, checksum-assets]
+    if: always()
+    runs-on: [self-hosted]
+    timeout-minutes: 5
+    steps:
+      - name: Check job results
+        shell: bash
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "a release dry-run job ended with: $r" >&2; exit 1 ;;
+            esac
+          done
