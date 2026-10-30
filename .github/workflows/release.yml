@@ -135,6 +135,11 @@ jobs:
           echo "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  $RUNNER_TEMP/$zig.tar.xz" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/$zig.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/$zig" >> "$GITHUB_PATH"
+          # windows-gnu raw-dylib imports need a mingw dlltool; zig ships one.
+          mkdir -p "$RUNNER_TEMP/zig-wrappers"
+          printf '#!/bin/sh\nexec zig dlltool "$@"\n' > "$RUNNER_TEMP/zig-wrappers/x86_64-w64-mingw32-dlltool"
+          chmod +x "$RUNNER_TEMP/zig-wrappers/x86_64-w64-mingw32-dlltool"
+          echo "$RUNNER_TEMP/zig-wrappers" >> "$GITHUB_PATH"
           cargo install --locked cargo-zigbuild --version 0.23.4 --root "$RUNNER_TEMP/zigbuild"
           echo "$RUNNER_TEMP/zigbuild/bin" >> "$GITHUB_PATH"
 
