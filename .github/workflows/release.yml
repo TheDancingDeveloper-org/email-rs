@@ -160,20 +160,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      # The shared runners have no system zip and their apt state must not be
-      # changed, so the .zip is written with Python's zipfile module.
-      - uses: actions/setup-python@v5
-        if: steps.host.outputs.skip != 'true' && matrix.archive == 'zip'
-        with:
-          python-version: '3.12'
-
-      # The shared runners have no system zip and their apt state must not be
-      # changed, so the .zip is written with Python's zipfile module.
-      - uses: actions/setup-python@v5
-        if: steps.host.outputs.skip != 'true' && matrix.archive == 'zip'
-        with:
-          python-version: '3.12'
-
       - name: Install cargo-cyclonedx once
         if: steps.host.outputs.skip != 'true'
         shell: bash
@@ -270,18 +256,6 @@ jobs:
         with:
           toolchain: '1.95.0'
           targets: ${{ matrix.target }}
-
-      # No system zip on the shared runners; see server-binaries.
-      - uses: actions/setup-python@v5
-        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true' && matrix.package == 'zip'
-        with:
-          python-version: '3.12'
-
-      # No system zip on the shared runners; see server-binaries.
-      - uses: actions/setup-python@v5
-        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true' && matrix.package == 'zip'
-        with:
-          python-version: '3.12'
 
       # No system zip on the shared runners; see server-binaries.
       - uses: actions/setup-python@v5
