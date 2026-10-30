@@ -83,7 +83,16 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build
-          test -n "$(find dist -name '*.whl' -o -name '*.tar.gz' | head -n 1)"
+          test -n "$(find dist -name '*.whl' | head -n 1)"
+          test -n "$(find dist -name '*.tar.gz' | head -n 1)"
+
+      # Same artifact name release.yml's attach-binaries downloads.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-client
+          path: clients/python/dist/*
+          if-no-files-found: error
+          retention-days: 1
 
   # Same server binary build as release.yml, publishing nothing.
   server-binaries:
@@ -120,7 +129,7 @@ jobs:
             *-apple-darwin)
               if [ "$(uname -s)" != Darwin ]; then
                 echo "skip=true" >> "$GITHUB_OUTPUT"
-                echo "The estate rust-heavy pool is not macOS; ${{ matrix.target }} is skipped."
+                echo "::notice::The estate rust-heavy pool is not macOS; ${{ matrix.target }} is skipped and uploads no artifact."
               else
                 echo "skip=false" >> "$GITHUB_OUTPUT"
               fi
@@ -313,10 +322,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # No checkout, like release.yml's attach-binaries, so a gh call that needs
+  # a git repository fails here before a tag finds it.
   checksum-assets:
-    needs: [changes, server-binaries, desktop-binaries]
-    if: always() && needs.changes.outputs.release == 'true' && needs.server-binaries.result == 'success' && (needs.desktop-binaries.result == 'success' || needs.desktop-binaries.result == 'skipped')
+    needs: [changes, dry-run, server-binaries, desktop-binaries]
+    if: always() && needs.changes.outputs.release == 'true' && needs.dry-run.result == 'success' && needs.server-binaries.result == 'success' && (needs.desktop-binaries.result == 'success' || needs.desktop-binaries.result == 'skipped')
     runs-on: [self-hosted, rust-heavy]
+    env:
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -329,6 +342,11 @@ jobs:
           pattern: desktop-*
           merge-multiple: true
         continue-on-error: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          name: python-client
       - name: One SHA256SUMS lists every asset
         shell: bash
         run: |
@@ -348,7 +366,26 @@ jobs:
           test "$missing" -eq 0
           grep -q ".cdx.json" release-artifacts/SHA256SUMS
           grep -q "email-server-" release-artifacts/SHA256SUMS
+          grep -q ".whl" release-artifacts/SHA256SUMS
+          grep -q "email_rs_client-.*\.tar\.gz" release-artifacts/SHA256SUMS
           echo "combined checksum covers every dry-run asset"
+
+      # Read-only gh release calls, with no checkout and the repo from
+      # GH_REPO, as attach-binaries runs gh release create. Creates nothing.
+      - name: Exercise the gh release path without publishing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -d .git
+          gh release list --repo "$GH_REPO" --limit 1
+          latest="$(gh release list --repo "$GH_REPO" --limit 1 --json tagName --jq '.[0].tagName // empty')"
+          if [ -n "$latest" ]; then
+            gh release view "$latest" --repo "$GH_REPO" --json tagName,assets --jq '.tagName, (.assets | length)'
+          fi
+          gh release create --help >/dev/null
+          echo "gh release path works without a checkout; nothing created"
 
   # The required check. Fails if any job that ran failed or was cancelled;
   # passes when the heavy jobs were skipped because no release path changed.
