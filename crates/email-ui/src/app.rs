@@ -1,10 +1,13 @@
 //! The eframe app: restore a stored session, sign in, and the signed-in
-//! shell.
+//! shell with folders, the message list and the reading pane.
 
 use crate::auth::{AuthMode, Credentials, LoginForm};
 use crate::backend::{AuthApi, AuthError, SignedIn};
+use crate::mail::{self, MailApi, Mailbox};
 use crate::session::TokenStore;
+use email_types::{FullMessage, Message};
 use fluent2_egui::controls::{Appearance, Button, Field, Input, ValidationState};
+use fluent2_egui::data::html::{HtmlDocument, HtmlView, LinkTarget};
 use fluent2_egui::Theme;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -29,10 +32,43 @@ pub enum Screen {
 enum Event {
     Restored(String, Result<String, AuthError>),
     SignedIn(Result<SignedIn, AuthError>),
+    Mailboxes(Result<Vec<Mailbox>, AuthError>),
+    /// A folder id and its messages.
+    Messages(String, Result<Vec<Message>, AuthError>),
+    /// A message id and the full message.
+    Opened(String, Result<Box<FullMessage>, AuthError>),
+}
+
+/// A read call's state.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Load<T> {
+    #[default]
+    Idle,
+    Loading,
+    Ready(T),
+    Failed(String),
+}
+
+/// An opened message and its parsed body.
+pub struct Opened {
+    pub message: FullMessage,
+    pub doc: HtmlDocument,
+}
+
+/// The read path's state. Reset on every sign-in and sign-out.
+#[derive(Default)]
+pub struct Reader {
+    pub mailboxes: Load<Vec<Mailbox>>,
+    pub folder: Option<String>,
+    pub messages: Load<Vec<Message>>,
+    pub open: Option<String>,
+    pub message: Load<Opened>,
 }
 
 pub struct EmailApp {
     api: Arc<dyn AuthApi>,
+    mail: Option<Arc<dyn MailApi>>,
+    reader: Reader,
     store: Box<dyn TokenStore>,
     exec: Exec,
     screen: Screen,
@@ -52,6 +88,8 @@ impl EmailApp {
         let (tx, rx) = channel();
         let mut app = Self {
             api,
+            mail: None,
+            reader: Reader::default(),
             store,
             exec,
             screen: Screen::SignIn,
@@ -71,6 +109,16 @@ impl EmailApp {
             });
         }
         app
+    }
+
+    /// Sets the read API. Without one the shell shows no folders.
+    pub fn with_mail(mut self, mail: Arc<dyn MailApi>) -> Self {
+        self.mail = Some(mail);
+        self
+    }
+
+    pub fn reader(&self) -> &Reader {
+        &self.reader
     }
 
     /// Installs the Fluent theme. Call once from the eframe creation hook.
@@ -112,12 +160,73 @@ impl EmailApp {
         }
     }
 
-    /// Applies finished auth calls. Called at the top of every frame.
+    fn token(&self) -> Option<String> {
+        match &self.screen {
+            Screen::SignedIn(session) => Some(session.token.clone()),
+            _ => None,
+        }
+    }
+
+    /// Shows the shell for `session` and starts loading its mailboxes.
+    fn enter_shell(&mut self, session: SignedIn) {
+        self.screen = Screen::SignedIn(session);
+        self.reader = Reader::default();
+        self.reload_mailboxes(None);
+    }
+
+    /// Reloads the account and folder list.
+    pub fn reload_mailboxes(&mut self, ctx: Option<&egui::Context>) {
+        let (Some(mail), Some(token)) = (self.mail.clone(), self.token()) else {
+            return;
+        };
+        self.reader.mailboxes = Load::Loading;
+        self.run(ctx, move || Event::Mailboxes(mail.mailboxes(&token)));
+    }
+
+    /// Selects a folder and loads its messages. Closes the open message.
+    pub fn select_folder(&mut self, ctx: Option<&egui::Context>, folder_id: &str) {
+        let (Some(mail), Some(token)) = (self.mail.clone(), self.token()) else {
+            return;
+        };
+        self.reader.folder = Some(folder_id.to_string());
+        self.reader.messages = Load::Loading;
+        self.reader.open = None;
+        self.reader.message = Load::Idle;
+        let id = folder_id.to_string();
+        self.run(ctx, move || {
+            let result = mail.messages(&token, &id);
+            Event::Messages(id, result)
+        });
+    }
+
+    /// Opens a message in the reading pane.
+    pub fn open_message(&mut self, ctx: Option<&egui::Context>, message_id: &str) {
+        let (Some(mail), Some(token)) = (self.mail.clone(), self.token()) else {
+            return;
+        };
+        self.reader.open = Some(message_id.to_string());
+        self.reader.message = Load::Loading;
+        let id = message_id.to_string();
+        self.run(ctx, move || {
+            let result = mail.message(&token, &id).map(Box::new);
+            Event::Opened(id, result)
+        });
+    }
+
+    /// A read call came back 401: the session is gone.
+    fn session_ended(&mut self) {
+        self.store.clear();
+        self.reader = Reader::default();
+        self.screen = Screen::SignIn;
+        self.error = Some("Your session has ended. Sign in again.".into());
+    }
+
+    /// Applies finished calls. Called at the top of every frame.
     pub fn poll(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 Event::Restored(token, Ok(user_id)) => {
-                    self.screen = Screen::SignedIn(SignedIn { token, user_id });
+                    self.enter_shell(SignedIn { token, user_id });
                 }
                 Event::Restored(_, Err(AuthError::Unauthorized(_))) => {
                     self.store.clear();
@@ -136,7 +245,7 @@ impl EmailApp {
                             self.notice = self.store.save(&session.token).err();
                             self.form.password.clear();
                             self.error = None;
-                            self.screen = Screen::SignedIn(session);
+                            self.enter_shell(session);
                         }
                         Err(AuthError::Unauthorized(_)) => {
                             self.error = Some("Wrong username or password.".into());
@@ -144,6 +253,31 @@ impl EmailApp {
                         Err(AuthError::Failed(message)) => {
                             self.error = Some(sentence(&message));
                         }
+                    }
+                }
+                // Read results arriving after sign-out, or for a folder or
+                // message no longer selected, are dropped.
+                _ if self.token().is_none() => {}
+                Event::Mailboxes(Err(AuthError::Unauthorized(_)))
+                | Event::Messages(_, Err(AuthError::Unauthorized(_)))
+                | Event::Opened(_, Err(AuthError::Unauthorized(_))) => self.session_ended(),
+                Event::Mailboxes(result) => {
+                    self.reader.mailboxes = loaded(result, "folders");
+                }
+                Event::Messages(id, result) => {
+                    if self.reader.folder.as_deref() == Some(id.as_str()) {
+                        self.reader.messages = loaded(result, "messages");
+                    }
+                }
+                Event::Opened(id, result) => {
+                    if self.reader.open.as_deref() == Some(id.as_str()) {
+                        self.reader.message = loaded(result, "the message").map(|message| {
+                            let doc = HtmlDocument::parse(&mail::body_html(&message));
+                            Opened {
+                                message: *message,
+                                doc,
+                            }
+                        });
                     }
                 }
             }
@@ -176,6 +310,7 @@ impl EmailApp {
         };
         self.store.clear();
         self.notice = None;
+        self.reader = Reader::default();
         let api = self.api.clone();
         // Logout has no result the UI waits on, so it never goes through
         // the event channel.
@@ -304,20 +439,179 @@ impl EmailApp {
         egui::Panel::left("folders")
             .resizable(true)
             .default_size(220.0)
-            .show(ui, |ui| {
-                ui.strong("Folders");
-            });
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.centered_and_justified(|ui| {
-                ui.label("No folder selected");
-            });
+            .show(ui, |ui| self.folders_ui(ui));
+        egui::Panel::left("messages")
+            .resizable(true)
+            .default_size(320.0)
+            .show(ui, |ui| self.messages_ui(ui));
+        egui::CentralPanel::default().show(ui, |ui| self.reading_ui(ui));
+    }
+
+    fn folders_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            ui.strong("Folders");
+            if self.mail.is_some()
+                && ui
+                    .add(Button::new("Refresh").appearance(Appearance::Subtle))
+                    .clicked()
+            {
+                self.reload_mailboxes(Some(&ctx));
+            }
         });
+        let mut pick = None;
+        match &self.reader.mailboxes {
+            Load::Idle => {}
+            Load::Loading => {
+                ui.add(fluent2_egui::Spinner::new().label("Loading folders"));
+            }
+            Load::Failed(message) => {
+                ui.label(message.as_str());
+            }
+            Load::Ready(mailboxes) if mailboxes.is_empty() => {
+                ui.label("No accounts yet");
+            }
+            Load::Ready(mailboxes) => {
+                egui::ScrollArea::vertical()
+                    .id_salt("folder_list")
+                    .show(ui, |ui| {
+                        for mailbox in mailboxes {
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new(&mailbox.account.email).small());
+                            for folder in mailbox.folders.iter().filter(|f| !f.is_excluded) {
+                                let selected = self.reader.folder.as_deref() == Some(&folder.id);
+                                let text = if folder.unread_count > 0 {
+                                    format!("{} ({})", folder.name, folder.unread_count)
+                                } else {
+                                    folder.name.clone()
+                                };
+                                if ui.selectable_label(selected, text).clicked() && !selected {
+                                    pick = Some(folder.id.clone());
+                                }
+                            }
+                        }
+                    });
+            }
+        }
+        if let Some(id) = pick {
+            self.select_folder(Some(&ctx), &id);
+        }
+    }
+
+    fn messages_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let mut pick = None;
+        match &self.reader.messages {
+            Load::Idle => {
+                ui.centered_and_justified(|ui| {
+                    ui.label("No folder selected");
+                });
+            }
+            Load::Loading => {
+                ui.add(fluent2_egui::Spinner::new().label("Loading messages"));
+            }
+            Load::Failed(message) => {
+                ui.label(message.as_str());
+            }
+            Load::Ready(messages) if messages.is_empty() => {
+                ui.centered_and_justified(|ui| {
+                    ui.label("This folder is empty");
+                });
+            }
+            Load::Ready(messages) => {
+                egui::ScrollArea::vertical()
+                    .id_salt("message_list")
+                    .show(ui, |ui| {
+                        for message in messages {
+                            let selected = self.reader.open.as_deref() == Some(&message.id);
+                            let from = mail::sender(
+                                message.from_name.as_deref(),
+                                message.from_email.as_deref(),
+                            );
+                            let mut text = egui::RichText::new(format!(
+                                "{from}\n{}",
+                                mail::subject(message.subject.as_deref())
+                            ));
+                            if !message.is_read {
+                                text = text.strong();
+                            }
+                            if ui.selectable_label(selected, text).clicked() && !selected {
+                                pick = Some(message.id.clone());
+                            }
+                            ui.separator();
+                        }
+                    });
+            }
+        }
+        if let Some(id) = pick {
+            self.open_message(Some(&ctx), &id);
+        }
+    }
+
+    fn reading_ui(&mut self, ui: &mut egui::Ui) {
+        match &self.reader.message {
+            Load::Idle => {
+                ui.centered_and_justified(|ui| {
+                    ui.label("No message selected");
+                });
+            }
+            Load::Loading => {
+                ui.add(fluent2_egui::Spinner::new().label("Opening the message"));
+            }
+            Load::Failed(message) => {
+                ui.label(message.as_str());
+            }
+            Load::Ready(opened) => {
+                let m = &opened.message;
+                ui.heading(mail::subject(m.subject.as_deref()));
+                let from = match (m.from_name.as_deref(), m.from_email.as_deref()) {
+                    (Some(name), Some(email)) if !name.trim().is_empty() => {
+                        format!("{name} <{email}>")
+                    }
+                    (name, email) => mail::sender(name, email),
+                };
+                ui.label(format!("From: {from}"));
+                if let Some(to) = m.to.as_deref().filter(|t| !t.is_empty()) {
+                    ui.label(format!("To: {to}"));
+                }
+                if let Some(date) = m.date.as_deref() {
+                    ui.label(date);
+                }
+                ui.separator();
+                let out = egui::ScrollArea::vertical()
+                    .id_salt("reading_pane")
+                    .show(ui, |ui| HtmlView::new("message_body", &opened.doc).show(ui))
+                    .inner;
+                if let Some(LinkTarget::Web(url)) = out.clicked.map(|c| c.target) {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                }
+            }
+        }
     }
 }
 
 impl eframe::App for EmailApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         EmailApp::ui(self, ui);
+    }
+}
+
+/// A read result as a [`Load`], with a message naming what failed.
+fn loaded<T>(result: Result<T, AuthError>, what: &str) -> Load<T> {
+    match result {
+        Ok(value) => Load::Ready(value),
+        Err(err) => Load::Failed(format!("Could not load {what}: {}", err.message())),
+    }
+}
+
+impl<T> Load<T> {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Load<U> {
+        match self {
+            Load::Idle => Load::Idle,
+            Load::Loading => Load::Loading,
+            Load::Ready(value) => Load::Ready(f(value)),
+            Load::Failed(message) => Load::Failed(message),
+        }
     }
 }
 

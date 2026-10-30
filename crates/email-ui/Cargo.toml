@@ -16,7 +16,7 @@ eframe = { version = "0.37", default-features = false, features = ["default_font
 egui = { version = "0.37", features = ["default_fonts", "monochrome_emoji_fonts"] }
 email-client = { path = "../email-client" }
 email-types = { path = "../email-types" }
-fluent2-egui = { git = "https://github.com/TheDancingDeveloper-org/fluent2-egui.git", tag = "v0.4.1" }
+fluent2-egui = { git = "https://github.com/TheDancingDeveloper-org/fluent2-egui.git", tag = "v0.4.1", features = ["html"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 

@@ -20,6 +20,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let api = Arc::new(api);
     let store = KeyringStore::for_server(&base_url);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -32,11 +33,9 @@ fn main() {
         options,
         Box::new(move |cc| {
             EmailApp::install_theme(&cc.egui_ctx);
-            Ok(Box::new(EmailApp::new(
-                Arc::new(api),
-                Box::new(store),
-                Exec::Thread,
-            )))
+            Ok(Box::new(
+                EmailApp::new(api.clone(), Box::new(store), Exec::Thread).with_mail(api),
+            ))
         }),
     );
     if let Err(err) = result {
