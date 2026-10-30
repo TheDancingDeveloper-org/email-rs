@@ -4,11 +4,20 @@
 use crate::auth::{AuthMode, Credentials};
 use email_client::{ClientCredential, EmailClient, EmailClientError};
 
-/// A signed-in session.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A signed-in session. `Debug` redacts the bearer token.
+#[derive(Clone, Eq, PartialEq)]
 pub struct SignedIn {
     pub token: String,
     pub user_id: String,
+}
+
+impl std::fmt::Debug for SignedIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedIn")
+            .field("token", &crate::auth::REDACTED)
+            .field("user_id", &self.user_id)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -168,5 +177,16 @@ mod tests {
         let auth = HttpAuth::new("http://127.0.0.1:9").unwrap();
         let err = auth.restore("token").unwrap_err();
         assert!(matches!(err, AuthError::Failed(ref m) if m.starts_with("could not reach")));
+    }
+
+    #[test]
+    fn debug_redacts_the_token() {
+        let session = SignedIn {
+            token: "bearer-secret-token".into(),
+            user_id: "u1".into(),
+        };
+        let shown = format!("{session:?}");
+        assert!(!shown.contains("bearer-secret-token"), "{shown}");
+        assert!(shown.contains("<redacted>") && shown.contains("u1"));
     }
 }

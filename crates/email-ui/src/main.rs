@@ -1,9 +1,10 @@
 //! `email-ui`: the fluent2-egui desktop client.
 //!
 //! Connects to a running email-rs server, `EMAIL_RS_SERVER_URL` or
-//! `http://localhost:8585` (the server's default port).
+//! `http://localhost:8585` (the server's default port). A remote server must
+//! use `https://`; plain `http://` is accepted only for a loopback host.
 
-use email_ui::{EmailApp, Exec, HttpAuth, KeyringStore};
+use email_ui::{check_server_url, EmailApp, Exec, HttpAuth, KeyringStore};
 use std::sync::Arc;
 
 const DEFAULT_SERVER_URL: &str = "http://localhost:8585";
@@ -13,6 +14,10 @@ fn main() {
         .ok()
         .filter(|url| !url.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string());
+    if let Err(err) = check_server_url(&base_url) {
+        eprintln!("email-ui: EMAIL_RS_SERVER_URL: {err}");
+        std::process::exit(2);
+    }
     let api = match HttpAuth::new(base_url.clone()) {
         Ok(api) => api,
         Err(err) => {
