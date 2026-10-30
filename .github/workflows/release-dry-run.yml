@@ -179,6 +179,16 @@ jobs:
           test -s "release-artifacts/email-server-${tag}-${target}.cdx.json"
           echo "dry run packaged ${name}; nothing published"
 
+      # checksum-assets downloads server-* and desktop-*, as release.yml's
+      # attach-binaries does, so the dry run must upload under the same names.
+      - uses: actions/upload-artifact@v4
+        if: steps.host.outputs.skip != 'true'
+        with:
+          name: server-${{ matrix.target }}
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 1
+
   desktop-binaries:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
@@ -263,6 +273,14 @@ jobs:
           esac
           echo "dry run packaged ${name}; nothing published"
 
+      - uses: actions/upload-artifact@v4
+        if: steps.crate.outputs.skip != 'true' && steps.host.outputs.skip != 'true'
+        with:
+          name: desktop-${{ matrix.target }}
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 1
+
   checksum-assets:
     needs: [server-binaries, desktop-binaries]
     if: always() && needs.server-binaries.result == 'success' && (needs.desktop-binaries.result == 'success' || needs.desktop-binaries.result == 'skipped')
@@ -283,6 +301,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ ! -d release-artifacts ]; then
+            echo "no server-* or desktop-* artifacts were downloaded" >&2
+            exit 1
+          fi
           find release-artifacts -name SHA256SUMS -delete
           (cd release-artifacts && sha256sum -- * > SHA256SUMS)
           missing=0

@@ -328,6 +328,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ ! -d release-artifacts ]; then
+            echo "no server-* or desktop-* artifacts were downloaded" >&2
+            exit 1
+          fi
           find release-artifacts -name SHA256SUMS -delete
           (cd release-artifacts && sha256sum -- * > SHA256SUMS)
           missing=0
