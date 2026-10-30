@@ -366,7 +366,7 @@ jobs:
           test "$missing" -eq 0
           grep -q ".cdx.json" release-artifacts/SHA256SUMS
           grep -q "email-server-" release-artifacts/SHA256SUMS
-          grep -q ".whl" release-artifacts/SHA256SUMS
+          grep -q '\.whl$' release-artifacts/SHA256SUMS
           grep -q "email_rs_client-.*\.tar\.gz" release-artifacts/SHA256SUMS
           echo "combined checksum covers every dry-run asset"
 
@@ -378,7 +378,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test ! -d .git
+          cd "$(mktemp -d)"
+          export GIT_DIR=/nonexistent
           gh release list --repo "$GH_REPO" --limit 1
           latest="$(gh release list --repo "$GH_REPO" --limit 1 --json tagName --jq '.[0].tagName // empty')"
           if [ -n "$latest" ]; then
