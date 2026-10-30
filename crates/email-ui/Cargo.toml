@@ -1,6 +1,6 @@
 [package]
 name = "email-ui"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 publish = false
 description = "fluent2-egui client for email-rs: app shell, sign-in and read path."

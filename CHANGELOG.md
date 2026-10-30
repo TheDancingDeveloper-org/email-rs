@@ -2,9 +2,17 @@
 
 ## Unreleased
 
+## 0.7.1
+
 - Webhook deliveries keep the legacy body-only `X-Email-Signature` (deprecated) and add `X-EmailRs-Timestamp` plus `X-EmailRs-Signature-V2` (`{timestamp}.{body}` HMAC). See docs/deployment-security.md. Receivers that verify only the body should move to the v2 headers.
 - Webhook SSRF checks now block IPv6 documentation addresses and judge the IPv4 embedded in NAT64, IPv4-compatible, 6to4 and Teredo addresses. The delivery client ignores `HTTP(S)_PROXY` and `ALL_PROXY`.
-
+- Security: SQLite data files are owner-only (0700 directory, 0600 files), and startup fails rather than falling back to `/tmp` for mail data. Message-identity backups are created at mode 0600 and refuse existing paths or symlinks.
+- Security: Microsoft accounts are bound to tenant and object id, Google identities must be verified, and an OAuth reconnect that would re-point an account to a different mailbox is refused.
+- Security: `ClientCredential` no longer prints its bearer token in `Debug`, and the per-instance client credential no longer races a process-wide default.
+- Release binaries: the release workflow publishes `email-server` for Linux amd64 and arm64 and Windows, with one combined `SHA256SUMS` and an SBOM, and publishes only after the binaries are built. The release dry run runs the same builds and publishes nothing.
+- CI: release binaries are cross-built with a pinned, checksummed cargo-zigbuild and zig fetched into the runner temp directory, so shared runners' apt and dpkg state is no longer changed.
+- email-ui: the fluent2-egui desktop shell starts with sign-in, session restore on launch, sign-out, and a folders, message list and reading pane view. Remote servers must use `https://` (loopback excepted), and secrets are redacted in `Debug` output.
+- email-client: the server URL is parsed with the `url` crate, and redirects are followed only to `https`, or to `http` on loopback, so a bearer token is not sent over a downgrade.
 
 ## 0.7.0
 

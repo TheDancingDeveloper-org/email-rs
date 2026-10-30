@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "email-client"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono",
  "email-types",
@@ -2339,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "email-desktop-fluent"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "email-server"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "email-types"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "email-ui"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "eframe",
  "egui",
