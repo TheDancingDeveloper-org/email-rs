@@ -61,7 +61,11 @@ impl HttpAuth {
         &self.base_url
     }
 
-    fn client(&self, credential: ClientCredential) -> Result<EmailClient, AuthError> {
+    pub(crate) fn runtime(&self) -> &tokio::runtime::Runtime {
+        &self.runtime
+    }
+
+    pub(crate) fn client(&self, credential: ClientCredential) -> Result<EmailClient, AuthError> {
         EmailClient::new(&self.base_url)
             .map(|client| client.with_credential(credential))
             .map_err(|err| AuthError::Failed(err.to_string()))
