@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.7.2
+
+- 0.7.1 was tagged but its release never published: the Windows zip packaging broke. 0.7.2 has the same content as 0.7.1, and the release packaging fix (#116) is included.
+
 ## 0.7.1
 
 - Webhook deliveries keep the legacy body-only `X-Email-Signature` (deprecated) and add `X-EmailRs-Timestamp` plus `X-EmailRs-Signature-V2` (`{timestamp}.{body}` HMAC). See docs/deployment-security.md. Receivers that verify only the body should move to the v2 headers.
