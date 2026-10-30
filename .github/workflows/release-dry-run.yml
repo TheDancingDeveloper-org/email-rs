@@ -105,29 +105,33 @@ jobs:
           toolchain: '1.95.0'
           targets: ${{ matrix.target }}
 
-      - name: Install the cross linker
+      # Cross targets link with zig via cargo-zigbuild, installed under
+      # RUNNER_TEMP. The rust-heavy runners are shared and not ephemeral, so
+      # this job must never change their dpkg or apt state (no apt-get, no
+      # dpkg --add-architecture). The build is rustls-only and needs no
+      # target system libraries; ring and the bundled SQLite build with zig cc.
+      - name: Install the zig cross linker
         if: steps.host.outputs.skip != 'true' && matrix.native == false && !contains(matrix.target, 'apple')
         shell: bash
         run: |
-          if [ "$(id -u)" -eq 0 ]; then APT=apt-get; else APT="sudo apt-get"; fi
-          $APT update
-          case "${{ matrix.target }}" in
-            aarch64-unknown-linux-gnu)
-              $APT install -y gcc-aarch64-linux-gnu
-              ;;
-            x86_64-pc-windows-gnu)
-              $APT install -y gcc-mingw-w64-x86-64
-              ;;
-          esac
+          set -euo pipefail
+          zig="zig-x86_64-linux-0.15.2"
+          curl -fsSL -o "$RUNNER_TEMP/$zig.tar.xz" "https://ziglang.org/download/0.15.2/$zig.tar.xz"
+          echo "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  $RUNNER_TEMP/$zig.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$zig" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild --version 0.23.4 --root "$RUNNER_TEMP/zigbuild"
+          echo "$RUNNER_TEMP/zigbuild/bin" >> "$GITHUB_PATH"
 
       - name: Build email-server
         if: steps.host.outputs.skip != 'true'
         shell: bash
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
         run: |
-          cargo build --locked --release -p email-server --bin email-server --target "${{ matrix.target }}"
+          if [ "${{ matrix.native }}" = false ] && [ "$(uname -s)" != Darwin ]; then
+            cargo zigbuild --locked --release -p email-server --bin email-server --target "${{ matrix.target }}"
+          else
+            cargo build --locked --release -p email-server --bin email-server --target "${{ matrix.target }}"
+          fi
 
       - name: Package, checksum and SBOM without publishing
         if: steps.host.outputs.skip != 'true'
