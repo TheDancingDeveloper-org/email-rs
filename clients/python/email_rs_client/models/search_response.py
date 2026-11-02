@@ -50,8 +50,8 @@ class SearchResponse:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.calendar_search_result import CalendarSearchResult
-        from ..models.message import Message
+        from ..models.calendar_search_result import CalendarSearchResult  # noqa: PLC0415
+        from ..models.message import Message  # noqa: PLC0415
 
         d = dict(src_dict)
         events = []
