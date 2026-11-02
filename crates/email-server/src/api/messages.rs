@@ -4,7 +4,7 @@ use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{
-        header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+        header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE},
         HeaderMap, HeaderName, HeaderValue, StatusCode,
     },
     response::{IntoResponse, Response},
@@ -338,7 +338,7 @@ pub async fn download_attachment(
     Path((message_id, attachment_id)): Path<(String, String)>,
 ) -> Result<Response> {
     let row = sqlx::query_as::<_, AttachmentContentRow>(
-        r#"SELECT filename, content_type, content, part_id, size_bytes
+        r#"SELECT filename, content_type, content, part_id, size_bytes, file_sha256
            FROM attachments
            WHERE id = ? AND message_id = ?"#,
     )
@@ -355,9 +355,18 @@ pub async fn download_attachment(
             download_limit
         )));
     }
-    let content = match row.content {
-        Some(content) => content,
-        None => {
+    let store = crate::attachment_store::store_dir(&state.pool).await;
+    let mut body = None;
+    if let (Some(dir), Some(digest)) = (&store, &row.file_sha256) {
+        body = crate::attachment_store::open_body(dir, digest).await;
+    }
+    let (body, content_length) = match (body, row.content) {
+        (Some((body, len)), _) => (body, len),
+        (None, Some(content)) => {
+            let len = content.len() as u64;
+            (Body::from(content), len)
+        }
+        (None, None) => {
             let (folder, uid, provider) = load_provider(&state, &message_id).await?;
             let content = tokio::time::timeout(
                 attachment_provider_timeout(),
@@ -371,15 +380,12 @@ pub async fn download_attachment(
                     download_limit
                 )));
             }
-            let cache_limit = attachment_cache_limit();
-            if content.len() <= cache_limit {
-                sqlx::query("UPDATE attachments SET content = ? WHERE id = ?")
-                    .bind(&content)
-                    .bind(&attachment_id)
-                    .execute(&state.pool)
+            if content.len() <= attachment_cache_limit() {
+                cache_attachment_content(&state.pool, store.as_deref(), &attachment_id, &content)
                     .await?;
             }
-            content
+            let len = content.len() as u64;
+            (Body::from(content), len)
         }
     };
     let mut headers = HeaderMap::new();
@@ -402,7 +408,41 @@ pub async fn download_attachment(
             .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"attachment\"")),
     );
 
-    Ok((StatusCode::OK, headers, Body::from(content)).into_response())
+    headers.insert(CONTENT_LENGTH, HeaderValue::from(content_length));
+
+    Ok((StatusCode::OK, headers, body).into_response())
+}
+
+/// Keep fetched attachment bytes: in the content-addressed store when the
+/// database has a data directory, otherwise as a BLOB.
+async fn cache_attachment_content(
+    pool: &sqlx::SqlitePool,
+    store: Option<&std::path::Path>,
+    attachment_id: &str,
+    content: &[u8],
+) -> Result<()> {
+    if let Some(dir) = store {
+        match crate::attachment_store::put(dir, content).await {
+            Ok(digest) => {
+                sqlx::query("UPDATE attachments SET file_sha256 = ?, content = NULL WHERE id = ?")
+                    .bind(digest)
+                    .bind(attachment_id)
+                    .execute(pool)
+                    .await?;
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "attachment store write failed; not caching");
+                return Ok(());
+            }
+        }
+    }
+    sqlx::query("UPDATE attachments SET content = ? WHERE id = ?")
+        .bind(content)
+        .bind(attachment_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 async fn ensure_message_exists(pool: &sqlx::SqlitePool, message_id: &str) -> Result<()> {
@@ -591,6 +631,7 @@ struct AttachmentContentRow {
     content: Option<Vec<u8>>,
     part_id: String,
     size_bytes: i64,
+    file_sha256: Option<String>,
 }
 
 fn attachment_cache_limit() -> usize {
@@ -639,6 +680,7 @@ pub(crate) async fn cache_provider_attachments_tx(
             .fetch_all(&mut **tx)
             .await?;
     let cache_limit = attachment_cache_limit();
+    let store = crate::attachment_store::store_dir_conn(tx).await;
     let mut desired = std::collections::HashSet::new();
     for attachment in attachments {
         let id = format!("{message_id}:{}", attachment.part_id);
@@ -647,16 +689,31 @@ pub(crate) async fn cache_provider_attachments_tx(
             .content
             .as_deref()
             .filter(|content| content.len() <= cache_limit);
+        let mut file_sha256 = None;
+        let mut blob = cached_content;
+        if let (Some(dir), Some(content)) = (&store, cached_content) {
+            match crate::attachment_store::put(dir, content).await {
+                Ok(digest) => {
+                    file_sha256 = Some(digest);
+                    blob = None;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "attachment store write failed; keeping BLOB")
+                }
+            }
+        }
         sqlx::query(
             r#"INSERT INTO attachments
-               (id, message_id, filename, content_type, part_id, content_id, size_bytes, content)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               (id, message_id, filename, content_type, part_id, content_id, size_bytes, content, file_sha256)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(message_id, part_id) DO UPDATE SET
                    filename = excluded.filename,
                    content_type = excluded.content_type,
                    content_id = excluded.content_id,
                    size_bytes = excluded.size_bytes,
-                   content = COALESCE(excluded.content, attachments.content)"#,
+                   content = CASE WHEN excluded.file_sha256 IS NOT NULL THEN NULL
+                                  ELSE COALESCE(excluded.content, attachments.content) END,
+                   file_sha256 = COALESCE(excluded.file_sha256, attachments.file_sha256)"#,
         )
         .bind(id)
         .bind(message_id)
@@ -665,7 +722,8 @@ pub(crate) async fn cache_provider_attachments_tx(
         .bind(&attachment.part_id)
         .bind(&attachment.content_id)
         .bind(attachment.size_bytes)
-        .bind(cached_content)
+        .bind(blob)
+        .bind(file_sha256)
         .execute(&mut **tx)
         .await?;
     }
