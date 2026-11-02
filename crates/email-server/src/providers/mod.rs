@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -108,12 +109,25 @@ pub struct BusySlot {
     pub end_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleEvent {
+    Changed,
+    Timeout,
+}
+
 // ── Provider traits ──────────────────────────────────────────────────────────
 
 #[async_trait]
 pub trait MailProvider: Send + Sync {
     fn provider_id(&self) -> &str;
     async fn authenticate(&mut self) -> Result<()>;
+    /// Wait for a mailbox change. Providers without IMAP IDLE return an error;
+    /// the scheduler keeps polling those accounts instead.
+    async fn wait_for_idle(&self, _timeout: Duration) -> Result<IdleEvent> {
+        Err(crate::error::AppError::Provider(
+            "IMAP IDLE is unsupported".into(),
+        ))
+    }
     async fn list_folders(&self) -> Result<Vec<Folder>>;
     /// Return the mailbox UIDVALIDITY value used to scope IMAP UIDs.
     async fn folder_uid_validity(&self, folder: &str) -> Result<Option<u32>>;
