@@ -298,7 +298,10 @@ impl MailProvider for GenericImapProvider {
             .join(",");
 
         let fetch_stream = session
-            .uid_fetch(&uid_range, "(UID FLAGS RFC822.SIZE ENVELOPE BODYSTRUCTURE)")
+            .uid_fetch(
+                &uid_range,
+                "(UID FLAGS RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO)])",
+            )
             .await
             .map_err(|e| AppError::Imap(format!("UID FETCH failed: {}", e)))?;
 
@@ -403,8 +406,14 @@ impl MailProvider for GenericImapProvider {
                 .bodystructure()
                 .map(super::bodystructure_attachments)
                 .unwrap_or_default();
-            let thread_id =
-                thread_id.or_else(|| message_id.as_deref().map(|value| format!("rfc:{value}")));
+            let thread_id = fetch
+                .body()
+                .and_then(|body| std::str::from_utf8(body).ok())
+                .map(crate::threading::references)
+                .and_then(|ids| ids.first().cloned())
+                .map(|id| format!("rfc:{id}"))
+                .or(thread_id)
+                .or_else(|| message_id.as_deref().map(|value| format!("rfc:{value}")));
             messages.push(Message {
                 id: Uuid::new_v4(),
                 uid,

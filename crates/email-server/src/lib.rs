@@ -14,6 +14,7 @@ pub mod search_index;
 pub mod smtp;
 pub mod state;
 pub mod sync;
+pub mod threading;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
