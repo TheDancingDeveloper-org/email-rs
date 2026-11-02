@@ -271,19 +271,26 @@ fn text_search_clause(
 ) -> (String, String) {
     match operator {
         "not_contains" => (
-            format!("lower({expression}) NOT LIKE lower(?)"),
-            format!("%{value}%"),
+            format!("lower({expression}) NOT LIKE lower(?) ESCAPE '\\'"),
+            format!("%{}%", escape_like(value)),
         ),
         "equals" => (format!("lower({expression}) = lower(?)"), value.to_string()),
         "starts_with" => (
-            format!("lower({expression}) LIKE lower(?)"),
-            format!("{value}%"),
+            format!("lower({expression}) LIKE lower(?) ESCAPE '\\'"),
+            format!("{}%", escape_like(value)),
         ),
         _ => (
-            format!("lower({expression}) LIKE lower(?)"),
-            format!("%{value}%"),
+            format!("lower({expression}) LIKE lower(?) ESCAPE '\\'"),
+            format!("%{}%", escape_like(value)),
         ),
     }
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 async fn search_structured(
@@ -393,6 +400,7 @@ async fn search_like(
     term: &str,
     account_id: Option<&str>,
 ) -> Result<Vec<MessageRow>> {
+    let term = escape_like(term);
     let q_sub = format!("%{term}%");
     let q_word_start = format!("{term} %");
     let q_word_mid = format!("% {term}%");
@@ -409,16 +417,16 @@ async fn search_like(
            FROM messages m
            LEFT JOIN message_bodies mb ON mb.message_id = m.id
            WHERE {account_clause}
-                 (m.subject LIKE ? OR m.from_name LIKE ? OR m.from_email LIKE ?
-                  OR m.to_json LIKE ? OR m.cc_json LIKE ? OR m.preview LIKE ?
-                  OR mb.clean_body LIKE ? OR mb.quoted_history LIKE ?)
+                 (m.subject LIKE ? ESCAPE '\' OR m.from_name LIKE ? ESCAPE '\' OR m.from_email LIKE ? ESCAPE '\'
+                  OR m.to_json LIKE ? ESCAPE '\' OR m.cc_json LIKE ? ESCAPE '\' OR m.preview LIKE ? ESCAPE '\'
+                  OR mb.clean_body LIKE ? ESCAPE '\' OR mb.quoted_history LIKE ? ESCAPE '\')
            GROUP BY m.id
            ORDER BY CASE
-                      WHEN lower(m.subject) LIKE lower(?) OR lower(m.subject) LIKE lower(?) THEN 4
-                      WHEN m.subject LIKE ? THEN 3
-                      WHEN m.from_name LIKE ? OR m.from_email LIKE ? THEN 2
-                      WHEN m.to_json LIKE ? OR m.cc_json LIKE ? OR m.preview LIKE ?
-                           OR mb.clean_body LIKE ? THEN 1
+                      WHEN lower(m.subject) LIKE lower(?) ESCAPE '\' OR lower(m.subject) LIKE lower(?) ESCAPE '\' THEN 4
+                      WHEN m.subject LIKE ? ESCAPE '\' THEN 3
+                      WHEN m.from_name LIKE ? ESCAPE '\' OR m.from_email LIKE ? ESCAPE '\' THEN 2
+                      WHEN m.to_json LIKE ? ESCAPE '\' OR m.cc_json LIKE ? ESCAPE '\' OR m.preview LIKE ? ESCAPE '\'
+                           OR mb.clean_body LIKE ? ESCAPE '\' THEN 1
                       ELSE 0 END DESC,
                     m.date DESC
            LIMIT 50"#
@@ -527,12 +535,13 @@ pub async fn suggest_messages(
         }
     } else {
         // Prefix LIKE on subject/from only — no leading wildcard so index is usable
+        let term = escape_like(term);
         let q_prefix = format!("{term}%");
         let q_sub = format!("%{term}%");
         sqlx::query_as::<_, SuggestRow>(
             r#"SELECT id, folder_id, subject, from_name, from_email, date
                FROM messages
-               WHERE subject LIKE ? OR from_name LIKE ? OR from_email LIKE ?
+               WHERE subject LIKE ? ESCAPE '\' OR from_name LIKE ? ESCAPE '\' OR from_email LIKE ? ESCAPE '\'
                ORDER BY date DESC
                LIMIT 8"#,
         )
@@ -548,10 +557,10 @@ pub async fn suggest_messages(
 }
 
 async fn suggest_calendar_events(state: &AppState, term: &str) -> Result<Vec<CalendarSuggestRow>> {
-    let q = format!("%{term}%");
+    let q = format!("%{}%", escape_like(term));
     sqlx::query_as::<_, CalendarSuggestRow>(
         "SELECT id, title, start_at FROM calendar_events \
-         WHERE title LIKE ? OR description LIKE ? \
+         WHERE title LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\' \
          ORDER BY start_at \
          LIMIT 3",
     )
@@ -568,12 +577,12 @@ async fn search_calendar_events(
     account_id: Option<&str>,
     limit: i64,
 ) -> Result<Vec<CalendarSearchRow>> {
-    let q = format!("%{term}%");
+    let q = format!("%{}%", escape_like(term));
     if let Some(aid) = account_id {
         sqlx::query_as::<_, CalendarSearchRow>(
             "SELECT id, title, description, start_at, end_at, location, is_all_day \
              FROM calendar_events \
-             WHERE account_id = ? AND (title LIKE ? OR description LIKE ?) \
+             WHERE account_id = ? AND (title LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\') \
              ORDER BY start_at \
              LIMIT ?",
         )
@@ -588,7 +597,7 @@ async fn search_calendar_events(
         sqlx::query_as::<_, CalendarSearchRow>(
             "SELECT id, title, description, start_at, end_at, location, is_all_day \
              FROM calendar_events \
-             WHERE title LIKE ? OR description LIKE ? \
+             WHERE title LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\' \
              ORDER BY start_at \
              LIMIT ?",
         )
@@ -623,12 +632,12 @@ pub async fn suggest_contacts(
     if term.len() < 2 {
         return Ok(Json(vec![]));
     }
-    let q = format!("%{term}%");
+    let q = format!("%{}%", escape_like(term));
     let rows = sqlx::query_as::<_, ContactRow>(
         r#"SELECT from_name AS name, from_email AS email
            FROM messages
            WHERE from_email IS NOT NULL
-             AND (from_email LIKE ? OR from_name LIKE ?)
+             AND (from_email LIKE ? ESCAPE '\' OR from_name LIKE ? ESCAPE '\')
            GROUP BY from_email
            ORDER BY MAX(date) DESC
            LIMIT 10"#,
@@ -958,6 +967,35 @@ mod tests {
         let arr = body["messages"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["id"], "ml1");
+    }
+
+    #[tokio::test]
+    async fn search_like_fallback_treats_like_wildcards_as_literals() {
+        let state = make_state(false).await;
+        for (id, subject) in [
+            ("percent", "100% complete"),
+            ("underscore", "under_score"),
+            ("slash", r"path\name"),
+        ] {
+            seed(
+                &state.pool,
+                id,
+                "acc1",
+                "fld1",
+                subject,
+                "sender@example.com",
+                "Sender",
+                "",
+            )
+            .await;
+        }
+
+        for (term, expected) in [("%25", "percent"), ("_", "underscore"), (r"\", "slash")] {
+            assert_eq!(
+                ids(state.clone(), &format!("/search?q={term}")).await,
+                [expected]
+            );
+        }
     }
 
     #[tokio::test]
