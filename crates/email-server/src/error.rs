@@ -5,6 +5,9 @@ use axum::{
 };
 use serde_json::json;
 use thiserror::Error;
+use uuid::Uuid;
+
+const INTERNAL_ERROR_MESSAGE: &str = "An internal error occurred";
 
 #[derive(Debug, Error)]
 #[allow(dead_code)]
@@ -48,24 +51,48 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
-            AppError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            AppError::Provider(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
-            AppError::RateLimited { message, .. } => {
-                (StatusCode::TOO_MANY_REQUESTS, message.clone())
-            }
-            AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
-            AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            AppError::Imap(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
-            AppError::Smtp(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
-            AppError::Internal(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        let (status, message, correlation_id) = match self {
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, None),
+            AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg, None),
+            AppError::Database(error) => internal_error_response("database", &error),
+            AppError::Provider(msg) => (StatusCode::BAD_GATEWAY, msg, None),
+            AppError::RateLimited { message, .. } => (StatusCode::TOO_MANY_REQUESTS, message, None),
+            AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg, None),
+            AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg, None),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg, None),
+            AppError::Imap(msg) => (StatusCode::BAD_GATEWAY, msg, None),
+            AppError::Smtp(msg) => (StatusCode::BAD_GATEWAY, msg, None),
+            AppError::Internal(error) => internal_error_response("internal", &error),
         };
 
-        (status, Json(json!({ "error": message }))).into_response()
+        let body = match correlation_id {
+            Some(correlation_id) => json!({
+                "error": message,
+                "correlation_id": correlation_id,
+            }),
+            None => json!({ "error": message }),
+        };
+
+        (status, Json(body)).into_response()
     }
+}
+
+fn internal_error_response(
+    error_kind: &'static str,
+    error: &dyn std::fmt::Debug,
+) -> (StatusCode, String, Option<String>) {
+    let correlation_id = Uuid::new_v4().to_string();
+    tracing::error!(
+        correlation_id = %correlation_id,
+        error_kind,
+        error = ?error,
+        "request failed"
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        INTERNAL_ERROR_MESSAGE.to_owned(),
+        Some(correlation_id),
+    )
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
@@ -75,9 +102,16 @@ mod tests {
     use super::*;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
 
     fn status_of(err: AppError) -> StatusCode {
         err.into_response().status()
+    }
+
+    async fn response_json(err: AppError) -> serde_json::Value {
+        let response = err.into_response();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
     }
 
     #[test]
@@ -146,19 +180,45 @@ mod tests {
 
     #[tokio::test]
     async fn response_body_has_error_key() {
-        use http_body_util::BodyExt;
-        let resp = AppError::NotFound("thing not found".into()).into_response();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let json = response_json(AppError::NotFound("thing not found".into())).await;
         assert_eq!(json["error"], "thing not found");
     }
 
     #[tokio::test]
     async fn auth_error_body_contains_message() {
-        use http_body_util::BodyExt;
-        let resp = AppError::Auth("invalid token".into()).into_response();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let json = response_json(AppError::Auth("invalid token".into())).await;
         assert_eq!(json["error"], "invalid token");
+    }
+
+    #[tokio::test]
+    async fn database_error_body_hides_sql_and_has_correlation_id() {
+        let sensitive = "SELECT password FROM users";
+        let json = response_json(AppError::Database(sqlx::Error::Protocol(
+            sensitive.to_owned(),
+        )))
+        .await;
+
+        assert_eq!(json["error"], INTERNAL_ERROR_MESSAGE);
+        assert!(!json.to_string().contains(sensitive));
+        assert!(Uuid::parse_str(json["correlation_id"].as_str().unwrap()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn internal_error_body_hides_detail_and_has_correlation_id() {
+        let sensitive = "credential decryption failed for account 42";
+        let json = response_json(AppError::Internal(anyhow::anyhow!(sensitive))).await;
+
+        assert_eq!(json["error"], INTERNAL_ERROR_MESSAGE);
+        assert!(!json.to_string().contains(sensitive));
+        assert!(Uuid::parse_str(json["correlation_id"].as_str().unwrap()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn validation_error_body_keeps_user_facing_message() {
+        let message = "email address is required";
+        let json = response_json(AppError::Validation(message.into())).await;
+
+        assert_eq!(json["error"], message);
+        assert!(json.get("correlation_id").is_none());
     }
 }
