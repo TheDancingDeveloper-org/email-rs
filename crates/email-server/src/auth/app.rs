@@ -1152,6 +1152,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_carry_security_headers() {
+        let state = setup().await;
+        let app = crate::build_app(state, "/tmp/email-rs-no-static-files");
+        let (status, headers, _) = send(app, Method::GET, "/api/v1/health", None, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["x-frame-options"], "DENY");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        let csp = headers["content-security-policy"].to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"));
+    }
+
+    #[tokio::test]
     async fn oauth_state_owner_must_still_have_an_active_session() {
         let state = setup().await;
         seed_user(&state).await;
