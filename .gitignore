@@ -1,6 +1,8 @@
 /target
 /frontend/node_modules
 /frontend/dist
+/crates/email-server/static/index.html
+/crates/email-server/static/assets/
 *.env
 .env*
 !.env.example
