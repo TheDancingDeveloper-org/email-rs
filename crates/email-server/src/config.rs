@@ -9,6 +9,10 @@ pub struct Config {
     pub frontend_dist: String,
     pub public_url: Option<String>,
     pub allow_insecure_http: bool,
+    /// `EMAIL_RS_DISABLE_AUTH`: turns off all authentication.
+    pub disable_auth: bool,
+    /// `EMAIL_RS_ALLOW_OPEN_NO_AUTH`: second opt-in to run without auth on a non-loopback bind.
+    pub allow_open_no_auth: bool,
     pub webhook_policy: WebhookPolicy,
 }
 
@@ -105,6 +109,8 @@ impl Config {
             frontend_dist,
             public_url: env::var("EMAIL_RS_PUBLIC_URL").ok(),
             allow_insecure_http: env_flag("EMAIL_RS_ALLOW_INSECURE_HTTP"),
+            disable_auth: env_flag("EMAIL_RS_DISABLE_AUTH"),
+            allow_open_no_auth: env_flag("EMAIL_RS_ALLOW_OPEN_NO_AUTH"),
             webhook_policy: WebhookPolicy::from_env(),
         }
     }
@@ -122,6 +128,18 @@ impl Config {
         if !loopback && !public_https && !self.allow_insecure_http {
             anyhow::bail!(
                 "non-loopback deployments require EMAIL_RS_PUBLIC_URL=https://...; set EMAIL_RS_ALLOW_INSECURE_HTTP=true only for explicit development"
+            );
+        }
+        if self.disable_auth {
+            if !loopback && !self.allow_open_no_auth {
+                anyhow::bail!(
+                    "EMAIL_RS_DISABLE_AUTH turns off all authentication and the bind address {} is not loopback; bind to 127.0.0.1 or also set EMAIL_RS_ALLOW_OPEN_NO_AUTH=true to accept an open server",
+                    self.host
+                );
+            }
+            tracing::warn!(
+                "EMAIL_RS_DISABLE_AUTH is set: ALL AUTHENTICATION IS DISABLED; anyone who can reach {} has full access to all mail",
+                self.bind_addr()
             );
         }
         Ok(())
@@ -200,5 +218,47 @@ mod data_dir_tests {
             result.is_err(),
             "from_env returned a config with no data dir"
         );
+    }
+}
+
+#[cfg(test)]
+mod validate_security_tests {
+    use super::*;
+
+    fn cfg(host: &str, disable_auth: bool, allow_open: bool) -> Config {
+        Config {
+            host: host.into(),
+            port: 8585,
+            database_url: String::new(),
+            frontend_dist: String::new(),
+            public_url: Some("https://mail.example.com".into()),
+            allow_insecure_http: false,
+            disable_auth,
+            allow_open_no_auth: allow_open,
+            webhook_policy: WebhookPolicy {
+                allow_insecure_http: false,
+                allowlist: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn disable_auth_refused_on_public_bind() {
+        assert!(cfg("0.0.0.0", true, false).validate_security().is_err());
+    }
+
+    #[test]
+    fn disable_auth_allowed_on_loopback() {
+        assert!(cfg("127.0.0.1", true, false).validate_security().is_ok());
+    }
+
+    #[test]
+    fn disable_auth_allowed_public_with_second_opt_in() {
+        assert!(cfg("0.0.0.0", true, true).validate_security().is_ok());
+    }
+
+    #[test]
+    fn auth_enabled_public_bind_unaffected() {
+        assert!(cfg("0.0.0.0", false, false).validate_security().is_ok());
     }
 }
