@@ -9,6 +9,7 @@ import { CommandPalette } from './components/CommandPalette/CommandPalette';
 import { CalendarView } from './components/Calendar/CalendarView';
 import { useAppStore } from './store';
 import { applyDensity } from './utils/density';
+import { handleOAuthCallback } from './utils/oauthCallback';
 import type { Account } from './types';
 
 const SIDEBAR_W_KEY = 'email_sidebar_w';
@@ -175,8 +176,7 @@ export function App() {
   };
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('oauth') === 'success') window.history.replaceState(null, '', window.location.pathname);
+    handleOAuthCallback(window.location, window.history);
     fetchAccounts();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
