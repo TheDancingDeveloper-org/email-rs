@@ -1,0 +1,9 @@
+{
+  "reviewed": "2026-11-02",
+  "waivers": [
+    { "id": "GHSA-587h-7wmj-h5pm", "expires": "2027-02-02", "reason": "Existing Vite advisory; upgrade tracked separately from CI enablement." },
+    { "id": "GHSA-5gmw-xhrv-c9v3", "expires": "2027-02-02", "reason": "Existing transitive tinypool advisory through Vitest; upgrade tracked separately." },
+    { "id": "GHSA-5xrq-8626-4rwp", "expires": "2027-02-02", "reason": "Existing Vitest advisory; upgrade tracked separately from CI enablement." },
+    { "id": "GHSA-85c8-ppgw-ccpr", "expires": "2027-02-02", "reason": "Existing transitive tinypool advisory through Vitest; upgrade tracked separately." }
+  ]
+}
