@@ -379,6 +379,9 @@ fn migrations() -> Vec<Migration> {
     fn identity(pool: &SqlitePool) -> StepFuture<'_> {
         Box::pin(run_message_identity_migration(pool))
     }
+    fn attachment_files(pool: &SqlitePool) -> StepFuture<'_> {
+        Box::pin(run_attachment_file_store_migration(pool))
+    }
     vec![
         Migration {
             version: 11,
@@ -444,6 +447,11 @@ fn migrations() -> Vec<Migration> {
             version: 23,
             name: "message_pagination",
             apply: in_transaction!(run_message_pagination_migration),
+        },
+        Migration {
+            version: 24,
+            name: "attachment_file_store",
+            apply: Apply::SelfManaged(attachment_files),
         },
     ]
 }
@@ -938,6 +946,56 @@ async fn run_application_auth_migration(conn: &mut SqliteConnection) -> anyhow::
         .execute(&mut *conn)
         .await?;
     Ok(())
+}
+
+const ATTACHMENT_FILE_MIGRATION_BATCH_SIZE: i64 = 50;
+
+/// Add `attachments.file_sha256` and move existing BLOB content into the
+/// content-addressed store in batches. Each batch commits on its own and only
+/// clears a BLOB after its file is durably written, so an interrupted run
+/// resumes where it stopped (the version is recorded only at the end).
+/// Databases without a data directory (in-memory) keep their BLOBs.
+async fn run_attachment_file_store_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('attachments')")
+            .fetch_all(pool)
+            .await?;
+    if !columns.iter().any(|column| column == "file_sha256") {
+        sqlx::query("ALTER TABLE attachments ADD COLUMN file_sha256 TEXT")
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_file_sha256 ON attachments(file_sha256) WHERE file_sha256 IS NOT NULL",
+    )
+    .execute(pool)
+    .await?;
+    let Some(dir) = crate::attachment_store::store_dir(pool).await else {
+        return Ok(());
+    };
+    loop {
+        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT id, content FROM attachments WHERE content IS NOT NULL AND file_sha256 IS NULL LIMIT ?",
+        )
+        .bind(ATTACHMENT_FILE_MIGRATION_BATCH_SIZE)
+        .fetch_all(pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut tx = begin_write(pool).await?;
+        for (id, content) in rows {
+            let digest = crate::attachment_store::put(&dir, &content).await?;
+            sqlx::query(
+                "UPDATE attachments SET file_sha256 = ?, content = NULL WHERE id = ? AND file_sha256 IS NULL",
+            )
+            .bind(digest)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+    }
 }
 
 async fn run_attachment_metadata_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
@@ -1919,6 +1977,80 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn attachment_blob_migration_moves_content_to_files_and_resumes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(tmp.path().join("email.db"))
+                    .create_if_missing(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        for statement in include_str!("migrations/001_initial.sql").split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+        for statement in [
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('account-1', 'Legacy', 'legacy@example.test', 'imap', 'password')",
+            "INSERT INTO folders (id, account_id, name, full_path) VALUES ('folder-1', 'account-1', 'Inbox', 'INBOX')",
+            "INSERT INTO messages (id, account_id, folder_id, uid, message_id, from_email, date, subject) VALUES ('message-1', 'account-1', 'folder-1', 7, '<legacy@example>', 'sender@example.test', '2026-07-12T00:00:00Z', 'Legacy')",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        // More rows than one batch, with duplicate content to share a file.
+        let total = ATTACHMENT_FILE_MIGRATION_BATCH_SIZE + 5;
+        for i in 0..total {
+            sqlx::query(
+                "INSERT INTO attachments (id, message_id, filename, content_type, part_id, size_bytes, content) VALUES (?, 'message-1', 'f', 'text/plain', ?, 1, ?)",
+            )
+            .bind(format!("att-{i}"))
+            .bind(format!("{i}"))
+            .bind(format!("content-{}", i % 10).into_bytes())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Simulate an interrupted run: schema exists, first batch moved only.
+        run_migrations(&pool).await.unwrap();
+        sqlx::query("DELETE FROM schema_migrations WHERE version = 24")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE attachments SET file_sha256 = NULL, content = CAST('content-3' AS BLOB) WHERE id = 'att-3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        run_migrations(&pool).await.unwrap();
+
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM attachments WHERE content IS NOT NULL OR file_sha256 IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+        let digest: String =
+            sqlx::query_scalar("SELECT file_sha256 FROM attachments WHERE id = 'att-3'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let dir = tmp.path().join("attachments");
+        let stored = std::fs::read(dir.join(&digest[..2]).join(&digest)).unwrap();
+        assert_eq!(stored, b"content-3");
+        let files = std::fs::read_dir(&dir)
+            .unwrap()
+            .flat_map(|shard| std::fs::read_dir(shard.unwrap().path()).unwrap())
+            .count();
+        assert_eq!(files, 10);
     }
 
     #[tokio::test]
