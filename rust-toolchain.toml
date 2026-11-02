@@ -1,0 +1,7 @@
+# Single source of truth for the Rust toolchain. CI workflows, the
+# Dockerfiles and the Woodpecker release read the channel from here.
+# The workspace MSRV is `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
