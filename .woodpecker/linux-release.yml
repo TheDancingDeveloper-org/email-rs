@@ -25,7 +25,8 @@ steps:
 
   # ── Build server and native FluentGUI Linux binaries ────────────────────────
   - name: build-binary
-    # The locked Fluent desktop graph includes crates whose MSRV is Rust 1.88.
+    # The locked Fluent desktop graph needs Rust 1.88+. rustup in this image installs the
+    # channel pinned in rust-toolchain.toml on first cargo call; the digest pin is the bootstrap image.
     image: rust@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 # 1.88-slim
     depends_on: [build-frontend]
     commands:

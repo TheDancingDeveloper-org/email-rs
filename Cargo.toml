@@ -10,3 +10,4 @@ resolver = "2"
 
 [workspace.package]
 license = "MIT"
+rust-version = "1.88"
