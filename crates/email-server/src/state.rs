@@ -13,6 +13,7 @@ pub struct OAuthState {
     pub session_id: String,
     pub verifier: Option<String>,
     pub account_id: Option<String>,
+    pub created_at: i64,
 }
 
 /// Shared application state threaded through all Axum handlers.
