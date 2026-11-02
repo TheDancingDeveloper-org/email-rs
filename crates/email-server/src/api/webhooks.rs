@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
@@ -373,6 +373,36 @@ struct VettedUrl {
     socket: std::net::SocketAddr,
 }
 
+#[derive(Default)]
+struct DeliveryClients {
+    by_destination: std::sync::Mutex<HashMap<(String, std::net::SocketAddr), reqwest::Client>>,
+}
+
+impl DeliveryClients {
+    fn get(&self, vetted: &VettedUrl) -> std::result::Result<reqwest::Client, reqwest::Error> {
+        let key = (vetted.host.clone(), vetted.socket);
+        let mut clients = self
+            .by_destination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(client) = clients.get(&key) {
+            return Ok(client.clone());
+        }
+
+        let client = delivery_client(vetted)?;
+        clients.insert(key, client.clone());
+        Ok(client)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.by_destination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+}
+
 fn validate_webhook_url(url: &str, policy: &crate::config::WebhookPolicy) -> Result<()> {
     parse_webhook_url(url, policy).map(|_| ())
 }
@@ -582,6 +612,7 @@ async fn record_failure(
 async fn deliver_one(
     pool: &sqlx::SqlitePool,
     policy: &crate::config::WebhookPolicy,
+    clients: &DeliveryClients,
     row: PendingDelivery,
 ) {
     let claimed = sqlx::query(
@@ -602,6 +633,14 @@ async fn deliver_one(
         Ok(value) => value,
         Err(error) => {
             tracing::warn!(%error, event_id = %row.event_id, "stored webhook JSON is invalid");
+            record_failure(
+                pool,
+                &row,
+                row.attempts + 1,
+                None,
+                format!("stored webhook JSON is invalid: {error}"),
+            )
+            .await;
             return;
         }
     };
@@ -616,6 +655,14 @@ async fn deliver_one(
         Ok(value) => value,
         Err(error) => {
             tracing::warn!(%error, "webhook payload serialization failed");
+            record_failure(
+                pool,
+                &row,
+                row.attempts + 1,
+                None,
+                format!("webhook payload serialization failed: {error}"),
+            )
+            .await;
             return;
         }
     };
@@ -626,10 +673,18 @@ async fn deliver_one(
             return;
         }
     };
-    let client = match delivery_client(&vetted) {
+    let client = match clients.get(&vetted) {
         Ok(client) => client,
         Err(error) => {
             tracing::warn!(%error, "webhook client creation failed");
+            record_failure(
+                pool,
+                &row,
+                row.attempts + 1,
+                None,
+                format!("webhook client creation failed: {error}"),
+            )
+            .await;
             return;
         }
     };
@@ -722,9 +777,10 @@ async fn deliver_one(
     }
 }
 
-pub async fn dispatch_due(
+async fn dispatch_due_with_clients(
     pool: &sqlx::SqlitePool,
     policy: &crate::config::WebhookPolicy,
+    clients: &DeliveryClients,
 ) -> Result<usize> {
     let rows = sqlx::query_as::<_, PendingDelivery>(
         r#"SELECT d.event_id, d.webhook_id, e.event_type, e.account_id,
@@ -740,13 +796,22 @@ pub async fn dispatch_due(
     .await?;
     let count = rows.len();
     for row in rows {
-        deliver_one(pool, policy, row).await;
+        deliver_one(pool, policy, clients, row).await;
     }
     Ok(count)
 }
 
+#[cfg(test)]
+async fn dispatch_due(
+    pool: &sqlx::SqlitePool,
+    policy: &crate::config::WebhookPolicy,
+) -> Result<usize> {
+    dispatch_due_with_clients(pool, policy, &DeliveryClients::default()).await
+}
+
 pub fn spawn_delivery_worker(pool: sqlx::SqlitePool, policy: crate::config::WebhookPolicy) {
     tokio::spawn(async move {
+        let clients = DeliveryClients::default();
         let _ = sqlx::query(
             "UPDATE webhook_deliveries SET status = 'retry' WHERE status = 'delivering'",
         )
@@ -755,7 +820,7 @@ pub fn spawn_delivery_worker(pool: sqlx::SqlitePool, policy: crate::config::Webh
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            if let Err(error) = dispatch_due(&pool, &policy).await {
+            if let Err(error) = dispatch_due_with_clients(&pool, &policy, &clients).await {
                 tracing::warn!(%error, "webhook delivery worker failed");
             }
         }
@@ -902,6 +967,35 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(failure, ("retry".to_string(), 1, 500));
+    }
+
+    #[tokio::test]
+    async fn invalid_stored_payload_is_recorded_as_a_retry() {
+        let pool = setup().await;
+        let url = "http://127.0.0.1:1/";
+        webhook(&pool, url, None).await;
+        fire_webhooks(
+            &pool,
+            "account-1",
+            "message.created",
+            serde_json::json!({"eventId": "invalid-payload-1"}),
+        )
+        .await;
+        sqlx::query("UPDATE webhook_events SET data_json = '{' WHERE id = 'invalid-payload-1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(dispatch_due(&pool, &dev_policy(&[url])).await.unwrap(), 1);
+        let delivery: (String, i64, String) = sqlx::query_as(
+            "SELECT status, attempts, last_error FROM webhook_deliveries WHERE event_id = 'invalid-payload-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(delivery.0, "retry");
+        assert_eq!(delivery.1, 1);
+        assert!(delivery.2.starts_with("stored webhook JSON is invalid:"));
     }
 
     #[test]
@@ -1124,6 +1218,18 @@ mod tests {
         // and ALL_PROXY cannot redirect the connection off the pinned socket.
         let client = delivery_client(&vetted).expect("client builds");
         drop(client);
+    }
+
+    #[test]
+    fn delivery_clients_are_reused_for_the_same_destination() {
+        let vetted = VettedUrl {
+            host: "hooks.example.com".into(),
+            socket: "1.1.1.1:443".parse().unwrap(),
+        };
+        let clients = DeliveryClients::default();
+        clients.get(&vetted).expect("first client builds");
+        clients.get(&vetted).expect("cached client is returned");
+        assert_eq!(clients.len(), 1);
     }
 
     #[test]
