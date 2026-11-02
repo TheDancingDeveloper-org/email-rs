@@ -5,6 +5,8 @@ RUN cargo install cargo-watch --locked
 
 WORKDIR /app
 
+# rustup reads the pinned channel from rust-toolchain.toml in /app (the source mount).
+
 ENV CARGO_HOME=/usr/local/cargo
 
 CMD ["cargo", "watch", "-x", "run"]
