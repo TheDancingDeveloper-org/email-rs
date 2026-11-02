@@ -115,18 +115,6 @@ fn special_use_for_name(name: &str, attrs: &[NameAttribute<'_>]) -> Option<Strin
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::special_use_for_name;
-
-    #[test]
-    fn recognizes_generic_and_microsoft_sent_folder_names() {
-        assert_eq!(special_use_for_name("Sent", &[]), Some("sent".into()));
-        assert_eq!(special_use_for_name("Sent Items", &[]), Some("sent".into()));
-        assert_eq!(special_use_for_name("Sent Mail", &[]), Some("sent".into()));
-    }
-}
-
 fn display_name(full_path: &str) -> String {
     full_path
         .split('/')
@@ -690,5 +678,17 @@ impl MailProvider for GenericImapProvider {
         })?;
         let _ = session.logout().await;
         Ok(uid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::special_use_for_name;
+
+    #[test]
+    fn recognizes_generic_and_microsoft_sent_folder_names() {
+        assert_eq!(special_use_for_name("Sent", &[]), Some("sent".into()));
+        assert_eq!(special_use_for_name("Sent Items", &[]), Some("sent".into()));
+        assert_eq!(special_use_for_name("Sent Mail", &[]), Some("sent".into()));
     }
 }
