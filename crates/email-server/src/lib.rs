@@ -8,6 +8,7 @@ pub mod db;
 pub mod error;
 pub mod imap;
 pub mod maintenance;
+pub mod metrics;
 pub mod outbox;
 pub mod providers;
 pub mod rules;
