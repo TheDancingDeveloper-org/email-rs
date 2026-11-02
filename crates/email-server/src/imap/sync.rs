@@ -701,6 +701,30 @@ async fn sync_folder(
             msg.subject.as_deref(),
             Some(&msg_id),
         );
+        let subject_thread_id = if msg.thread_id.is_none() {
+            let subject = crate::threading::normalized_subject(msg.subject.as_deref());
+            if let Some(subject) = subject {
+                let candidates: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+                    "SELECT thread_id, subject FROM messages WHERE account_id = ? AND thread_id IS NOT NULL",
+                )
+                .bind(account_id)
+                .fetch_all(&mut *tx)
+                .await?;
+                candidates
+                    .into_iter()
+                    .find_map(|(thread_id, candidate_subject)| {
+                        (crate::threading::normalized_subject(candidate_subject.as_deref())
+                            .as_ref()
+                            == Some(&subject))
+                        .then_some(thread_id)
+                        .flatten()
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let thread_id = if let Some(parent_message_id) = msg
             .thread_id
             .as_deref()
@@ -719,7 +743,7 @@ async fn sync_folder(
             .await?
             .or_else(|| Some(format!("rfc:{account_id}:{parent_message_id}")))
         } else {
-            msg.thread_id.clone().or_else(|| {
+            msg.thread_id.clone().or(subject_thread_id).or_else(|| {
                 msg.message_id
                     .as_deref()
                     .map(|message_id| format!("rfc:{account_id}:{message_id}"))
