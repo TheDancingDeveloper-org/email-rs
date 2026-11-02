@@ -7,7 +7,7 @@
 //! In-memory databases have no directory; callers then keep the legacy BLOB.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use axum::body::Body;
 use futures::stream;
@@ -82,6 +82,10 @@ pub async fn put(dir: &Path, content: &[u8]) -> std::io::Result<String> {
         use std::io::Write;
         let target = path_for(&dir, &name);
         if target.is_file() {
+            std::fs::File::options()
+                .write(true)
+                .open(&target)?
+                .set_modified(SystemTime::now())?;
             return Ok(());
         }
         let shard = target.parent().expect("sharded path has a parent");
@@ -101,6 +105,8 @@ pub async fn put(dir: &Path, content: &[u8]) -> std::io::Result<String> {
             let _ = std::fs::remove_file(&temp);
             return Err(error);
         }
+        #[cfg(unix)]
+        std::fs::File::open(shard)?.sync_all()?;
         Ok(())
     })
     .await
@@ -258,5 +264,42 @@ mod tests {
         );
         assert!(path_for(&dir, &kept).is_file());
         assert!(!path_for(&dir, &orphan).exists());
+    }
+
+    #[tokio::test]
+    async fn dedup_hit_refreshes_mtime_and_protects_file_from_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("email.db");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&db)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE attachments (id TEXT PRIMARY KEY, file_sha256 TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dir = store_dir(&pool).await.unwrap();
+        let digest = put(&dir, b"content").await.unwrap();
+        let target = path_for(&dir, &digest);
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+
+        assert_eq!(put(&dir, b"content").await.unwrap(), digest);
+        assert_eq!(
+            remove_unreferenced_older_than(&pool, &dir, Duration::from_secs(1))
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(target.is_file());
     }
 }

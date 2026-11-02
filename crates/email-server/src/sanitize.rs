@@ -31,7 +31,7 @@ fn builder() -> Builder<'static> {
     b.add_generic_attributes(["style"]);
     b.link_rel(Some("noopener noreferrer"));
     b.attribute_filter(|element, attribute, value| match (element, attribute) {
-        (_, "style") if CSS_UNSAFE.is_match(value) => None,
+        (_, "style") if value.contains('\\') || CSS_UNSAFE.is_match(value) => None,
         // `data:` is allowed through the scheme list for inline images only.
         ("img", "src") if is_data_image(value) => Some(Cow::Borrowed(value)),
         ("img", "src") => None,
