@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use futures::stream::{self, StreamExt};
 use sqlx::SqlitePool;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -14,6 +14,39 @@ use crate::providers::factory::provider_for_account;
 use crate::providers::MailProvider;
 
 static ACCOUNT_SYNC_LOCKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Marks an account as synchronizing for as long as it lives. Dropping it,
+/// whether the sync finished, its future was cancelled or it panicked,
+/// releases the account (#19).
+struct AccountSyncGuard {
+    account_id: String,
+}
+
+impl AccountSyncGuard {
+    fn acquire(account_id: &str) -> Result<Self> {
+        let locks = ACCOUNT_SYNC_LOCKS.get_or_init(Default::default);
+        let mut active = locks.lock().unwrap_or_else(|e| e.into_inner());
+        if !active.insert(account_id.to_string()) {
+            return Err(AppError::Conflict(format!(
+                "account {account_id} is already synchronizing"
+            )));
+        }
+        Ok(Self {
+            account_id: account_id.to_string(),
+        })
+    }
+}
+
+impl Drop for AccountSyncGuard {
+    fn drop(&mut self) {
+        if let Some(locks) = ACCOUNT_SYNC_LOCKS.get() {
+            locks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.account_id);
+        }
+    }
+}
 
 /// Background IMAP sync engine.
 /// Periodically polls all configured accounts and updates the local SQLite cache.
@@ -63,17 +96,9 @@ impl ImapSyncEngine {
         account_id: &str,
         event_tx: Option<&broadcast::Sender<String>>,
     ) -> Result<()> {
-        let locks = ACCOUNT_SYNC_LOCKS.get_or_init(|| Mutex::new(HashSet::new()));
-        {
-            let mut active = locks.lock().await;
-            if !active.insert(account_id.to_string()) {
-                return Err(AppError::Conflict(format!(
-                    "account {account_id} is already synchronizing"
-                )));
-            }
-        }
+        let guard = AccountSyncGuard::acquire(account_id)?;
         let result = self.sync_account_unlocked(account_id, event_tx).await;
-        locks.lock().await.remove(account_id);
+        drop(guard);
         if result.is_ok() {
             fire_webhooks(
                 &self.pool,
@@ -755,6 +780,37 @@ mod tests {
 
     use super::*;
     use crate::providers::{Folder, Message, MessageBody};
+
+    #[tokio::test]
+    async fn cancelled_sync_releases_account_lock() {
+        let account_id = "sync-lock-cancel-test";
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let sync = tokio::spawn(async move {
+            let _guard = AccountSyncGuard::acquire(account_id).unwrap();
+            held_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        held_rx.await.unwrap();
+        assert!(matches!(
+            AccountSyncGuard::acquire(account_id),
+            Err(AppError::Conflict(_))
+        ));
+
+        sync.abort();
+        assert!(sync.await.unwrap_err().is_cancelled());
+        AccountSyncGuard::acquire(account_id).expect("lock released after cancellation");
+    }
+
+    #[tokio::test]
+    async fn panicked_sync_releases_account_lock() {
+        let account_id = "sync-lock-panic-test";
+        let sync = tokio::spawn(async move {
+            let _guard = AccountSyncGuard::acquire(account_id).unwrap();
+            panic!("sync failed mid-flight");
+        });
+        assert!(sync.await.unwrap_err().is_panic());
+        AccountSyncGuard::acquire(account_id).expect("lock released after panic");
+    }
 
     #[derive(Default)]
     struct RemoteMailbox {
