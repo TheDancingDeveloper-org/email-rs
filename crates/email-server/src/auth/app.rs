@@ -128,6 +128,7 @@ impl LoginThrottle {
 pub struct AuthSettings {
     pub enabled: bool,
     pub secure_cookies: bool,
+    pub public_url: Option<String>,
     pub allowed_origins: Arc<HashSet<String>>,
     pub session_ttl_secs: i64,
     pub bearer_ttl_secs: i64,
@@ -149,6 +150,7 @@ impl AuthSettings {
             enabled: !env_flag("EMAIL_RS_DISABLE_AUTH"),
             secure_cookies: public_url.is_some_and(|url| url.starts_with("https://"))
                 || env_flag("EMAIL_RS_COOKIE_SECURE"),
+            public_url: public_url.map(|url| url.trim_end_matches('/').to_string()),
             allowed_origins: Arc::new(allowed_origins),
             session_ttl_secs: env_i64("EMAIL_RS_SESSION_TTL_SECS", 12 * 60 * 60),
             bearer_ttl_secs: env_i64("EMAIL_RS_BEARER_TTL_SECS", 30 * 24 * 60 * 60),
@@ -159,6 +161,7 @@ impl AuthSettings {
         Self {
             enabled: false,
             secure_cookies: false,
+            public_url: None,
             allowed_origins: Arc::new(HashSet::new()),
             session_ttl_secs: 12 * 60 * 60,
             bearer_ttl_secs: 30 * 24 * 60 * 60,
@@ -645,12 +648,20 @@ fn valid_origin(headers: &HeaderMap, settings: &AuthSettings) -> bool {
     if settings.allowed_origins.contains(origin) {
         return true;
     }
+    if let Some(public_url) = settings.public_url.as_deref() {
+        return origin == public_url;
+    }
+    tracing::warn!("EMAIL_RS_PUBLIC_URL is unset; deriving request origin from headers");
     let Some(host) = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
     else {
         return false;
     };
+    let hostname = host.rsplit_once(':').map_or(host, |(hostname, _)| hostname);
+    if !matches!(hostname, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+        return false;
+    }
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
@@ -815,6 +826,7 @@ mod tests {
         let settings = AuthSettings {
             enabled: true,
             secure_cookies: false,
+            public_url: None,
             allowed_origins: Arc::new(HashSet::from([
                 "http://localhost:8585".to_string(),
                 "capacitor://localhost".to_string(),

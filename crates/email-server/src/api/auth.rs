@@ -14,6 +14,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::auth::app::AuthPrincipal;
+use crate::auth::app::AuthSettings;
 use crate::auth::oauth2::{OAuthConfig, StoredToken};
 use crate::error::{AppError, Result};
 use crate::state::{AppState, OAuthState};
@@ -51,6 +52,15 @@ fn request_origin(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("http");
     Some(format!("{scheme}://{host}"))
+}
+
+fn loopback_origin(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get(axum::http::header::HOST)?.to_str().ok()?;
+    let hostname = host.rsplit_once(':').map_or(host, |(hostname, _)| hostname);
+    if !matches!(hostname, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+        return None;
+    }
+    request_origin(headers)
 }
 
 fn not_configured(provider: &str, vars: &str) -> Response {
@@ -401,11 +411,19 @@ async fn upsert_account(
 
 // ── Gmail ─────────────────────────────────────────────────────────────────────
 
-fn gmail_redirect_uri(headers: &HeaderMap) -> String {
+fn request_origin_or_public_url(headers: &HeaderMap, settings: &AuthSettings) -> String {
+    if let Some(public_url) = settings.public_url.as_deref() {
+        return public_url.to_string();
+    }
+    tracing::warn!("EMAIL_RS_PUBLIC_URL is unset; deriving OAuth redirect origin from headers");
+    loopback_origin(headers).unwrap_or_else(|| "http://localhost:3000".into())
+}
+
+fn gmail_redirect_uri(headers: &HeaderMap, settings: &AuthSettings) -> String {
     std::env::var("GOOGLE_REDIRECT_URI").unwrap_or_else(|_| {
         format!(
             "{}/api/v1/auth/gmail/callback",
-            request_origin(headers).unwrap_or_else(|| "http://localhost:3000".into())
+            request_origin_or_public_url(headers, settings)
         )
     })
 }
@@ -426,7 +444,11 @@ pub async fn gmail_authorize(
         None => return not_configured("Google", "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET"),
     };
 
-    let oauth = OAuthConfig::gmail(client_id, client_secret, gmail_redirect_uri(&headers));
+    let oauth = OAuthConfig::gmail(
+        client_id,
+        client_secret,
+        gmail_redirect_uri(&headers, &state.auth),
+    );
     let state_val = Uuid::new_v4().to_string();
     let (url, verifier) = oauth.authorization_url(&state_val);
     let now = chrono::Utc::now().timestamp();
@@ -484,7 +506,11 @@ pub async fn gmail_callback(
         None => return not_configured("Google", "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET"),
     };
 
-    let oauth = OAuthConfig::gmail(client_id, client_secret, gmail_redirect_uri(&headers));
+    let oauth = OAuthConfig::gmail(
+        client_id,
+        client_secret,
+        gmail_redirect_uri(&headers, &app_state.auth),
+    );
     let token_resp = match oauth.exchange_code(code, pending.verifier.as_deref()).await {
         Ok(t) => t,
         Err(e) => {
@@ -532,11 +558,11 @@ pub async fn gmail_callback(
 
 // ── Microsoft / Outlook ───────────────────────────────────────────────────────
 
-fn outlook_redirect_uri(headers: &HeaderMap) -> String {
+fn outlook_redirect_uri(headers: &HeaderMap, settings: &AuthSettings) -> String {
     std::env::var("MICROSOFT_REDIRECT_URI").unwrap_or_else(|_| {
         format!(
             "{}/api/v1/auth/microsoft/callback",
-            request_origin(headers).unwrap_or_else(|| "http://localhost:3000".into())
+            request_origin_or_public_url(headers, settings)
         )
     })
 }
@@ -553,7 +579,7 @@ pub async fn microsoft_authorize(
         None => return not_configured("Microsoft", "MICROSOFT_CLIENT_ID"),
     };
 
-    let oauth = OAuthConfig::outlook(client_id, outlook_redirect_uri(&headers));
+    let oauth = OAuthConfig::outlook(client_id, outlook_redirect_uri(&headers, &state.auth));
     let state_val = Uuid::new_v4().to_string();
     let (url, verifier) = oauth.authorization_url(&state_val);
     let now = chrono::Utc::now().timestamp();
@@ -607,7 +633,7 @@ pub async fn microsoft_callback(
         None => return not_configured("Microsoft", "MICROSOFT_CLIENT_ID"),
     };
 
-    let oauth = OAuthConfig::outlook(client_id, outlook_redirect_uri(&headers));
+    let oauth = OAuthConfig::outlook(client_id, outlook_redirect_uri(&headers, &app_state.auth));
     let token_resp = match oauth.exchange_code(code, pending.verifier.as_deref()).await {
         Ok(t) => t,
         Err(e) => {
@@ -827,12 +853,15 @@ async fn update_account_token(
 #[cfg(test)]
 mod tests {
     use super::{
-        finish_oauth, insert_oauth_state, oauth_state_is_current, object_id_matches,
-        upsert_account, VerifiedIdentity, MAX_PENDING_OAUTH_STATES, MICROSOFT_CONSUMER_TENANT,
-        OAUTH_STATE_TTL_SECONDS,
+        finish_oauth, gmail_redirect_uri, insert_oauth_state, oauth_state_is_current,
+        object_id_matches, outlook_redirect_uri, upsert_account, VerifiedIdentity,
+        MAX_PENDING_OAUTH_STATES, MICROSOFT_CONSUMER_TENANT, OAUTH_STATE_TTL_SECONDS,
     };
+    use crate::auth::app::AuthSettings;
     use crate::state::OAuthState;
+    use axum::http::HeaderMap;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn pending(created_at: i64) -> OAuthState {
         OAuthState {
@@ -859,6 +888,30 @@ mod tests {
         assert!(!states.contains_key("expired"));
         assert!(states.contains_key("current"));
         assert!(oauth_state_is_current(states.get("current").unwrap(), now));
+    }
+
+    #[test]
+    fn public_url_wins_over_spoofed_host_for_oauth_redirects() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "attacker.example".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        let settings = AuthSettings {
+            enabled: true,
+            secure_cookies: true,
+            public_url: Some("https://mail.example.com".into()),
+            allowed_origins: Arc::new(Default::default()),
+            session_ttl_secs: 3600,
+            bearer_ttl_secs: 3600,
+        };
+
+        assert_eq!(
+            gmail_redirect_uri(&headers, &settings),
+            "https://mail.example.com/api/v1/auth/gmail/callback"
+        );
+        assert_eq!(
+            outlook_redirect_uri(&headers, &settings),
+            "https://mail.example.com/api/v1/auth/microsoft/callback"
+        );
     }
 
     #[test]
