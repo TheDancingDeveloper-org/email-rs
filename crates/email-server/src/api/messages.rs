@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use base64::Engine;
 use email_types::{
     AuthenticationResultStatus, BulkAction, BulkRequest, BulkResponse, BulkResult,
     Message as MessageRow, MessageAttachment, MessageAuthenticationResults, PatchMessageRequest,
@@ -18,6 +19,13 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use chrono;
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorMessagesResponse {
+    pub messages: Vec<MessageRow>,
+    pub next_cursor: Option<String>,
+}
 
 pub async fn bulk_messages(
     State(state): State<Arc<AppState>>,
@@ -750,17 +758,97 @@ pub struct ListMessagesQuery {
     pub page: Option<i64>,
     pub per_page: Option<i64>,
     pub unread_only: Option<bool>,
+    /// An empty cursor selects the first cursor page; subsequent values are opaque.
+    pub cursor: Option<String>,
+}
+
+pub(crate) fn decode_message_cursor(
+    cursor: &str,
+) -> crate::error::Result<Option<(String, String)>> {
+    if cursor.is_empty() {
+        return Ok(None);
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| AppError::Validation("invalid message cursor".to_string()))?;
+    serde_json::from_slice(&decoded)
+        .map(Some)
+        .map_err(|_| AppError::Validation("invalid message cursor".to_string()))
+}
+
+pub(crate) fn encode_message_cursor(date: Option<&str>, id: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&(date.unwrap_or_default(), id)).expect("cursor tuple serializes"),
+    )
 }
 
 pub async fn list_messages(
     State(state): State<Arc<AppState>>,
     Path(folder_id): Path<String>,
     Query(q): Query<ListMessagesQuery>,
-) -> Result<Json<Vec<MessageRow>>> {
+) -> Result<axum::response::Response> {
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(50).clamp(1, 200);
     let offset = (page - 1) * per_page;
     let unread_only = q.unread_only.unwrap_or(false);
+
+    if let Some(cursor) = q.cursor.as_deref() {
+        let after = decode_message_cursor(cursor)?;
+        let rows = if unread_only {
+            sqlx::query_as::<_, MessageRow>(
+                r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id, thread_id,
+                          subject, from_name, from_email, to_json, date, is_read, is_flagged, is_draft,
+                          has_attachments, preview, snoozed_until
+                   FROM messages
+                   WHERE folder_id = ? AND is_read = 0
+                     AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
+                     AND (? IS NULL OR date < ? OR (date = ? AND id < ?))
+                   ORDER BY date DESC, id DESC LIMIT ?"#,
+            )
+            .bind(&folder_id)
+            .bind(after.as_ref().map(|(date, _)| date))
+            .bind(after.as_ref().map(|(date, _)| date))
+            .bind(after.as_ref().map(|(date, _)| date))
+            .bind(after.as_ref().map(|(_, id)| id))
+            .bind(per_page + 1)
+            .fetch_all(&state.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, MessageRow>(
+                r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id, thread_id,
+                          subject, from_name, from_email, to_json, date, is_read, is_flagged, is_draft,
+                          has_attachments, preview, snoozed_until
+                   FROM messages
+                   WHERE folder_id = ?
+                     AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
+                     AND (? IS NULL OR date < ? OR (date = ? AND id < ?))
+                   ORDER BY date DESC, id DESC LIMIT ?"#,
+            )
+            .bind(&folder_id)
+            .bind(after.as_ref().map(|(date, _)| date))
+            .bind(after.as_ref().map(|(date, _)| date))
+            .bind(after.as_ref().map(|(date, _)| date))
+            .bind(after.as_ref().map(|(_, id)| id))
+            .bind(per_page + 1)
+            .fetch_all(&state.pool)
+            .await?
+        };
+        let mut messages = rows;
+        let next_cursor = if messages.len() > per_page as usize {
+            messages.truncate(per_page as usize);
+            messages
+                .last()
+                .map(|message| encode_message_cursor(message.date.as_deref(), &message.id))
+        } else {
+            None
+        };
+        return Ok(Json(CursorMessagesResponse {
+            messages,
+            next_cursor,
+        })
+        .into_response());
+    }
 
     let sql = if unread_only {
         r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id, thread_id,
@@ -769,7 +857,7 @@ pub async fn list_messages(
            FROM messages
            WHERE folder_id = ? AND is_read = 0
              AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
-           ORDER BY date DESC
+           ORDER BY date DESC, id DESC
            LIMIT ? OFFSET ?"#
     } else {
         r#"SELECT id, id AS occurrence_id, logical_id, account_id, folder_id, uid, message_id, thread_id,
@@ -778,7 +866,7 @@ pub async fn list_messages(
            FROM messages
            WHERE folder_id = ?
              AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
-           ORDER BY date DESC
+           ORDER BY date DESC, id DESC
            LIMIT ? OFFSET ?"#
     };
 
@@ -789,7 +877,7 @@ pub async fn list_messages(
         .fetch_all(&state.pool)
         .await?;
 
-    Ok(Json(rows))
+    Ok(Json(rows).into_response())
 }
 
 pub async fn get_message(
@@ -1287,6 +1375,55 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body.as_array().unwrap().len(), 2); // 5 total, first page has 3, second has 2
+    }
+
+    #[tokio::test]
+    async fn list_messages_cursor_paginates_tied_dates() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        for id in ["cursor-a", "cursor-b", "cursor-c", "cursor-d", "cursor-e"] {
+            seed_message(&state.pool, id, "acc1", "fld1").await;
+        }
+        sqlx::query("UPDATE messages SET date = '2026-01-01T00:00:00Z' WHERE folder_id = 'fld1'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        let (status, first) = req(
+            crate::api::router(Arc::clone(&state)),
+            "GET",
+            "/folders/fld1/messages?cursor=&per_page=2",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let first_ids: Vec<&str> = first["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(first_ids.len(), 2);
+        let cursor = first["nextCursor"].as_str().unwrap();
+
+        let (status, second) = req(
+            crate::api::router(state),
+            "GET",
+            &format!("/folders/fld1/messages?cursor={cursor}&per_page=3"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let second_ids: Vec<&str> = second["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(second_ids.len(), 3);
+        assert!(first_ids.iter().all(|id| !second_ids.contains(id)));
+        assert!(second["nextCursor"].is_null());
     }
 
     #[tokio::test]

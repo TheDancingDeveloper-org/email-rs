@@ -20,6 +20,7 @@ use email_types::{
 use super::integration_tokens::{
     CreateIntegrationToken, CreatedIntegrationToken, IntegrationToken,
 };
+use super::messages::CursorMessagesResponse;
 use super::webhooks::{IntegrationEvent, WebhookDelivery};
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -202,11 +203,12 @@ fn doc_mark_folder_read() {}
     security(("bearerAuth" = ["mail.metadata.read"])),
     params(
         ("id" = String, Path),
-        ("page" = Option<i64>, Query),
-        ("per_page" = Option<i64>, Query),
-        ("unread_only" = Option<bool>, Query)
+        ("page" = Option<i64>, Query, deprecated = true),
+        ("per_page" = Option<i64>, Query, deprecated = true),
+        ("unread_only" = Option<bool>, Query),
+        ("cursor" = Option<String>, Query, description = "Opaque cursor for keyset pagination")
     ),
-    responses((status = 200, body = [Message]))
+    responses((status = 200, body = [Message]), (status = 200, body = CursorMessagesResponse))
 )]
 fn doc_list_messages() {}
 
@@ -376,7 +378,7 @@ fn doc_gmail_callback() {}
 #[utoipa::path(get, path = "/auth/microsoft/callback", params(("code" = String, Query), ("state" = String, Query)), responses((status = 303, description = "OAuth flow completed"), (status = 400, body = ErrorResponse)))]
 fn doc_microsoft_callback() {}
 
-#[utoipa::path(get, path = "/smart-folders/{kind}/messages", security(("bearerAuth" = ["mail.metadata.read"])), params(("kind" = String, Path), ("page" = Option<i64>, Query), ("per_page" = Option<i64>, Query)), responses((status = 200, body = [Message]), (status = 404, body = ErrorResponse)))]
+#[utoipa::path(get, path = "/smart-folders/{kind}/messages", security(("bearerAuth" = ["mail.metadata.read"])), params(("kind" = String, Path), ("page" = Option<i64>, Query), ("per_page" = Option<i64>, Query, deprecated = true), ("cursor" = Option<String>, Query, description = "Opaque cursor for keyset pagination")), responses((status = 200, body = [Message]), (status = 200, body = CursorMessagesResponse), (status = 404, body = ErrorResponse)))]
 fn doc_smart_messages() {}
 
 #[utoipa::path(get, path = "/search", security(("bearerAuth" = ["mail.metadata.read"])), params(("q" = Option<String>, Query), ("account_id" = Option<String>, Query), ("match" = Option<String>, Query), ("from" = Option<String>, Query), ("to" = Option<String>, Query), ("cc" = Option<String>, Query), ("subject" = Option<String>, Query), ("body" = Option<String>, Query), ("filename" = Option<String>, Query), ("has_attachment" = Option<bool>, Query), ("is_read" = Option<bool>, Query), ("is_flagged" = Option<bool>, Query), ("date_after" = Option<String>, Query), ("date_before" = Option<String>, Query)), responses((status = 200, body = SearchResponse)))]
