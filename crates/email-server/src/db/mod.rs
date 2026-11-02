@@ -437,7 +437,40 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     run_search_index_migration(pool).await?;
     run_outbox_migration(pool).await?;
     run_thread_backfill_migration(pool).await?;
+    run_webhook_secret_migration(pool).await?;
 
+    Ok(())
+}
+
+async fn run_webhook_secret_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    if sqlx::query_scalar::<_, i64>("SELECT version FROM schema_migrations WHERE version = 22")
+        .fetch_optional(pool)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, secret FROM webhooks WHERE secret IS NOT NULL")
+            .fetch_all(pool)
+            .await?;
+    for (id, secret) in rows {
+        let Some(secret) = secret else {
+            continue;
+        };
+        let sealed = crate::credentials::seal(&secret).map_err(anyhow::Error::msg)?;
+        if sealed != secret {
+            sqlx::query("UPDATE webhooks SET secret = ? WHERE id = ?")
+                .bind(sealed)
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
+    }
+    sqlx::query("INSERT INTO schema_migrations (version) VALUES (22)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1743,6 +1776,43 @@ mod tests {
         }
         let _ = std::fs::remove_dir(&dir);
         let _ = std::fs::remove_dir(&parent);
+    }
+
+    #[tokio::test]
+    async fn webhook_secret_migration_seals_plaintext_and_is_idempotent() {
+        let _db_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let path = _db_dir.path().join("email.db").display().to_string();
+        let pool = super::create_pool(&format!("sqlite:{path}"))
+            .await
+            .unwrap()
+            .0;
+        sqlx::query(
+            "INSERT INTO webhooks (id, url, secret, events) VALUES ('legacy-hook', 'https://example.test', 'legacy-secret', 'all')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM schema_migrations WHERE version = 22")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_webhook_secret_migration(&pool).await.unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = 'legacy-hook'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_ne!(stored, "legacy-secret");
+        assert_eq!(crate::credentials::open(&stored).unwrap(), "legacy-secret");
+
+        run_webhook_secret_migration(&pool).await.unwrap();
+        let applied: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations WHERE version = 22")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(applied, 1);
     }
 
     #[tokio::test]
