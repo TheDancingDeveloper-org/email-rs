@@ -88,5 +88,30 @@ pub fn build_app(app_state: Arc<AppState>, frontend_dist: &str) -> Router {
                     HeaderName::from_static("x-requested-with"),
                 ]),
         )
+        .layer(axum::middleware::from_fn(security_headers))
         .layer(TraceLayer::new_for_http())
+}
+
+/// Adds baseline security headers to every response. Handlers that set their
+/// own value for one of these (e.g. attachment downloads) keep it.
+async fn security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+    for (name, value) in [
+        ("x-content-type-options", "nosniff"),
+        (
+            "content-security-policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        ),
+        ("x-frame-options", "DENY"),
+        ("referrer-policy", "no-referrer"),
+    ] {
+        headers
+            .entry(HeaderName::from_static(name))
+            .or_insert(axum::http::HeaderValue::from_static(value));
+    }
+    res
 }
