@@ -192,6 +192,17 @@ pub trait MailProvider: Send + Sync {
             "provider does not support synchronized drafts".into(),
         ))
     }
+    /// Append a successfully sent RFC/MIME message to the Sent mailbox.
+    async fn append_sent(
+        &self,
+        _folder: &str,
+        _message_id: &str,
+        _raw_message: &[u8],
+    ) -> Result<u32> {
+        Err(crate::error::AppError::Provider(
+            "provider does not support sent mail synchronization".into(),
+        ))
+    }
     /// Permanently remove a draft. This deliberately bypasses normal trash behavior.
     async fn delete_draft(&self, folder: &str, uid: u32) -> Result<()> {
         self.delete_message(folder, uid).await
