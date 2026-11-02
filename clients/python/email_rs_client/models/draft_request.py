@@ -101,7 +101,7 @@ class DraftRequest:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.outgoing_attachment import OutgoingAttachment
+        from ..models.outgoing_attachment import OutgoingAttachment  # noqa: PLC0415
 
         d = dict(src_dict)
         account_id = d.pop("accountId")
