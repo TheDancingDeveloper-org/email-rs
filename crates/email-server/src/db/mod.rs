@@ -15,6 +15,8 @@ struct LogicalIdentityRow {
     subject: Option<String>,
 }
 
+const LOGICAL_IDENTITY_MIGRATION_BATCH_SIZE: i64 = 1_000;
+
 /// Returns `(pool, has_fts)` — `has_fts` is false if SQLite was built without FTS5.
 pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool)> {
     // Strip sqlite:// prefix to get the file path, then ensure parent dir exists.
@@ -567,26 +569,38 @@ async fn run_logical_message_id_migration(pool: &SqlitePool) -> anyhow::Result<(
             .execute(pool)
             .await?;
     }
-    let rows: Vec<LogicalIdentityRow> = sqlx::query_as(
-        r#"SELECT id, account_id, message_id, from_email, date, subject
-           FROM messages WHERE logical_id = ''"#,
-    )
-    .fetch_all(pool)
-    .await?;
-    for row in rows {
-        let logical_id = logical_message_id(
-            &row.account_id,
-            row.message_id.as_deref(),
-            row.from_email.as_deref(),
-            row.date.as_deref(),
-            row.subject.as_deref(),
-            Some(&row.id),
-        );
-        sqlx::query("UPDATE messages SET logical_id = ? WHERE id = ?")
-            .bind(logical_id)
-            .bind(row.id)
-            .execute(pool)
-            .await?;
+    loop {
+        let mut transaction = pool.begin().await?;
+        let rows: Vec<LogicalIdentityRow> = sqlx::query_as(
+            r#"SELECT id, account_id, message_id, from_email, date, subject
+               FROM messages
+               WHERE logical_id = ''
+               ORDER BY id
+               LIMIT ?"#,
+        )
+        .bind(LOGICAL_IDENTITY_MIGRATION_BATCH_SIZE)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if rows.is_empty() {
+            transaction.rollback().await?;
+            break;
+        }
+        for row in rows {
+            let logical_id = logical_message_id(
+                &row.account_id,
+                row.message_id.as_deref(),
+                row.from_email.as_deref(),
+                row.date.as_deref(),
+                row.subject.as_deref(),
+                Some(&row.id),
+            );
+            sqlx::query("UPDATE messages SET logical_id = ? WHERE id = ?")
+                .bind(logical_id)
+                .bind(row.id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
     }
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_logical_id ON messages(logical_id)")
         .execute(pool)
@@ -1475,6 +1489,98 @@ mod tests {
 
         pool.close().await;
         let _ = std::fs::remove_file(database_path);
+    }
+
+    #[tokio::test]
+    async fn logical_identity_migration_updates_large_legacy_database() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for statement in include_str!("migrations/001_initial.sql").split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+        for statement in [
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)",
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('account-1', 'Legacy', 'legacy@example.test', 'imap', 'password')",
+            "INSERT INTO folders (id, account_id, name, full_path) VALUES ('folder-1', 'account-1', 'Inbox', 'INBOX')",
+            r#"WITH RECURSIVE sequence(value) AS (
+                   SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 2005
+               )
+               INSERT INTO messages (id, account_id, folder_id, uid, subject)
+               SELECT printf('message-%04d', value), 'account-1', 'folder-1', value, 'Legacy'
+               FROM sequence"#,
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_logical_message_id_migration(&pool).await.unwrap();
+
+        let migrated: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE logical_id LIKE 'lm_%'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(migrated, 2005);
+        let version: i64 =
+            sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 16")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(version, 16);
+    }
+
+    #[tokio::test]
+    async fn logical_identity_migration_rolls_back_failing_batch() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for statement in include_str!("migrations/001_initial.sql").split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+        for statement in [
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)",
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('account-1', 'Legacy', 'legacy@example.test', 'imap', 'password')",
+            "INSERT INTO folders (id, account_id, name, full_path) VALUES ('folder-1', 'account-1', 'Inbox', 'INBOX')",
+            r#"WITH RECURSIVE sequence(value) AS (
+                   SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 10
+               )
+               INSERT INTO messages (id, account_id, folder_id, uid, subject)
+               SELECT printf('message-%04d', value), 'account-1', 'folder-1', value, 'Legacy'
+               FROM sequence"#,
+            r#"CREATE TRIGGER reject_logical_identity
+               BEFORE UPDATE OF logical_id ON messages
+               WHEN old.id = 'message-0005'
+               BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END"#,
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        let error = run_logical_message_id_migration(&pool)
+            .await
+            .expect_err("the injected update failure should abort the migration");
+        assert!(error.to_string().contains("injected migration failure"));
+        let unchanged: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE logical_id = ''")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(unchanged, 10, "the failing batch must be rolled back");
+        let applied: Option<i64> =
+            sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 16")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert_eq!(applied, None);
     }
 
     #[tokio::test]
