@@ -1,0 +1,1229 @@
+use crate::prelude::*;
+use crate::*;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NativeMessageSource {
+    Folder(String),
+    Label(String),
+    SmartFolder(String),
+    Search(String),
+    AdvancedSearch(ConditionGroup),
+}
+
+impl NativeMessageSource {
+    pub(crate) fn from_state(state: &NativeAppState) -> Option<Self> {
+        if let Some(group) = state.search.condition_group.as_ref() {
+            return Some(Self::AdvancedSearch(group.clone()));
+        }
+
+        if let Some(query) = state.search.submitted_query.as_ref() {
+            return Some(Self::Search(query.clone()));
+        }
+
+        Self::route_from_state(state)
+    }
+
+    pub(crate) fn route_from_state(state: &NativeAppState) -> Option<Self> {
+        if let Some(label_id) = state.selected_label.as_ref() {
+            return Some(Self::Label(label_id.clone()));
+        }
+
+        let selected_folder = state.selected_folder.as_ref()?;
+        if let Some(kind) = selected_folder.strip_prefix("smart:") {
+            Some(Self::SmartFolder(kind.to_string()))
+        } else {
+            Some(Self::Folder(selected_folder.clone()))
+        }
+    }
+
+    pub(crate) fn apply_selection(&self, state: &mut NativeAppState) {
+        state.selected_view = SelectedView::Mail;
+        match self {
+            Self::Folder(folder_id) => {
+                state.selected_folder = Some(folder_id.clone());
+                state.selected_label = None;
+            }
+            Self::Label(label_id) => {
+                state.selected_folder = None;
+                state.selected_label = Some(label_id.clone());
+            }
+            Self::SmartFolder(kind) => {
+                state.selected_folder = Some(format!("smart:{kind}"));
+                state.selected_label = None;
+            }
+            Self::Search(query) => {
+                if state.search.submitted_query.is_none() {
+                    state.search.previous_source = Self::route_from_state(state);
+                }
+                state.search.query = query.clone();
+                state.search.submitted_query = Some(query.clone());
+                state.search.condition_group = None;
+                state.selected_folder = None;
+                state.selected_label = None;
+            }
+            Self::AdvancedSearch(group) => {
+                if state.search.condition_group.is_none() {
+                    state.search.previous_source = Self::route_from_state(state);
+                }
+                state.search.query.clear();
+                state.search.submitted_query = None;
+                state.search.condition_group = Some(group.clone());
+                state.selected_folder = None;
+                state.selected_label = None;
+            }
+        }
+
+        if !matches!(self, Self::Search(_) | Self::AdvancedSearch(_)) {
+            state.search = SearchState::default();
+        }
+    }
+
+    pub(crate) fn load_context(&self) -> String {
+        match self {
+            Self::Folder(folder_id) => format!("list messages for {folder_id}"),
+            Self::Label(label_id) => format!("list messages for label {label_id}"),
+            Self::SmartFolder(kind) => format!("list smart folder {kind}"),
+            Self::Search(query) => format!("search messages for {query}"),
+            Self::AdvancedSearch(_) => "advanced search messages".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LoadedMessageCollection {
+    pub(crate) messages: Vec<Message>,
+    pub(crate) calendar_events: Vec<CalendarSearchResult>,
+    pub(crate) selected_message: Option<String>,
+    pub(crate) selected_full_message: Option<FullMessage>,
+    pub(crate) selected_message_labels: Vec<Label>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LoadedFullMessage {
+    pub(crate) message: FullMessage,
+    pub(crate) labels: Vec<Label>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NativeSyncRefreshRequest {
+    pub(crate) accounts_request: ResourceRequest,
+    pub(crate) messages_request: Option<ResourceRequest>,
+    pub(crate) source: Option<NativeMessageSource>,
+    pub(crate) selected_message: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LoadedSyncRefresh {
+    pub(crate) accounts: Vec<Account>,
+    pub(crate) folders_by_account: BTreeMap<String, Vec<Folder>>,
+    pub(crate) labels: Vec<Label>,
+    pub(crate) messages: Option<LoadedMessageCollection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NativeMessageMutation {
+    Archive {
+        message_id: String,
+    },
+    Delete {
+        message_id: String,
+    },
+    SetRead {
+        message_id: String,
+        is_read: bool,
+    },
+    SetFlagged {
+        message_id: String,
+        is_flagged: bool,
+    },
+    Snooze {
+        message_id: String,
+        until: String,
+    },
+}
+
+impl NativeMessageMutation {
+    pub(crate) fn message_id(&self) -> &str {
+        match self {
+            Self::Archive { message_id }
+            | Self::Delete { message_id }
+            | Self::SetRead { message_id, .. }
+            | Self::SetFlagged { message_id, .. }
+            | Self::Snooze { message_id, .. } => message_id,
+        }
+    }
+
+    pub(crate) fn action_label(&self) -> &'static str {
+        match self {
+            Self::Archive { .. } => "archive message",
+            Self::Delete { .. } => "delete message",
+            Self::SetRead { is_read: true, .. } => "mark message read",
+            Self::SetRead { is_read: false, .. } => "mark message unread",
+            Self::SetFlagged {
+                is_flagged: true, ..
+            } => "flag message",
+            Self::SetFlagged {
+                is_flagged: false, ..
+            } => "unflag message",
+            Self::Snooze { .. } => "snooze message",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeDraftSeed {
+    pub(crate) recipients: Vec<(String, String)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ComposeRecipientField {
+    To,
+    Cc,
+    Bcc,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NativeLabelMutation {
+    Add {
+        message_id: String,
+        label_id: String,
+    },
+    Remove {
+        message_id: String,
+        label_id: String,
+    },
+}
+
+impl NativeLabelMutation {
+    pub(crate) fn message_id(&self) -> &str {
+        match self {
+            Self::Add { message_id, .. } | Self::Remove { message_id, .. } => message_id,
+        }
+    }
+}
+
+pub(crate) fn start_message_collection_load(
+    state_entity: &Entity<NativeAppState>,
+    source: NativeMessageSource,
+    app_cx: &mut App,
+) {
+    start_message_collection_load_with_preferred(state_entity, source, None, app_cx);
+}
+
+pub(crate) fn start_message_collection_load_with_preferred(
+    state_entity: &Entity<NativeAppState>,
+    source: NativeMessageSource,
+    preferred_message_id: Option<String>,
+    app_cx: &mut App,
+) {
+    let load_source = source.clone();
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        let request = begin_message_collection_load(state, &source);
+        sync_window_title(state, cx);
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_message_collection(base_url, load_source, preferred_message_id) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_message_collection(state, request, loaded);
+                        }
+                        Err(err) => {
+                            reject_message_collection_load(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native message collection load: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+pub(crate) fn begin_message_collection_load(
+    state: &mut NativeAppState,
+    source: &NativeMessageSource,
+) -> ResourceRequest {
+    let previous_source = NativeMessageSource::from_state(state);
+    source.apply_selection(state);
+    if previous_source.as_ref() != Some(source) {
+        state.expanded_thread_keys.clear();
+    }
+    state.messages.clear();
+    state.selected_message = None;
+    state.selected_message_ids.clear();
+    state.selected_full_message = None;
+    state.selected_message_resource.reset();
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
+    state.search_event_results.clear();
+    state.last_error = None;
+    state.messages_resource.begin_load()
+}
+
+pub(crate) fn load_message_collection(
+    base_url: String,
+    source: NativeMessageSource,
+    preferred_message_id: Option<String>,
+) -> Result<LoadedMessageCollection> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        load_message_collection_with_client(&client, source, preferred_message_id).await
+    })
+}
+
+pub(crate) async fn load_message_collection_with_client(
+    client: &EmailClient,
+    source: NativeMessageSource,
+    preferred_message_id: Option<String>,
+) -> Result<LoadedMessageCollection> {
+    let loaded = match &source {
+        NativeMessageSource::Folder(folder_id) => client
+            .list_folder_messages(folder_id)
+            .await
+            .map(|messages| (messages, Vec::<CalendarSearchResult>::new())),
+        NativeMessageSource::Label(label_id) => client
+            .list_label_messages(label_id)
+            .await
+            .map(|messages| (messages, Vec::<CalendarSearchResult>::new())),
+        NativeMessageSource::SmartFolder(kind) => client
+            .list_smart_messages(kind)
+            .await
+            .map(|messages| (messages, Vec::<CalendarSearchResult>::new())),
+        NativeMessageSource::Search(query) => client
+            .search(query, None)
+            .await
+            .map(|results| (results.messages, results.events)),
+        NativeMessageSource::AdvancedSearch(group) => client
+            .advanced_search(group)
+            .await
+            .map(|results| (results.messages, Vec::<CalendarSearchResult>::new())),
+    };
+    let (mut messages, calendar_events) = loaded.with_context(|| source.load_context())?;
+
+    let selected_message = preferred_message_id
+        .filter(|message_id| messages.iter().any(|message| message.id == *message_id))
+        .or_else(|| messages.first().map(|message| message.id.clone()));
+    let (selected_full_message, selected_message_labels) =
+        if let Some(message_id) = selected_message.as_deref() {
+            match client.get_message(message_id).await {
+                Ok(full_message) => {
+                    update_summary_from_full_message(&mut messages, &full_message);
+                    let labels = client
+                        .get_message_labels(message_id)
+                        .await
+                        .with_context(|| format!("get labels for selected message {message_id}"))?;
+                    (Some(full_message), labels)
+                }
+                Err(err) => {
+                    tracing::warn!("failed to load selected message {message_id}: {err}");
+                    (None, Vec::new())
+                }
+            }
+        } else {
+            (None, Vec::new())
+        };
+
+    Ok(LoadedMessageCollection {
+        messages,
+        calendar_events,
+        selected_message,
+        selected_full_message,
+        selected_message_labels,
+    })
+}
+
+pub(crate) fn apply_loaded_message_collection(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    loaded: LoadedMessageCollection,
+) -> bool {
+    if !state
+        .messages_resource
+        .resolve(request, loaded.messages.clone())
+    {
+        return false;
+    }
+
+    state.messages = loaded.messages;
+    state.search_event_results = loaded.calendar_events;
+    retain_existing_message_selection(state);
+    retain_existing_thread_expansions(state);
+    state.selected_message = loaded
+        .selected_message
+        .or_else(|| state.messages.first().map(|message| message.id.clone()));
+    state.selected_full_message = None;
+    state.selected_message_resource.reset();
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
+
+    if let Some(full_message) = loaded.selected_full_message {
+        state.selected_message = Some(full_message.id.clone());
+        state.selected_message_resource = AsyncResource::ready(full_message.clone());
+        apply_full_message(state, full_message);
+        state.selected_message_labels = loaded.selected_message_labels.clone();
+        state.selected_message_labels_resource =
+            AsyncResource::ready(loaded.selected_message_labels);
+    }
+
+    state.last_error = None;
+    true
+}
+
+pub(crate) fn reject_message_collection_load(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    err: anyhow::Error,
+) -> bool {
+    let message = err.to_string();
+    if !state.messages_resource.reject(request, message.clone()) {
+        return false;
+    }
+
+    state.messages.clear();
+    state.selected_message = None;
+    state.selected_message_ids.clear();
+    state.expanded_thread_keys.clear();
+    state.selected_full_message = None;
+    state.selected_message_resource.reset();
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
+    state.search_event_results.clear();
+    state.last_error = Some(message);
+    true
+}
+
+pub(crate) fn start_sync_complete_refresh(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        let request = begin_sync_complete_refresh(state);
+        sync_window_title(state, cx);
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let load_request = request.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_sync_complete_refresh(base_url, load_request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_sync_refresh(state, request, loaded);
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native sync refresh: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+pub(crate) fn start_mark_folder_read(
+    state_entity: &Entity<NativeAppState>,
+    folder_id: String,
+    app_cx: &mut App,
+) {
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        let request = begin_sync_complete_refresh(state);
+        state.last_error = None;
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let load_request = request.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { mark_folder_read_and_refresh(base_url, folder_id, load_request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_sync_refresh(state, request, loaded);
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native mark-folder-read refresh: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+pub(crate) fn start_message_mutation_and_refresh(
+    state_entity: &Entity<NativeAppState>,
+    mutation: NativeMessageMutation,
+    app_cx: &mut App,
+) {
+    let (base_url, request) = state_entity.update(app_cx, |state, cx| {
+        let request = begin_sync_complete_refresh(state);
+        state.last_error = None;
+        cx.notify();
+        (state.api_base_url.clone(), request)
+    });
+
+    let load_request = request.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { mutate_message_and_refresh(base_url, mutation, load_request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_sync_refresh(state, request, loaded);
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native message mutation refresh: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+pub(crate) fn start_message_label_mutation(
+    state_entity: &Entity<NativeAppState>,
+    mutation: NativeLabelMutation,
+    app_cx: &mut App,
+) {
+    let message_id = mutation.message_id().to_string();
+    let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
+        if state.selected_message.as_deref() != Some(message_id.as_str()) {
+            return None;
+        }
+        state.last_error = None;
+        let request = state.selected_message_labels_resource.begin_load();
+        cx.notify();
+        Some((state.api_base_url.clone(), request))
+    }) else {
+        return;
+    };
+
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { mutate_message_label_and_reload(base_url, mutation) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    if state.selected_message.as_deref() != Some(message_id.as_str()) {
+                        return;
+                    }
+                    match result {
+                        Ok(labels) => {
+                            if state
+                                .selected_message_labels_resource
+                                .resolve(request, labels.clone())
+                            {
+                                state.selected_message_labels = labels;
+                                state.last_error = None;
+                            }
+                        }
+                        Err(err) => {
+                            let message = err.to_string();
+                            if state
+                                .selected_message_labels_resource
+                                .reject(request, message.clone())
+                            {
+                                state.last_error = Some(message);
+                            }
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native message label mutation: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+pub(crate) fn start_bulk_message_action(
+    state_entity: &Entity<NativeAppState>,
+    action: BulkAction,
+    app_cx: &mut App,
+) {
+    let Some((base_url, request, ids)) = state_entity.update(app_cx, |state, cx| {
+        let ids = selected_action_message_ids(state, None);
+        if ids.is_empty() {
+            return None;
+        }
+        let request = begin_sync_complete_refresh(state);
+        state.selected_message_ids.clear();
+        state.last_error = None;
+        cx.notify();
+        Some((state.api_base_url.clone(), request, ids))
+    }) else {
+        return;
+    };
+
+    let load_request = request.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { bulk_message_action_and_refresh(base_url, ids, action, load_request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(outcome) => {
+                            apply_loaded_sync_refresh(state, request, outcome.loaded);
+                            state.last_error = outcome.warning;
+                        }
+                        Err(err) => {
+                            reject_sync_refresh(state, request, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native bulk message action refresh: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+pub(crate) fn begin_sync_complete_refresh(state: &mut NativeAppState) -> NativeSyncRefreshRequest {
+    let source = NativeMessageSource::from_state(state);
+    let selected_message = state.selected_message.clone();
+    let accounts_request = state.accounts_resource.begin_load();
+    let messages_request = source
+        .as_ref()
+        .map(|_| state.messages_resource.begin_load());
+    state.last_error = None;
+
+    NativeSyncRefreshRequest {
+        accounts_request,
+        messages_request,
+        source,
+        selected_message,
+    }
+}
+
+pub(crate) fn load_sync_complete_refresh(
+    base_url: String,
+    request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let tree = load_account_tree(&client).await?;
+        let messages = if let Some(source) = request.source {
+            Some(
+                load_message_collection_with_client(&client, source, request.selected_message)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        Ok(LoadedSyncRefresh {
+            accounts: tree.accounts,
+            folders_by_account: tree.folders_by_account,
+            labels: tree.labels,
+            messages,
+        })
+    })
+}
+
+pub(crate) fn mark_folder_read_and_refresh(
+    base_url: String,
+    folder_id: String,
+    request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .mark_folder_read(&folder_id)
+            .await
+            .with_context(|| format!("mark folder read {folder_id}"))?;
+        let tree = load_account_tree(&client).await?;
+        let messages = if let Some(source) = request.source {
+            Some(
+                load_message_collection_with_client(&client, source, request.selected_message)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        Ok(LoadedSyncRefresh {
+            accounts: tree.accounts,
+            folders_by_account: tree.folders_by_account,
+            labels: tree.labels,
+            messages,
+        })
+    })
+}
+
+pub(crate) fn mutate_message_and_refresh(
+    base_url: String,
+    mutation: NativeMessageMutation,
+    request: NativeSyncRefreshRequest,
+) -> Result<LoadedSyncRefresh> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let action_label = mutation.action_label();
+        match &mutation {
+            NativeMessageMutation::Archive { message_id } => {
+                client.archive_message(message_id).await?;
+            }
+            NativeMessageMutation::Delete { message_id } => {
+                client.delete_message(message_id).await?;
+            }
+            NativeMessageMutation::SetRead {
+                message_id,
+                is_read,
+            } => {
+                client
+                    .patch_message(
+                        message_id,
+                        &PatchMessageRequest {
+                            is_read: Some(*is_read),
+                            is_flagged: None,
+                        },
+                    )
+                    .await?;
+            }
+            NativeMessageMutation::SetFlagged {
+                message_id,
+                is_flagged,
+            } => {
+                client
+                    .patch_message(
+                        message_id,
+                        &PatchMessageRequest {
+                            is_read: None,
+                            is_flagged: Some(*is_flagged),
+                        },
+                    )
+                    .await?;
+            }
+            NativeMessageMutation::Snooze { message_id, until } => {
+                client
+                    .snooze_message(
+                        message_id,
+                        &SnoozeRequest {
+                            until: until.clone(),
+                        },
+                    )
+                    .await?;
+            }
+        }
+
+        let tree = load_account_tree(&client)
+            .await
+            .with_context(|| format!("refresh after {action_label}"))?;
+        let messages = if let Some(source) = request.source {
+            Some(
+                load_message_collection_with_client(&client, source, request.selected_message)
+                    .await
+                    .with_context(|| format!("reload active mailbox after {action_label}"))?,
+            )
+        } else {
+            None
+        };
+
+        tracing::info!(
+            "completed native {action_label} for {}",
+            mutation.message_id()
+        );
+        Ok(LoadedSyncRefresh {
+            accounts: tree.accounts,
+            folders_by_account: tree.folders_by_account,
+            labels: tree.labels,
+            messages,
+        })
+    })
+}
+
+pub(crate) struct BulkRefreshOutcome {
+    pub(crate) loaded: LoadedSyncRefresh,
+    pub(crate) warning: Option<String>,
+}
+
+pub(crate) fn bulk_message_action_and_refresh(
+    base_url: String,
+    ids: Vec<String>,
+    action: BulkAction,
+    request: NativeSyncRefreshRequest,
+) -> Result<BulkRefreshOutcome> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let action_label = bulk_action_label(&action);
+        let response = client
+            .bulk_messages(&BulkRequest { ids, action })
+            .await
+            .with_context(|| format!("bulk {action_label}"))?;
+        let warning = (response.failed > 0).then(|| {
+            let details = response
+                .results
+                .iter()
+                .filter_map(|result| result.error.as_deref())
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "Bulk {action_label}: {} succeeded, {} failed: {details}",
+                response.processed, response.failed
+            )
+        });
+
+        let tree = load_account_tree(&client)
+            .await
+            .with_context(|| format!("refresh after bulk {action_label}"))?;
+        let messages = if let Some(source) = request.source {
+            Some(
+                load_message_collection_with_client(&client, source, request.selected_message)
+                    .await
+                    .with_context(|| format!("reload active mailbox after bulk {action_label}"))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(BulkRefreshOutcome {
+            loaded: LoadedSyncRefresh {
+                accounts: tree.accounts,
+                folders_by_account: tree.folders_by_account,
+                labels: tree.labels,
+                messages,
+            },
+            warning,
+        })
+    })
+}
+
+pub(crate) fn bulk_action_label(action: &BulkAction) -> &'static str {
+    match action {
+        BulkAction::Archive => "archive",
+        BulkAction::Delete => "delete",
+        BulkAction::MarkRead => "mark read",
+        BulkAction::MarkUnread => "mark unread",
+    }
+}
+
+pub(crate) fn mutate_message_label_and_reload(
+    base_url: String,
+    mutation: NativeLabelMutation,
+) -> Result<Vec<Label>> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        match &mutation {
+            NativeLabelMutation::Add {
+                message_id,
+                label_id,
+            } => {
+                client
+                    .add_message_label(message_id, label_id)
+                    .await
+                    .with_context(|| format!("add label {label_id} to message {message_id}"))?;
+            }
+            NativeLabelMutation::Remove {
+                message_id,
+                label_id,
+            } => {
+                client
+                    .remove_message_label(message_id, label_id)
+                    .await
+                    .with_context(|| {
+                        format!("remove label {label_id} from message {message_id}")
+                    })?;
+            }
+        }
+
+        client
+            .get_message_labels(mutation.message_id())
+            .await
+            .with_context(|| format!("reload labels for message {}", mutation.message_id()))
+    })
+}
+
+pub(crate) fn apply_loaded_sync_refresh(
+    state: &mut NativeAppState,
+    request: NativeSyncRefreshRequest,
+    loaded: LoadedSyncRefresh,
+) -> bool {
+    if !state
+        .accounts_resource
+        .resolve(request.accounts_request, loaded.accounts.clone())
+    {
+        return false;
+    }
+
+    state.accounts = loaded.accounts;
+    state.folders_by_account = loaded.folders_by_account;
+    state.labels = loaded.labels;
+
+    if let (Some(messages_request), Some(messages)) = (request.messages_request, loaded.messages) {
+        apply_loaded_message_collection(state, messages_request, messages);
+    }
+
+    state.last_error = None;
+    true
+}
+
+pub(crate) fn reject_sync_refresh(
+    state: &mut NativeAppState,
+    request: NativeSyncRefreshRequest,
+    err: anyhow::Error,
+) -> bool {
+    let message = err.to_string();
+    let accounts_rejected = state
+        .accounts_resource
+        .reject(request.accounts_request, message.clone());
+    let messages_rejected = request.messages_request.is_some_and(|messages_request| {
+        state
+            .messages_resource
+            .reject(messages_request, message.clone())
+    });
+
+    if !accounts_rejected && !messages_rejected {
+        return false;
+    }
+
+    state.last_error = Some(message);
+    true
+}
+
+pub(crate) fn start_full_message_load(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    app_cx: &mut App,
+) {
+    let message_id = message_id.to_string();
+    let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
+        let request = begin_full_message_load(state, &message_id)?;
+        sync_window_title(state, cx);
+        cx.notify();
+        Some((state.api_base_url.clone(), request))
+    }) else {
+        return;
+    };
+
+    let load_message_id = message_id.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_full_message(base_url, load_message_id) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    match result {
+                        Ok(loaded) => {
+                            apply_loaded_full_message(state, request, &message_id, loaded);
+                        }
+                        Err(err) => {
+                            reject_full_message_load(state, request, &message_id, err);
+                        }
+                    }
+                    sync_window_title(state, cx);
+                    cx.notify();
+                }) {
+                    tracing::warn!("failed to apply native message load: {err}");
+                }
+            }
+        })
+        .detach();
+}
+
+pub(crate) fn begin_full_message_load(
+    state: &mut NativeAppState,
+    message_id: &str,
+) -> Option<ResourceRequest> {
+    if state.selected_full_message.as_ref().is_some_and(|message| {
+        message.id == message_id && state.selected_message_resource.is_ready()
+    }) {
+        return None;
+    }
+
+    if state.selected_message.as_deref() != Some(message_id) {
+        reset_compose_state(state, None);
+    }
+    state.selected_message = Some(message_id.to_string());
+    state.selected_full_message = None;
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
+    state.show_external_images = false;
+    state.last_error = None;
+    Some(state.selected_message_resource.begin_load())
+}
+
+pub(crate) fn load_full_message(base_url: String, message_id: String) -> Result<LoadedFullMessage> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        let message = client
+            .get_message(&message_id)
+            .await
+            .with_context(|| format!("get message {message_id}"))?;
+        let labels = client
+            .get_message_labels(&message_id)
+            .await
+            .with_context(|| format!("get labels for message {message_id}"))?;
+        Ok(LoadedFullMessage { message, labels })
+    })
+}
+
+pub(crate) fn apply_loaded_full_message(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    message_id: &str,
+    loaded: LoadedFullMessage,
+) -> bool {
+    if state.selected_message.as_deref() != Some(message_id) {
+        return false;
+    }
+    if !state
+        .selected_message_resource
+        .resolve(request, loaded.message.clone())
+    {
+        return false;
+    }
+
+    apply_full_message(state, loaded.message);
+    state.selected_message_labels = loaded.labels.clone();
+    state.selected_message_labels_resource = AsyncResource::ready(loaded.labels);
+    state.last_error = None;
+    true
+}
+
+pub(crate) fn reject_full_message_load(
+    state: &mut NativeAppState,
+    request: ResourceRequest,
+    message_id: &str,
+    err: anyhow::Error,
+) -> bool {
+    if state.selected_message.as_deref() != Some(message_id) {
+        return false;
+    }
+
+    let message = err.to_string();
+    if !state
+        .selected_message_resource
+        .reject(request, message.clone())
+    {
+        return false;
+    }
+
+    state.selected_full_message = None;
+    state.selected_message_labels.clear();
+    state.selected_message_labels_resource.reset();
+    state.attachment_busy = false;
+    state.attachment_notice = None;
+    state.attachment_error = None;
+    state.last_error = Some(message);
+    true
+}
+
+pub(crate) fn update_summary_from_full_message(
+    messages: &mut [Message],
+    full_message: &FullMessage,
+) {
+    if let Some(summary) = messages
+        .iter_mut()
+        .find(|message| message.id == full_message.id)
+    {
+        summary.is_read = full_message.is_read;
+        summary.is_flagged = full_message.is_flagged;
+    }
+}
+
+pub(crate) fn apply_full_message(state: &mut NativeAppState, full_message: FullMessage) {
+    let was_unread = state
+        .messages
+        .iter()
+        .find(|message| message.id == full_message.id)
+        .is_some_and(|message| !message.is_read);
+    update_summary_from_full_message(&mut state.messages, &full_message);
+    if was_unread && full_message.is_read {
+        decrement_folder_unread(&mut state.folders_by_account, &full_message.folder_id);
+    }
+    state.selected_message = Some(full_message.id.clone());
+    state.selected_full_message = Some(full_message);
+    state.attachment_notice = None;
+    state.attachment_error = None;
+}
+
+pub(crate) fn decrement_folder_unread(
+    folders_by_account: &mut BTreeMap<String, Vec<Folder>>,
+    folder_id: &str,
+) {
+    for folder in folders_by_account
+        .values_mut()
+        .flat_map(|folders| folders.iter_mut())
+    {
+        if folder.id == folder_id {
+            folder.unread_count = folder.unread_count.saturating_sub(1);
+            break;
+        }
+    }
+}
+
+pub(crate) fn selected_action_message_ids(
+    state: &NativeAppState,
+    fallback_message_id: Option<&str>,
+) -> Vec<String> {
+    let visible = state
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut ids = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for id in &state.selected_message_ids {
+        if visible.contains(id.as_str()) && seen.insert(id.clone()) {
+            ids.push(id.clone());
+        }
+    }
+
+    if ids.is_empty() {
+        if let Some(id) = fallback_message_id {
+            if visible.contains(id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+
+    ids
+}
+
+pub(crate) fn toggle_message_selection(state: &mut NativeAppState, message_id: &str) {
+    if let Some(pos) = state
+        .selected_message_ids
+        .iter()
+        .position(|selected_id| selected_id == message_id)
+    {
+        state.selected_message_ids.remove(pos);
+    } else if state
+        .messages
+        .iter()
+        .any(|message| message.id == message_id)
+    {
+        state.selected_message_ids.push(message_id.to_string());
+    }
+}
+
+pub(crate) fn set_all_message_selection(state: &mut NativeAppState, selected: bool) {
+    if selected {
+        state.selected_message_ids = state
+            .messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect();
+    } else {
+        state.selected_message_ids.clear();
+    }
+}
+
+pub(crate) fn retain_existing_message_selection(state: &mut NativeAppState) {
+    let visible = state
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    state
+        .selected_message_ids
+        .retain(|id| visible.contains(id.as_str()) && seen.insert(id.clone()));
+}
+
+pub(crate) fn message_select_all_state(state: &NativeAppState) -> CheckboxState {
+    if state.messages.is_empty() || state.selected_message_ids.is_empty() {
+        return CheckboxState::Unchecked;
+    }
+
+    let visible_count = state.messages.len();
+    let selected_visible_count = selected_action_message_ids(state, None).len();
+    if selected_visible_count == 0 {
+        CheckboxState::Unchecked
+    } else if selected_visible_count == visible_count {
+        CheckboxState::Checked
+    } else {
+        CheckboxState::Indeterminate
+    }
+}

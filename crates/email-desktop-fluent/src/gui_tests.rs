@@ -107,6 +107,9 @@ fn test_full_message(id: &str) -> FullMessage {
             ..Default::default()
         }),
         attachments: Vec::new(),
+        authentication_results: Default::default(),
+        from_reply_to_domain_mismatch: false,
+        display_name_spoofing: false,
     }
 }
 
