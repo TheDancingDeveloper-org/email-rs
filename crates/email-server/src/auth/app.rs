@@ -1174,6 +1174,7 @@ mod tests {
             session_id: body["sessionId"].as_str().unwrap().to_string(),
             verifier: Some("verifier".to_string()),
             account_id: Some("account-1".to_string()),
+            created_at: chrono::Utc::now().timestamp(),
         };
         assert!(crate::api::auth::oauth_owner_is_active(&state, &pending).await);
         sqlx::query("DELETE FROM app_sessions WHERE id = ?")
@@ -1319,6 +1320,7 @@ mod tests {
             session_id: tokens[1]["id"].as_str().unwrap().to_string(),
             verifier: None,
             account_id: None,
+            created_at: chrono::Utc::now().timestamp(),
         };
         assert!(crate::api::auth::oauth_owner_is_active(&state, &pending).await);
         let unscoped = crate::state::OAuthState {
