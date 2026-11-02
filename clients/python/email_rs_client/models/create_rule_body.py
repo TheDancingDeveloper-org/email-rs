@@ -88,8 +88,8 @@ class CreateRuleBody:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.action_input import ActionInput
-        from ..models.condition_input import ConditionInput
+        from ..models.action_input import ActionInput  # noqa: PLC0415
+        from ..models.condition_input import ConditionInput  # noqa: PLC0415
 
         d = dict(src_dict)
         account_id = d.pop("accountId")

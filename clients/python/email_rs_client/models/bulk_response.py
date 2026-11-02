@@ -51,7 +51,7 @@ class BulkResponse:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.bulk_result import BulkResult
+        from ..models.bulk_result import BulkResult  # noqa: PLC0415
 
         d = dict(src_dict)
         failed = d.pop("failed")
