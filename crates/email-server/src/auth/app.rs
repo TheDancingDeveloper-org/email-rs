@@ -275,9 +275,10 @@ pub async fn bootstrap_from_env(pool: &SqlitePool) -> anyhow::Result<()> {
 pub async fn bootstrap(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(credentials): Json<Credentials>,
 ) -> Response {
-    if !peer.ip().is_loopback() {
+    if !peer.ip().is_loopback() || has_forwarding_headers(&headers) {
         return error(StatusCode::FORBIDDEN, "first-run setup is loopback-only");
     }
     if let Err(message) = validate_password(&credentials.password) {
@@ -316,6 +317,18 @@ pub async fn bootstrap(
         return AppError::Database(err).into_response();
     }
     issue_session(&state, user_id, credentials.client).await
+}
+
+fn has_forwarding_headers(headers: &HeaderMap) -> bool {
+    [
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    ]
+    .iter()
+    .any(|name| headers.contains_key(*name))
 }
 
 pub async fn login(
@@ -890,6 +903,58 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         (headers, body)
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rejects_loopback_peer_behind_reverse_proxy() {
+        let state = setup().await;
+        let credentials = || Credentials {
+            username: "owner".into(),
+            password: "correct horse battery".into(),
+            client: ClientKind::Bearer,
+        };
+
+        for (name, value) in [
+            ("forwarded", "for=203.0.113.10;proto=https"),
+            ("x-forwarded-for", "203.0.113.10"),
+            ("x-forwarded-host", "mail.example.com"),
+            ("x-forwarded-proto", "https"),
+            ("x-real-ip", "203.0.113.10"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, value.parse().unwrap());
+            let response = bootstrap(
+                State(Arc::clone(&state)),
+                ConnectInfo("127.0.0.1:43210".parse().unwrap()),
+                headers,
+                Json(credentials()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{name}");
+        }
+
+        let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM app_users")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(users, 0);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_still_allows_a_direct_loopback_peer() {
+        let state = setup().await;
+        let response = bootstrap(
+            State(Arc::clone(&state)),
+            ConnectInfo("[::1]:43210".parse().unwrap()),
+            HeaderMap::new(),
+            Json(Credentials {
+                username: "owner".into(),
+                password: "correct horse battery".into(),
+                client: ClientKind::Bearer,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
