@@ -377,11 +377,15 @@ async fn sync_folder(
         tx.commit().await?;
     }
 
-    let since = db_folder.synced_at.as_deref().and_then(|s| {
-        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-            .ok()
-            .map(|ndt| ndt.and_utc())
-    });
+    let since = (!mailbox_reset)
+        .then(|| {
+            db_folder.synced_at.as_deref().and_then(|s| {
+                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                    .ok()
+                    .map(|ndt| ndt.and_utc())
+            })
+        })
+        .flatten();
 
     // If never synced (including after UIDVALIDITY reset) and a days limit is
     // configured, use that as the floor rather than downloading the mailbox.
@@ -842,6 +846,7 @@ mod tests {
         messages: Vec<Message>,
         incremental_uids: Vec<u32>,
         fetched_by_uid: Vec<Vec<u32>>,
+        fetched_since: Vec<Option<chrono::DateTime<Utc>>>,
     }
 
     struct MockProvider(Arc<RwLock<RemoteMailbox>>);
@@ -865,7 +870,8 @@ mod tests {
             _: &str,
             since: Option<chrono::DateTime<Utc>>,
         ) -> Result<Vec<Message>> {
-            let state = self.0.read().unwrap();
+            let mut state = self.0.write().unwrap();
+            state.fetched_since.push(since);
             if since.is_none() {
                 return Ok(state.messages.clone());
             }
@@ -981,6 +987,7 @@ mod tests {
             ],
             incremental_uids: vec![20],
             fetched_by_uid: Vec::new(),
+            fetched_since: Vec::new(),
         }));
 
         sync_folder(
@@ -1034,6 +1041,7 @@ mod tests {
             messages: vec![message(10, None), message(11, Some("same@example.test"))],
             incremental_uids: vec![10, 11],
             fetched_by_uid: Vec::new(),
+            fetched_since: Vec::new(),
         }));
         let provider: Arc<dyn MailProvider> = Arc::new(MockProvider(remote.clone()));
         sync_folder(provider.clone(), pool.clone(), "a", db_folder, None)
@@ -1079,6 +1087,7 @@ mod tests {
             messages: vec![message(20, Some("moved@example.test"))],
             incremental_uids: Vec::new(),
             fetched_by_uid: Vec::new(),
+            fetched_since: Vec::new(),
         }));
         let provider: Arc<dyn MailProvider> = Arc::new(MockProvider(remote.clone()));
         sync_folder(provider.clone(), pool.clone(), "a", db_folder, None)
@@ -1100,6 +1109,7 @@ mod tests {
             messages: vec![replacement],
             incremental_uids: Vec::new(),
             fetched_by_uid: Vec::new(),
+            fetched_since: Vec::new(),
         };
         sync_folder(provider, pool.clone(), "a", folder(&pool).await, None)
             .await
@@ -1110,6 +1120,48 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(rows, vec![(1, 2, Some("replacement".into()))]);
+    }
+
+    #[tokio::test]
+    async fn uidvalidity_reset_uses_days_limit_instead_of_previous_sync_time() {
+        let (pool, db_folder) = setup().await;
+        let remote = Arc::new(RwLock::new(RemoteMailbox {
+            uid_validity: 2,
+            messages: vec![
+                message(1, Some("old@example.test")),
+                message(2, Some("recent@example.test")),
+            ],
+            incremental_uids: vec![2],
+            fetched_by_uid: Vec::new(),
+            fetched_since: Vec::new(),
+        }));
+
+        sync_folder(
+            Arc::new(MockProvider(remote.clone())),
+            pool.clone(),
+            "a",
+            db_folder,
+            Some(30),
+        )
+        .await
+        .unwrap();
+
+        let state = remote.read().unwrap();
+        let since = state.fetched_since[0].expect("days limit supplies a fetch floor");
+        assert!(
+            since <= Utc::now() - chrono::Duration::days(29),
+            "reset must not reuse the previous synced_at"
+        );
+        assert!(
+            state.fetched_by_uid.is_empty(),
+            "reset must not repair-fetch messages outside the days limit"
+        );
+        drop(state);
+        let uids: Vec<i64> = sqlx::query_scalar("SELECT uid FROM messages WHERE folder_id='f'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(uids, vec![2]);
     }
 
     // ── OAuth token lifetime across a long run ───────────────────────────────
