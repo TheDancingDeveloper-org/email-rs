@@ -141,8 +141,9 @@ pub(crate) fn build_message(msg: &OutboundMessage) -> Result<Message> {
     }
 }
 
-pub async fn send_message(config: &SmtpConfig, msg: OutboundMessage) -> Result<()> {
+pub async fn send_message(config: &SmtpConfig, msg: OutboundMessage) -> Result<Vec<u8>> {
     let email = build_message(&msg)?;
+    let raw_message = email.formatted();
 
     let creds = Credentials::new(config.username.clone(), config.password.clone());
     let mechanisms = if config.xoauth2 {
@@ -171,7 +172,7 @@ pub async fn send_message(config: &SmtpConfig, msg: OutboundMessage) -> Result<(
         .await
         .map_err(|e| AppError::Smtp(e.to_string()))?;
 
-    Ok(())
+    Ok(raw_message)
 }
 
 #[cfg(test)]
@@ -227,5 +228,25 @@ mod tests {
         .unwrap();
         let raw = String::from_utf8(message.formatted()).unwrap();
         assert!(raw.contains("Message-ID: <draft-stable@example.test>"));
+    }
+
+    #[test]
+    fn sent_message_uses_the_same_message_id_for_imap_lookup() {
+        let message = build_message(&OutboundMessage {
+            from: "me@example.test".into(),
+            message_id: Some("sent-stable@example.test".into()),
+            to: vec!["you@example.test".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Sent".into(),
+            text_body: Some("hello".into()),
+            html_body: None,
+            in_reply_to: None,
+            attachments: vec![],
+        })
+        .unwrap();
+        assert!(String::from_utf8(message.formatted())
+            .unwrap()
+            .contains("Message-ID: <sent-stable@example.test>"));
     }
 }
