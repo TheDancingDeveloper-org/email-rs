@@ -220,6 +220,15 @@ fn doc_list_messages() {}
 fn doc_get_message() {}
 
 #[utoipa::path(
+    get,
+    path = "/threads/{id}",
+    security(("bearerAuth" = ["mail.metadata.read"])),
+    params(("id" = String, Path)),
+    responses((status = 200, body = [Message]))
+)]
+fn doc_get_thread() {}
+
+#[utoipa::path(
     patch,
     path = "/messages/{id}",
     security(("bearerAuth" = ["mail.modify"])),
@@ -485,6 +494,7 @@ fn doc_events() {}
         doc_mark_folder_read,
         doc_list_messages,
         doc_get_message,
+        doc_get_thread,
         doc_patch_message,
         doc_delete_message,
         doc_archive_message,

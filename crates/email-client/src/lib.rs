@@ -341,6 +341,10 @@ impl EmailClient {
         self.get(&format!("messages/{message_id}"), &[]).await
     }
 
+    pub async fn get_thread(&self, thread_id: &str) -> Result<Vec<Message>> {
+        self.get(&format!("threads/{thread_id}"), &[]).await
+    }
+
     pub async fn list_attachments(&self, message_id: &str) -> Result<Vec<MessageAttachment>> {
         self.get(&format!("messages/{message_id}/attachments"), &[])
             .await

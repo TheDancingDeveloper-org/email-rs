@@ -436,6 +436,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     run_clean_body_migration(pool).await?;
     run_search_index_migration(pool).await?;
     run_outbox_migration(pool).await?;
+    run_thread_backfill_migration(pool).await?;
 
     Ok(())
 }
@@ -468,6 +469,74 @@ async fn run_outbox_migration(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
     sqlx::query("INSERT INTO schema_migrations (version) VALUES (20)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+async fn run_thread_backfill_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    if sqlx::query_scalar::<_, i64>("SELECT version FROM schema_migrations WHERE version = 21")
+        .fetch_optional(pool)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: String,
+        account_id: String,
+        message_id: Option<String>,
+        thread_id: Option<String>,
+        subject: Option<String>,
+        raw_headers: Option<String>,
+    }
+    let rows = sqlx::query_as::<_, Row>(
+        "SELECT m.id, m.account_id, m.message_id, m.thread_id, m.subject, b.raw_headers FROM messages m LEFT JOIN message_bodies b ON b.message_id = m.id"
+    ).fetch_all(pool).await?;
+    for row in &rows {
+        let ids = row
+            .raw_headers
+            .as_deref()
+            .map(crate::threading::references)
+            .unwrap_or_default();
+        let parent = ids.iter().find_map(|id| {
+            rows.iter().find(|candidate| {
+                candidate.account_id == row.account_id
+                    && candidate
+                        .message_id
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(id))
+            })
+        });
+        let subject = crate::threading::normalized_subject(row.subject.as_deref());
+        let fallback = subject.as_ref().and_then(|subject| {
+            rows.iter().find(|candidate| {
+                candidate.id != row.id
+                    && candidate.account_id == row.account_id
+                    && crate::threading::normalized_subject(candidate.subject.as_deref()).as_ref()
+                        == Some(subject)
+            })
+        });
+        let thread_id = parent
+            .or(fallback)
+            .and_then(|candidate| candidate.thread_id.clone())
+            .or_else(|| row.thread_id.clone())
+            .or_else(|| {
+                row.message_id
+                    .as_ref()
+                    .map(|id| format!("rfc:{}:{}", row.account_id, id))
+            });
+        if thread_id != row.thread_id {
+            sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
+                .bind(thread_id)
+                .bind(&row.id)
+                .execute(pool)
+                .await?;
+        }
+    }
+    sqlx::query("INSERT INTO schema_migrations (version) VALUES (21)")
         .execute(pool)
         .await?;
     Ok(())
