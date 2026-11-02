@@ -618,23 +618,39 @@ async fn sync_folder(
 
     tx.commit().await?;
 
-    // Apply rules to newly inserted messages now that the transaction is committed.
-    for info in &new_msgs_for_rules {
-        let fields = crate::rules::MessageFields {
-            subject: info.subject.as_deref(),
-            from_name: info.from_name.as_deref(),
-            from_email: info.from_email.as_deref(),
-            to_json: info.to_json.as_deref(),
-            preview: info.preview.as_deref(),
-            is_read: info.is_read,
-            is_flagged: info.is_flagged,
-            has_attachments: info.has_attachments,
-            date: info.date.as_deref(),
-        };
-        if let Err(e) =
-            crate::rules::apply_rules_to_message(&pool, account_id, &info.id, &fields).await
-        {
-            warn!("rules evaluation failed for message {}: {}", info.id, e);
+    // Load the rules and their conditions/actions once per folder sync, then
+    // reuse that snapshot for every newly inserted message.
+    if !new_msgs_for_rules.is_empty() {
+        let rules = crate::rules::RulesService::new(pool.clone())
+            .list_rules(account_id)
+            .await;
+        match rules {
+            Ok(rules) => {
+                for info in &new_msgs_for_rules {
+                    let fields = crate::rules::MessageFields {
+                        subject: info.subject.as_deref(),
+                        from_name: info.from_name.as_deref(),
+                        from_email: info.from_email.as_deref(),
+                        to_json: info.to_json.as_deref(),
+                        preview: info.preview.as_deref(),
+                        is_read: info.is_read,
+                        is_flagged: info.is_flagged,
+                        has_attachments: info.has_attachments,
+                        date: info.date.as_deref(),
+                    };
+                    if let Err(e) = crate::rules::apply_preloaded_rules_to_message(
+                        &pool, account_id, &info.id, &fields, &rules,
+                    )
+                    .await
+                    {
+                        warn!("rules evaluation failed for message {}: {}", info.id, e);
+                    }
+                }
+            }
+            Err(e) => warn!(
+                "rules loading failed for folder {}: {}",
+                db_folder.full_path, e
+            ),
         }
     }
 
