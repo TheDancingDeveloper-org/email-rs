@@ -49,11 +49,24 @@ The server supports an HTTP-only, SameSite=Strict cookie for browser/desktop cli
 
 ## HTTPS with Caddy
 
-The server refuses a non-loopback bind unless `EMAIL_RS_PUBLIC_URL` starts with `https://`. Caddy should be the only public listener and forward the original scheme and host:
+The server refuses a non-loopback bind unless `EMAIL_RS_PUBLIC_URL` starts with
+`https://`. Caddy should be the only public listener. The following production
+route enables automatic TLS, compression, HSTS, a restrictive content security
+policy, and the other baseline browser security headers:
 
 ```caddyfile
 mail.example.com {
     encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "same-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
     reverse_proxy email-rs:3000
 }
 ```
@@ -66,7 +79,23 @@ PORT=3000
 EMAIL_RS_PUBLIC_URL=https://mail.example.com
 ```
 
-Caddy obtains and renews the certificate automatically when DNS points at the host and ports 80/443 are reachable. `EMAIL_RS_ALLOW_INSECURE_HTTP=true` bypasses the non-loopback check and is intended only for the checked-in local development Compose stack.
+Caddy obtains and renews the certificate automatically when DNS points at the
+host and ports 80/443 are reachable. Confirm that every subdomain is HTTPS-only
+before adding `includeSubDomains`; add `preload` only after meeting the browser
+preload-list requirements.
+
+`reverse_proxy` sets `X-Forwarded-For`, `X-Forwarded-Proto`, and
+`X-Forwarded-Host` itself. Do not copy those values from arbitrary incoming
+headers. The application uses `X-Forwarded-Proto` when validating
+cookie-authenticated mutation origins and does not maintain its own trusted
+proxy allowlist, so port 3000 must be reachable only from Caddy or the private
+container network. If another load balancer or CDN sits in front of Caddy,
+configure Caddy's global `trusted_proxies` with that provider's exact published
+address ranges and enable `trusted_proxies_strict`; never use an unrestricted
+range.
+
+`EMAIL_RS_ALLOW_INSECURE_HTTP=true` bypasses the non-loopback check and is
+intended only for the checked-in local development Compose stack.
 
 Same-origin web requests need no CORS headers. Add only native mobile or explicit development origins when needed, for example:
 
