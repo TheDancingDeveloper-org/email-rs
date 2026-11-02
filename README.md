@@ -175,6 +175,18 @@ container port. Non-loopback production deployments must set
 [`docs/deployment-security.md`](docs/deployment-security.md) for Caddy,
 authentication bootstrap, CORS, and migration-backup guidance.
 
+The production image runs as non-root UID/GID `10001`. Before upgrading an
+existing named volume that was written by an older root-running image, transfer
+its ownership once with the new image:
+
+```bash
+docker run --rm --user root -v email-data:/data email-rs \
+  chown -R 10001:10001 /data
+```
+
+For a bind mount, change ownership of the host directory to `10001:10001`
+instead. New named volumes are initialized with the correct ownership.
+
 Additional operational and developer documentation is indexed in
 [`docs/README.md`](docs/README.md).
 
