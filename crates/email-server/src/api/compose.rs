@@ -100,7 +100,7 @@ pub(crate) async fn build_outbound(
 
     let msg = OutboundMessage {
         from: account.email,
-        message_id: None,
+        message_id: Some(uuid::Uuid::new_v4().to_string()),
         to: req.to.clone(),
         cc: req.cc.clone(),
         bcc: req.bcc.clone(),

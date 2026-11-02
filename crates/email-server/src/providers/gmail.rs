@@ -782,6 +782,27 @@ impl MailProvider for GmailProvider {
         Ok(uid)
     }
 
+    async fn append_sent(&self, folder: &str, message_id: &str, raw_message: &[u8]) -> Result<u32> {
+        let mut session = self.connect().await?;
+        session
+            .append(folder, Some("(\\Seen)"), None, raw_message)
+            .await
+            .map_err(|e| AppError::Imap(format!("APPEND sent message failed: {e}")))?;
+        session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT sent folder failed: {e}")))?;
+        let uids = session
+            .uid_search(format!("HEADER Message-ID \"<{message_id}>\""))
+            .await
+            .map_err(|e| AppError::Imap(format!("sent message UID lookup failed: {e}")))?;
+        let uid = uids.into_iter().max().ok_or_else(|| {
+            AppError::Imap("provider did not return the appended sent message UID".into())
+        })?;
+        let _ = session.logout().await;
+        Ok(uid)
+    }
+
     async fn delete_draft(&self, folder: &str, uid: u32) -> Result<()> {
         let mut session = self.connect().await?;
         session

@@ -313,6 +313,15 @@ impl MailProvider for TestMailProvider {
     ) -> Result<u32> {
         self.mutation().map(|()| 1)
     }
+
+    async fn append_sent(
+        &self,
+        _folder: &str,
+        _message_id: &str,
+        _raw_message: &[u8],
+    ) -> Result<u32> {
+        self.mutation().map(|()| 1)
+    }
 }
 
 pub async fn provider_for_message(

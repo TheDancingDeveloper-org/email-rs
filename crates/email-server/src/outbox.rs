@@ -37,7 +37,28 @@ async fn process_due(pool: &SqlitePool) {
                 &req,
             )
             .await?;
-            crate::smtp::send_message(&config, message).await
+            let message_id = message
+                .message_id
+                .clone()
+                .expect("outbound message id is set");
+            let raw_message = crate::smtp::send_message(&config, message).await?;
+            let sent_folder: String = sqlx::query_scalar(
+                "SELECT full_path FROM folders WHERE account_id = ? AND special_use = 'sent' LIMIT 1",
+            )
+            .bind(&req.account_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| {
+                crate::error::AppError::Provider(
+                    "account has no Sent folder; synchronize folders first".into(),
+                )
+            })?;
+            let provider = crate::providers::factory::provider_for_account(pool, &req.account_id)
+                .await?;
+            provider
+                .append_sent(&sent_folder, &message_id, &raw_message)
+                .await?;
+            Ok::<(), crate::error::AppError>(())
         }
         .await;
         match result {
