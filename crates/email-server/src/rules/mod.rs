@@ -373,7 +373,7 @@ fn text_op(operator: &str, field_val: &str, cond_val: &str) -> bool {
 // ── Apply rules to a message ──────────────────────────────────────────────────
 
 /// Load all active rules for the account and apply them to the given message.
-/// Called during sync after each message upsert.
+/// Called by callers that do not already have a rules snapshot.
 pub async fn apply_rules_to_message(
     pool: &SqlitePool,
     account_id: &str,
@@ -383,7 +383,21 @@ pub async fn apply_rules_to_message(
     let service = RulesService::new(pool.clone());
     let rules = service.list_rules(account_id).await?;
 
-    for rule in &rules {
+    apply_preloaded_rules_to_message(pool, account_id, msg_id, fields, &rules).await
+}
+
+/// Apply a previously loaded rules snapshot to a message.
+///
+/// Folder syncs should use this function so the rules, conditions, and actions
+/// are loaded once per folder rather than once per new message.
+pub async fn apply_preloaded_rules_to_message(
+    pool: &SqlitePool,
+    account_id: &str,
+    msg_id: &str,
+    fields: &MessageFields<'_>,
+    rules: &[Rule],
+) -> Result<()> {
+    for rule in rules {
         if !rule.is_active {
             continue;
         }
@@ -506,6 +520,7 @@ async fn apply_action(pool: &SqlitePool, account_id: &str, msg_id: &str, action:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
 
     fn make_rule(match_mode: &str, conditions: Vec<RuleCondition>) -> Rule {
         Rule {
@@ -631,5 +646,25 @@ mod tests {
     fn empty_conditions_returns_false() {
         let rule = make_rule("all", vec![]);
         assert!(!evaluate_rule(&rule, &msg()));
+    }
+
+    #[tokio::test]
+    async fn preloaded_rules_can_be_applied_to_multiple_messages() {
+        let pool = SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let rules = vec![make_rule("all", vec![cond("subject", "contains", "Rust")])];
+        let first = msg();
+        let second = MessageFields {
+            subject: Some("Rust release notes"),
+            ..first
+        };
+
+        apply_preloaded_rules_to_message(&pool, "acc1", "msg1", &first, &rules)
+            .await
+            .unwrap();
+        apply_preloaded_rules_to_message(&pool, "acc1", "msg2", &second, &rules)
+            .await
+            .unwrap();
     }
 }
