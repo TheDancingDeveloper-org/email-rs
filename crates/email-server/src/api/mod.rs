@@ -19,6 +19,7 @@ pub mod integration_tokens;
 pub mod labels;
 pub mod messages;
 pub mod openapi;
+pub mod outbox;
 pub mod rules;
 pub mod search;
 pub mod smart_folders;
@@ -48,6 +49,8 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/messages/{id}/snooze"),
     ("DELETE", "/messages/{id}/snooze"),
     ("POST", "/messages"),
+    ("GET", "/outbox"),
+    ("DELETE", "/outbox/{id}"),
     ("POST", "/drafts"),
     ("PUT", "/drafts/{id}"),
     ("DELETE", "/drafts/{id}"),
@@ -176,6 +179,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(snooze::snooze_message).delete(snooze::unsnooze_message),
         )
         .route("/messages", post(compose::send_message))
+        .route("/outbox", get(outbox::list_outbox))
+        .route("/outbox/{id}", axum::routing::delete(outbox::cancel_outbox))
         .route("/drafts", post(compose::create_draft))
         .route(
             "/drafts/{id}",
