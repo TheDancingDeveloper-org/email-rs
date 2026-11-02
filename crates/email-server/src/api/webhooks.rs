@@ -35,7 +35,7 @@ pub async fn create_webhook(
     )
     .bind(&id)
     .bind(&body.url)
-    .bind(&body.secret)
+    .bind(crate::credentials::seal_optional(body.secret.as_deref())?)
     .bind(&events)
     .bind(&body.account_id)
     .execute(&state.pool)
@@ -66,7 +66,7 @@ pub async fn update_webhook(
     }
     if let Some(ref secret) = body.secret {
         sqlx::query("UPDATE webhooks SET secret = ? WHERE id = ?")
-            .bind(secret)
+            .bind(crate::credentials::seal(secret)?)
             .bind(&id)
             .execute(&state.pool)
             .await?;
@@ -644,7 +644,19 @@ async fn deliver_one(
         .header("X-Email-Event-ID", &row.event_id)
         .header("X-Email-Timestamp", &sent_at)
         .body(body.clone());
-    if let Some(secret) = &row.secret {
+    let secret = match row
+        .secret
+        .as_deref()
+        .map(crate::credentials::open)
+        .transpose()
+    {
+        Ok(secret) => secret,
+        Err(error) => {
+            record_failure(pool, &row, row.attempts + 1, None, error.to_string()).await;
+            return;
+        }
+    };
+    if let Some(secret) = &secret {
         // Legacy body-only MAC, kept so existing receivers keep verifying.
         // Deprecated: new receivers should use the v2 headers below.
         let legacy = {
