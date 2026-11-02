@@ -27,6 +27,8 @@ class SendRequest:
         attachments (list[OutgoingAttachment] | Unset):
         html_body (None | str | Unset):
         in_reply_to (None | str | Unset):
+        send_at (None | str | Unset):
+        send_delay_seconds (int | None | Unset):
         text_body (None | str | Unset):
     """
 
@@ -38,6 +40,8 @@ class SendRequest:
     attachments: list[OutgoingAttachment] | Unset = UNSET
     html_body: None | str | Unset = UNSET
     in_reply_to: None | str | Unset = UNSET
+    send_at: None | str | Unset = UNSET
+    send_delay_seconds: int | None | Unset = UNSET
     text_body: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -71,6 +75,18 @@ class SendRequest:
         else:
             in_reply_to = self.in_reply_to
 
+        send_at: None | str | Unset
+        if isinstance(self.send_at, Unset):
+            send_at = UNSET
+        else:
+            send_at = self.send_at
+
+        send_delay_seconds: int | None | Unset
+        if isinstance(self.send_delay_seconds, Unset):
+            send_delay_seconds = UNSET
+        else:
+            send_delay_seconds = self.send_delay_seconds
+
         text_body: None | str | Unset
         if isinstance(self.text_body, Unset):
             text_body = UNSET
@@ -94,6 +110,10 @@ class SendRequest:
             field_dict["htmlBody"] = html_body
         if in_reply_to is not UNSET:
             field_dict["inReplyTo"] = in_reply_to
+        if send_at is not UNSET:
+            field_dict["sendAt"] = send_at
+        if send_delay_seconds is not UNSET:
+            field_dict["sendDelaySeconds"] = send_delay_seconds
         if text_body is not UNSET:
             field_dict["textBody"] = text_body
 
@@ -101,7 +121,7 @@ class SendRequest:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.outgoing_attachment import OutgoingAttachment
+        from ..models.outgoing_attachment import OutgoingAttachment  # noqa: PLC0415
 
         d = dict(src_dict)
         account_id = d.pop("accountId")
@@ -141,6 +161,24 @@ class SendRequest:
 
         in_reply_to = _parse_in_reply_to(d.pop("inReplyTo", UNSET))
 
+        def _parse_send_at(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        send_at = _parse_send_at(d.pop("sendAt", UNSET))
+
+        def _parse_send_delay_seconds(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        send_delay_seconds = _parse_send_delay_seconds(d.pop("sendDelaySeconds", UNSET))
+
         def _parse_text_body(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -159,6 +197,8 @@ class SendRequest:
             attachments=attachments,
             html_body=html_body,
             in_reply_to=in_reply_to,
+            send_at=send_at,
+            send_delay_seconds=send_delay_seconds,
             text_body=text_body,
         )
 

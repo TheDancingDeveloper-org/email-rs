@@ -124,7 +124,7 @@ class CalendarEvent:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.attendee import Attendee
+        from ..models.attendee import Attendee  # noqa: PLC0415
 
         d = dict(src_dict)
         attendees = []
