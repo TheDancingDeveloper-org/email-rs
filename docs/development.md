@@ -39,7 +39,11 @@ Frontend checks:
 (cd mobile && npm ci && npm run build)
 ```
 
-GitHub CI runs the Rust matrix in an explicitly named clean-checkout job and rejects manifests containing `../../../` path dependencies. A separate clean checkout builds the production server image.
+GitHub Actions is the authoritative CI system and provides the required `ci`,
+`runner-policy / runner-policy`, and `release-dry-run` checks for protected
+branches. It runs the Rust matrix in an explicitly named clean-checkout job
+and rejects manifests containing `../../../` path dependencies. A separate
+clean checkout builds the production server image.
 
 ## Optional local FluentGUI override
 
