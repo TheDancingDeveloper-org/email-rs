@@ -284,6 +284,23 @@ fn doc_download_attachment() {}
 fn doc_send_message() {}
 
 #[utoipa::path(
+    get,
+    path = "/outbox",
+    security(("bearerAuth" = ["mail.send"])),
+    responses((status = 200, body = [serde_json::Value]), (status = 401, body = ErrorResponse))
+)]
+fn doc_list_outbox() {}
+
+#[utoipa::path(
+    delete,
+    path = "/outbox/{id}",
+    security(("bearerAuth" = ["mail.send"])),
+    params(("id" = String, Path)),
+    responses((status = 200, body = serde_json::Value), (status = 409, body = ErrorResponse))
+)]
+fn doc_cancel_outbox() {}
+
+#[utoipa::path(
     post,
     path = "/drafts",
     security(("bearerAuth" = ["mail.modify"])),
@@ -475,6 +492,8 @@ fn doc_events() {}
         doc_list_attachments,
         doc_download_attachment,
         doc_send_message,
+        doc_list_outbox,
+        doc_cancel_outbox,
         doc_create_draft,
         doc_update_draft,
         doc_delete_draft,
