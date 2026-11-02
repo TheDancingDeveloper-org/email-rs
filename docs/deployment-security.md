@@ -107,6 +107,24 @@ Cookie-authenticated POST/PUT/PATCH/DELETE requests must also carry an Origin ma
 
 ## Message-identity migration backups
 
+## Database maintenance
+
+At startup, email-rs runs SQLite `PRAGMA quick_check` after migrations. A
+result other than `ok` refuses startup and is logged as database corruption.
+Set `EMAIL_RS_ALLOW_CORRUPT_DATABASE=true` only when recovering a damaged
+database deliberately; the server will then log a warning and continue.
+
+New databases use SQLite incremental auto-vacuum. Background maintenance
+removes orphaned message bodies and attachments in batches, runs incremental
+vacuum, and periodically optimises the FTS index. The intervals are configured
+in seconds with these environment variables (defaults shown):
+
+```text
+EMAIL_RS_ORPHAN_CLEANUP_INTERVAL_SECS=86400
+EMAIL_RS_INCREMENTAL_VACUUM_INTERVAL_SECS=86400
+EMAIL_RS_FTS_OPTIMIZE_INTERVAL_SECS=604800
+```
+
 Before rebuilding a legacy `messages` table, startup creates a timestamped sibling SQLite file named like:
 
 ```text
