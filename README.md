@@ -194,7 +194,7 @@ Additional operational and developer documentation is indexed in
 
 ## Linux CI release build
 
-The GitHub and Woodpecker release workflows build the `email-server` browser/headless
+The GitHub Actions release workflow builds the `email-server` browser/headless
 binary and `email-desktop-fluent` native binary explicitly, then package them
 with the browser assets. The Docker image builds only `email-server`.
 
