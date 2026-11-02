@@ -43,7 +43,7 @@ EMAIL_RS_BOOTSTRAP_USERNAME=admin
 EMAIL_RS_BOOTSTRAP_PASSWORD=<a secret of at least 12 characters>
 ```
 
-The password is stored only as an Argon2id hash. Once startup succeeds, remove `EMAIL_RS_BOOTSTRAP_PASSWORD` from the running environment; it is ignored after a user exists. An empty variable is also ignored. Alternatively, the browser first-run form calls the bootstrap endpoint, which accepts connections only from a direct loopback peer. Setup through a container-network reverse proxy is not loopback, so Docker deployments should use the environment secret.
+The password is stored only as an Argon2id hash. Once startup succeeds, remove `EMAIL_RS_BOOTSTRAP_PASSWORD` from the running environment; it is ignored after a user exists. An empty variable is also ignored. Alternatively, the browser first-run form calls the bootstrap endpoint, which accepts connections only from a direct loopback peer. Requests carrying standard reverse-proxy forwarding headers are rejected even when the proxy itself connects from loopback. Docker and reverse-proxy deployments must therefore use the environment secret.
 
 The server supports an HTTP-only, SameSite=Strict cookie for browser/desktop clients and bearer tokens for native mobile clients; only SHA-256 token hashes are stored in SQLite. The browser login flow is integrated. Fluent desktop login and secure mobile token persistence are still release blockers. Logout and session revocation delete the server-side session row immediately.
 
