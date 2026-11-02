@@ -440,6 +440,21 @@ impl MailProvider for GenericImapProvider {
         Ok(uids.into_iter().collect())
     }
 
+    async fn search_uids(&self, folder: &str, text: &str) -> Result<Vec<u32>> {
+        let query = imap_text_search_query(text);
+        let mut session = self.connect().await?;
+        session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT failed: {e}")))?;
+        let uids = session
+            .uid_search(&query)
+            .await
+            .map_err(|e| AppError::Imap(format!("UID SEARCH failed: {e}")))?;
+        let _ = session.logout().await;
+        Ok(uids.into_iter().collect())
+    }
+
     async fn fetch_message_body(&self, folder: &str, uid: u32) -> Result<MessageBody> {
         let mut session = self.connect().await?;
 
@@ -690,5 +705,33 @@ mod tests {
         assert_eq!(special_use_for_name("Sent", &[]), Some("sent".into()));
         assert_eq!(special_use_for_name("Sent Items", &[]), Some("sent".into()));
         assert_eq!(special_use_for_name("Sent Mail", &[]), Some("sent".into()));
+    }
+}
+
+/// `TEXT "<text>"` as an IMAP search key. The text is sent as a quoted string:
+/// backslash and quote are escaped, and line breaks (which a quoted string
+/// can't hold) become spaces.
+fn imap_text_search_query(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    format!(
+        "TEXT \"{}\"",
+        cleaned.replace('\\', "\\\\").replace('"', "\\\"")
+    )
+}
+
+#[cfg(test)]
+mod text_search_tests {
+    use super::imap_text_search_query;
+
+    #[test]
+    fn text_search_key_quotes_and_escapes() {
+        assert_eq!(imap_text_search_query("invoice"), "TEXT \"invoice\"");
+        assert_eq!(
+            imap_text_search_query("a\"b\\c\r\nd"),
+            "TEXT \"a\\\"b\\\\c  d\""
+        );
     }
 }

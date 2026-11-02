@@ -5,7 +5,7 @@ use axum::Json;
 use email_types::Message as MessageRow;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +31,10 @@ pub struct SearchQuery {
     pub is_flagged: Option<String>,
     pub date_after: Option<String>,
     pub date_before: Option<String>,
+    /// `true` also asks each IMAP server to search its mailboxes, so messages
+    /// the local index misses (a body not cached, an older sync window) are
+    /// found when they are cached. Opt-in: it opens a connection per folder.
+    pub remote: Option<String>,
 }
 
 // ── FTS5 query helpers ────────────────────────────────────────────────────────
@@ -57,6 +61,155 @@ fn fts_prefix_query(term: &str) -> String {
     let last = words.last().unwrap();
     parts.push(format!("\"{}\"*", last.replace('"', "\"\"")));
     parts.join(" ")
+}
+
+const SEARCH_LIMIT: usize = 50;
+/// Folders asked per account, and server-side matches kept per folder.
+const REMOTE_FOLDER_LIMIT: i64 = 20;
+const REMOTE_UID_LIMIT: usize = 50;
+
+/// Append `more` after `messages` (already ranked), skipping repeats and
+/// keeping the result within [`SEARCH_LIMIT`].
+fn merge_remote(messages: &mut Vec<MessageRow>, more: Vec<MessageRow>) {
+    let mut seen: std::collections::HashSet<String> =
+        messages.iter().map(|m| m.id.clone()).collect();
+    for message in more {
+        if messages.len() >= SEARCH_LIMIT {
+            break;
+        }
+        if seen.insert(message.id.clone()) {
+            messages.push(message);
+        }
+    }
+}
+
+/// Ask each IMAP account's server (`UID SEARCH TEXT`) for `term` and return
+/// the matches that are cached locally. A message outside the sync window is
+/// not cached and can't be returned. A server or account that fails is
+/// logged and skipped: the local results stand.
+async fn search_remote(state: &AppState, term: &str, account_id: Option<&str>) -> Vec<MessageRow> {
+    let accounts: Vec<String> = match sqlx::query_scalar(
+        "SELECT id FROM accounts WHERE (?1 IS NULL OR id = ?1) ORDER BY id",
+    )
+    .bind(account_id)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            tracing::warn!(%error, "remote search could not list accounts");
+            return Vec::new();
+        }
+    };
+    let mut found = Vec::new();
+    for account in accounts {
+        let provider =
+            match crate::providers::factory::provider_for_account(&state.pool, &account).await {
+                Ok(provider) => provider,
+                Err(error) => {
+                    tracing::warn!(%error, account, "remote search skipped an account");
+                    continue;
+                }
+            };
+        let folders: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT id, full_path, uid_validity FROM folders WHERE account_id = ?
+             ORDER BY total_count DESC LIMIT ?",
+        )
+        .bind(&account)
+        .bind(REMOTE_FOLDER_LIMIT)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+        for (folder_id, path, uid_validity) in folders {
+            let uids = match provider.search_uids(&path, term).await {
+                Ok(uids) => uids,
+                Err(error) => {
+                    tracing::warn!(%error, account, folder = path, "remote search failed");
+                    continue;
+                }
+            };
+            // Newest first: higher UIDs are newer.
+            let mut uids = uids;
+            uids.sort_unstable_by(|a, b| b.cmp(a));
+            uids.truncate(REMOTE_UID_LIMIT);
+            if uids.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; uids.len()].join(", ");
+            let sql = format!(
+                r#"SELECT m.id, m.id AS occurrence_id, m.logical_id, m.account_id, m.folder_id, m.uid, m.message_id,
+                          m.thread_id, m.subject, m.from_name, m.from_email, m.to_json,
+                          m.date, m.is_read, m.is_flagged, m.is_draft, m.has_attachments, m.preview,
+                          m.snoozed_until
+                   FROM messages m
+                   WHERE m.folder_id = ? AND m.uid_validity = ? AND m.uid IN ({placeholders})
+                   ORDER BY m.date DESC"#
+            );
+            let mut query = sqlx::query_as::<_, MessageRow>(&sql)
+                .bind(&folder_id)
+                .bind(uid_validity);
+            for uid in &uids {
+                query = query.bind(i64::from(*uid));
+            }
+            match query.fetch_all(&state.pool).await {
+                Ok(rows) => found.extend(rows),
+                Err(error) => tracing::warn!(%error, "remote search lookup failed"),
+            }
+        }
+    }
+    found.sort_by(|a, b| b.date.cmp(&a.date));
+    found
+}
+
+// ── Search index administration ──────────────────────────────────────────────
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexAdminResponse {
+    pub status: &'static str,
+    pub indexed: Option<i64>,
+}
+
+fn require_fts(state: &AppState) -> Result<()> {
+    if state.has_fts {
+        Ok(())
+    } else {
+        Err(AppError::Validation(
+            "this database has no FTS5 search index".into(),
+        ))
+    }
+}
+
+/// `POST /admin/search-index/optimize`: merge the index segments now, as the
+/// periodic maintenance does.
+pub async fn optimize_index(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<IndexAdminResponse>> {
+    require_fts(&state)?;
+    crate::maintenance::optimize_fts(&state.pool).await?;
+    Ok(Json(IndexAdminResponse {
+        status: "optimized",
+        indexed: None,
+    }))
+}
+
+/// `POST /admin/search-index/rebuild`: re-create every index row from the
+/// messages and attachments, then rewrite the clean bodies in the background.
+/// Search covers subject, sender, recipients, preview and attachment names
+/// at once and bodies as they are reindexed.
+pub async fn rebuild_index(
+    State(state): State<Arc<AppState>>,
+) -> Result<(axum::http::StatusCode, Json<IndexAdminResponse>)> {
+    require_fts(&state)?;
+    let indexed = crate::maintenance::rebuild_fts(&state.pool).await?;
+    crate::search_index::spawn_reindex(state.pool.clone());
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(IndexAdminResponse {
+            status: "rebuilding",
+            indexed: Some(indexed),
+        }),
+    ))
 }
 
 // ── Full search ───────────────────────────────────────────────────────────────
@@ -88,6 +241,15 @@ pub async fn search_messages(
     } else {
         search_like(&state, term, params.account_id.as_deref()).await?
     };
+    let mut messages = messages;
+    if !has_structured
+        && !term.is_empty()
+        && params.remote.as_deref() == Some("true")
+        && messages.len() < SEARCH_LIMIT
+    {
+        let more = search_remote(&state, term, params.account_id.as_deref()).await;
+        merge_remote(&mut messages, more);
+    }
     let events = if term.is_empty() || has_structured {
         Vec::new()
     } else {
@@ -351,7 +513,8 @@ async fn search_fts(
     let q = fts_query(term);
 
     // Column weights: message_id(unindexed)=0, subject=10, sender=5,
-    // recipients=2, body (the clean current message)=2, quoted history=0.2.
+    // recipients=2, body (the clean current message)=2, quoted history=0.2,
+    // attachment names=3.
     // Quoted history stays searchable so a reply that quotes mail we don't
     // hold can still be found, but a message that only quotes a term ranks
     // below the messages that say it.
@@ -364,7 +527,7 @@ async fn search_fts(
                FROM messages_fts fts
                JOIN messages m ON m.id = fts.message_id
                WHERE messages_fts MATCH ? AND m.account_id = ?
-               ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2)
+               ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2, 3)
                LIMIT 50"#,
         )
         .bind(&q)
@@ -380,7 +543,7 @@ async fn search_fts(
                FROM messages_fts fts
                JOIN messages m ON m.id = fts.message_id
                WHERE messages_fts MATCH ?
-               ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2)
+               ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2, 3)
                LIMIT 50"#,
         )
         .bind(&q)
@@ -419,7 +582,9 @@ async fn search_like(
            WHERE {account_clause}
                  (m.subject LIKE ? ESCAPE '\' OR m.from_name LIKE ? ESCAPE '\' OR m.from_email LIKE ? ESCAPE '\'
                   OR m.to_json LIKE ? ESCAPE '\' OR m.cc_json LIKE ? ESCAPE '\' OR m.preview LIKE ? ESCAPE '\'
-                  OR mb.clean_body LIKE ? ESCAPE '\' OR mb.quoted_history LIKE ? ESCAPE '\')
+                  OR mb.clean_body LIKE ? ESCAPE '\' OR mb.quoted_history LIKE ? ESCAPE '\'
+                  OR EXISTS (SELECT 1 FROM attachments a
+                              WHERE a.message_id = m.id AND a.filename LIKE ? ESCAPE '\'))
            GROUP BY m.id
            ORDER BY CASE
                       WHEN lower(m.subject) LIKE lower(?) ESCAPE '\' OR lower(m.subject) LIKE lower(?) ESCAPE '\' THEN 4
@@ -436,7 +601,7 @@ async fn search_like(
     if let Some(aid) = account_id {
         query = query.bind(aid);
     }
-    for _ in 0..8 {
+    for _ in 0..9 {
         query = query.bind(q_sub.clone());
     }
     query = query.bind(q_word_start).bind(q_word_mid);
@@ -513,7 +678,7 @@ pub async fn suggest_messages(
                    FROM messages_fts fts
                    JOIN messages m ON m.id = fts.message_id
                    WHERE messages_fts MATCH ? AND m.account_id = ?
-                   ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2)
+                   ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2, 3)
                    LIMIT 8"#,
             )
             .bind(&q)
@@ -526,7 +691,7 @@ pub async fn suggest_messages(
                    FROM messages_fts fts
                    JOIN messages m ON m.id = fts.message_id
                    WHERE messages_fts MATCH ?
-                   ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2)
+                   ORDER BY bm25(messages_fts, 0, 10, 5, 2, 2, 0.2, 3)
                    LIMIT 8"#,
             )
             .bind(&q)
@@ -1610,6 +1775,198 @@ mod tests {
         assert_eq!(
             ids(state, "/search?q=orders%40shop.example&account_id=acc1").await,
             ["html"]
+        );
+    }
+
+    async fn do_post(router: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn fts_indexes_attachment_filenames_as_they_change() {
+        let state = make_state(true).await;
+        seed(
+            &state.pool,
+            "att",
+            "acc1",
+            "fld1",
+            "Contract",
+            "a@example.com",
+            "A",
+            "",
+        )
+        .await;
+        seed(
+            &state.pool,
+            "plain",
+            "acc1",
+            "fld1",
+            "Lunch",
+            "b@example.com",
+            "B",
+            "",
+        )
+        .await;
+        assert!(ids(state.clone(), "/search?q=quarterlyledger")
+            .await
+            .is_empty());
+
+        seed_attachment(&state.pool, "att", "quarterlyledger.xlsx").await;
+        assert_eq!(
+            ids(state.clone(), "/search?q=quarterlyledger").await,
+            ["att"]
+        );
+
+        sqlx::query(
+            "UPDATE attachments SET filename = 'renamedsheet.xlsx' WHERE message_id = 'att'",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        assert!(ids(state.clone(), "/search?q=quarterlyledger")
+            .await
+            .is_empty());
+        assert_eq!(ids(state.clone(), "/search?q=renamedsheet").await, ["att"]);
+
+        sqlx::query("DELETE FROM attachments WHERE message_id = 'att'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        assert!(ids(state, "/search?q=renamedsheet").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn like_fallback_finds_attachment_filenames_and_still_escapes_wildcards() {
+        let state = make_state(false).await;
+        seed(
+            &state.pool,
+            "a1",
+            "acc1",
+            "fld1",
+            "One",
+            "a@example.com",
+            "A",
+            "",
+        )
+        .await;
+        seed(
+            &state.pool,
+            "a2",
+            "acc1",
+            "fld1",
+            "Two",
+            "b@example.com",
+            "B",
+            "",
+        )
+        .await;
+        seed_attachment(&state.pool, "a1", "budget_final.pdf").await;
+        assert_eq!(ids(state.clone(), "/search?q=budget_final").await, ["a1"]);
+        // `_` is a literal, not a one-character wildcard (#18).
+        assert!(ids(state.clone(), "/search?q=budget-final")
+            .await
+            .is_empty());
+        assert!(ids(state, "/search?q=budget%25").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebuild_endpoint_restores_a_damaged_index_with_attachment_names() {
+        let state = make_state(true).await;
+        seed(
+            &state.pool,
+            "r1",
+            "acc1",
+            "fld1",
+            "Rebuild me",
+            "a@example.com",
+            "A",
+            "",
+        )
+        .await;
+        seed_attachment(&state.pool, "r1", "stalefile.zip").await;
+        sqlx::query("DELETE FROM messages_fts")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        assert!(ids(state.clone(), "/search?q=stalefile").await.is_empty());
+
+        let (status, body) = do_post(
+            crate::api::router(state.clone()),
+            "/admin/search-index/rebuild",
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["indexed"], 1);
+        assert_eq!(ids(state.clone(), "/search?q=stalefile").await, ["r1"]);
+        assert_eq!(ids(state, "/search?q=rebuild").await, ["r1"]);
+    }
+
+    #[tokio::test]
+    async fn optimize_endpoint_runs_and_needs_fts() {
+        let state = make_state(true).await;
+        let (status, body) =
+            do_post(crate::api::router(state), "/admin/search-index/optimize").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "optimized");
+
+        let no_fts = make_state(false).await;
+        let (status, _) = do_post(
+            crate::api::router(no_fts.clone()),
+            "/admin/search-index/optimize",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = do_post(crate::api::router(no_fts), "/admin/search-index/rebuild").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn remote_search_adds_server_matches_that_the_index_misses() {
+        let state = make_state(true).await;
+        seed(
+            &state.pool,
+            "srv",
+            "acc1",
+            "fld1",
+            "Unrelated",
+            "a@example.com",
+            "A",
+            "",
+        )
+        .await;
+        sqlx::query("UPDATE accounts SET provider_type = 'test' WHERE id = 'acc1'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        // The local index has nothing for the term; only the server does.
+        assert!(ids(state.clone(), "/search?q=serversideonly")
+            .await
+            .is_empty());
+        assert!(ids(state.clone(), "/search?q=serversideonly&remote=false")
+            .await
+            .is_empty());
+        assert_eq!(
+            ids(state.clone(), "/search?q=serversideonly&remote=true").await,
+            ["srv"]
+        );
+        assert_eq!(
+            ids(
+                state,
+                "/search?q=serversideonly&remote=true&account_id=none"
+            )
+            .await,
+            Vec::<String>::new()
         );
     }
 }
