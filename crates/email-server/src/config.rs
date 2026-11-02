@@ -14,6 +14,35 @@ pub struct Config {
     /// `EMAIL_RS_ALLOW_OPEN_NO_AUTH`: second opt-in to run without auth on a non-loopback bind.
     pub allow_open_no_auth: bool,
     pub webhook_policy: WebhookPolicy,
+    pub allow_corrupt_database: bool,
+    pub maintenance: MaintenanceConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaintenanceConfig {
+    pub orphan_cleanup_interval: std::time::Duration,
+    pub vacuum_interval: std::time::Duration,
+    pub fts_optimize_interval: std::time::Duration,
+}
+
+impl MaintenanceConfig {
+    fn from_env() -> Self {
+        fn seconds(name: &str, default: u64) -> std::time::Duration {
+            std::time::Duration::from_secs(
+                env::var(name)
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(default)
+                    .max(1),
+            )
+        }
+
+        Self {
+            orphan_cleanup_interval: seconds("EMAIL_RS_ORPHAN_CLEANUP_INTERVAL_SECS", 86_400),
+            vacuum_interval: seconds("EMAIL_RS_INCREMENTAL_VACUUM_INTERVAL_SECS", 86_400),
+            fts_optimize_interval: seconds("EMAIL_RS_FTS_OPTIMIZE_INTERVAL_SECS", 604_800),
+        }
+    }
 }
 
 /// Controls which webhook targets email-rs will store and call.
@@ -112,6 +141,8 @@ impl Config {
             disable_auth: env_flag("EMAIL_RS_DISABLE_AUTH"),
             allow_open_no_auth: env_flag("EMAIL_RS_ALLOW_OPEN_NO_AUTH"),
             webhook_policy: WebhookPolicy::from_env(),
+            allow_corrupt_database: env_flag("EMAIL_RS_ALLOW_CORRUPT_DATABASE"),
+            maintenance: MaintenanceConfig::from_env(),
         }
     }
 
@@ -239,6 +270,8 @@ mod validate_security_tests {
                 allow_insecure_http: false,
                 allowlist: vec![],
             },
+            allow_corrupt_database: false,
+            maintenance: MaintenanceConfig::from_env(),
         }
     }
 
