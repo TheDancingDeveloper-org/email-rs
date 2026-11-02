@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod imap;
+pub mod outbox;
 pub mod providers;
 pub mod rules;
 pub mod search_index;
@@ -43,6 +44,7 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
         search_index::spawn_reindex(pool.clone());
     }
     SyncOrchestrator::spawn_background(pool, app_state.event_tx.clone());
+    outbox::spawn_worker(app_state.pool.clone());
 
     let app = build_app(app_state, &cfg.frontend_dist);
 
