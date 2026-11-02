@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
@@ -17,6 +18,9 @@ use crate::auth::oauth2::{OAuthConfig, StoredToken};
 use crate::error::{AppError, Result};
 use crate::state::{AppState, OAuthState};
 use crate::sync::SyncOrchestrator;
+
+const OAUTH_STATE_TTL_SECONDS: i64 = 10 * 60;
+const MAX_PENDING_OAUTH_STATES: usize = 100;
 
 // ── Query parameter structs ───────────────────────────────────────────────────
 
@@ -72,6 +76,31 @@ fn spawn_sync(
     });
 }
 
+fn insert_oauth_state(
+    states: &mut HashMap<String, OAuthState>,
+    state_val: String,
+    pending: OAuthState,
+    now: i64,
+) {
+    states.retain(|_, state| now.saturating_sub(state.created_at) < OAUTH_STATE_TTL_SECONDS);
+    while states.len() >= MAX_PENDING_OAUTH_STATES {
+        let oldest = states
+            .iter()
+            .min_by_key(|(_, state)| state.created_at)
+            .map(|(key, _)| key.clone());
+        if let Some(key) = oldest {
+            states.remove(&key);
+        } else {
+            break;
+        }
+    }
+    states.insert(state_val, pending);
+}
+
+fn oauth_state_is_current(state: &OAuthState, now: i64) -> bool {
+    now.saturating_sub(state.created_at) < OAUTH_STATE_TTL_SECONDS
+}
+
 /// Validate and consume the OAuth state token. Returns the stored PKCE verifier
 /// (None for non-PKCE flows) or an error response.
 #[allow(clippy::result_large_err)]
@@ -86,7 +115,12 @@ async fn consume_state(
             Json(serde_json::json!({ "error": "invalid or expired state" })),
         )
             .into_response()),
-        Some(verifier) => Ok(verifier),
+        Some(state) if oauth_state_is_current(&state, chrono::Utc::now().timestamp()) => Ok(state),
+        Some(_) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid or expired state" })),
+        )
+            .into_response()),
     }
 }
 
@@ -395,15 +429,20 @@ pub async fn gmail_authorize(
     let oauth = OAuthConfig::gmail(client_id, client_secret, gmail_redirect_uri(&headers));
     let state_val = Uuid::new_v4().to_string();
     let (url, verifier) = oauth.authorization_url(&state_val);
+    let now = chrono::Utc::now().timestamp();
 
-    state.oauth_states.lock().await.insert(
+    let mut states = state.oauth_states.lock().await;
+    insert_oauth_state(
+        &mut states,
         state_val,
         OAuthState {
             user_id: principal.user_id,
             session_id: principal.session_id,
             verifier,
             account_id: query.account_id,
+            created_at: now,
         },
+        now,
     );
     Json(AuthorizeResponse { url }).into_response()
 }
@@ -517,15 +556,20 @@ pub async fn microsoft_authorize(
     let oauth = OAuthConfig::outlook(client_id, outlook_redirect_uri(&headers));
     let state_val = Uuid::new_v4().to_string();
     let (url, verifier) = oauth.authorization_url(&state_val);
+    let now = chrono::Utc::now().timestamp();
 
-    state.oauth_states.lock().await.insert(
+    let mut states = state.oauth_states.lock().await;
+    insert_oauth_state(
+        &mut states,
         state_val,
         OAuthState {
             user_id: principal.user_id,
             session_id: principal.session_id,
             verifier,
             account_id: query.account_id,
+            created_at: now,
         },
+        now,
     );
     Json(AuthorizeResponse { url }).into_response()
 }
@@ -783,9 +827,58 @@ async fn update_account_token(
 #[cfg(test)]
 mod tests {
     use super::{
-        finish_oauth, object_id_matches, upsert_account, VerifiedIdentity,
-        MICROSOFT_CONSUMER_TENANT,
+        finish_oauth, insert_oauth_state, oauth_state_is_current, object_id_matches,
+        upsert_account, VerifiedIdentity, MAX_PENDING_OAUTH_STATES, MICROSOFT_CONSUMER_TENANT,
+        OAUTH_STATE_TTL_SECONDS,
     };
+    use crate::state::OAuthState;
+    use std::collections::HashMap;
+
+    fn pending(created_at: i64) -> OAuthState {
+        OAuthState {
+            user_id: "user".into(),
+            session_id: "session".into(),
+            verifier: None,
+            account_id: None,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn oauth_states_expire_when_pruned() {
+        let now = 1_000;
+        let mut states = HashMap::new();
+        insert_oauth_state(
+            &mut states,
+            "expired".into(),
+            pending(now - OAUTH_STATE_TTL_SECONDS),
+            now,
+        );
+        insert_oauth_state(&mut states, "current".into(), pending(now), now);
+
+        assert!(!states.contains_key("expired"));
+        assert!(states.contains_key("current"));
+        assert!(oauth_state_is_current(states.get("current").unwrap(), now));
+    }
+
+    #[test]
+    fn oauth_states_evict_oldest_when_cap_is_reached() {
+        let now = 1_000;
+        let mut states = HashMap::new();
+        for index in 0..MAX_PENDING_OAUTH_STATES {
+            insert_oauth_state(
+                &mut states,
+                index.to_string(),
+                pending(now + index as i64),
+                now + index as i64,
+            );
+        }
+        insert_oauth_state(&mut states, "new".into(), pending(now + 100), now + 100);
+
+        assert_eq!(states.len(), MAX_PENDING_OAUTH_STATES);
+        assert!(!states.contains_key("0"));
+        assert!(states.contains_key("new"));
+    }
 
     fn identity(email: &str, name: &str) -> VerifiedIdentity {
         VerifiedIdentity {
