@@ -435,7 +435,41 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     run_logical_message_id_migration(pool).await?;
     run_clean_body_migration(pool).await?;
     run_search_index_migration(pool).await?;
+    run_outbox_migration(pool).await?;
 
+    Ok(())
+}
+
+async fn run_outbox_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 20")
+            .fetch_optional(pool)
+            .await?;
+    if applied.is_some() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS outbox (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            scheduled_at TEXT NOT NULL,
+            cancel_until TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(status, next_attempt_at)")
+        .execute(pool)
+        .await?;
+    sqlx::query("INSERT INTO schema_migrations (version) VALUES (20)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

@@ -281,6 +281,10 @@ pub struct SendRequest {
     pub in_reply_to: Option<String>,
     #[serde(default)]
     pub attachments: Vec<OutgoingAttachment>,
+    #[serde(default)]
+    pub send_at: Option<String>,
+    #[serde(default)]
+    pub send_delay_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
