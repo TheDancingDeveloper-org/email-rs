@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { api, reportApiError } from '../../api/client';
 import styles from './ComposeModal.module.css';
 import { RecipientInput } from './RecipientInput';
 import { useAppStore } from '../../store';
@@ -36,10 +37,9 @@ export function ComposeModal() {
       setAttachments([]);
       draftId.current = null;
       // Fetch account signature.
-      fetch(`/api/v1/accounts/${compose.accountId}/settings`)
-        .then((r) => r.json())
-        .then((s: AccountSettings) => { if (s.signature) setSignature(s.signature); })
-        .catch(() => {});
+      api.get<AccountSettings>(`/api/v1/accounts/${compose.accountId}/settings`)
+        .then((s) => { if (s.signature) setSignature(s.signature); })
+        .catch(reportApiError);
     }
   }, [compose]);
 
@@ -66,13 +66,9 @@ export function ComposeModal() {
       const payload = await draftPayload();
       if (!payload) return;
       const path = draftId.current ? `/api/v1/drafts/${draftId.current}` : '/api/v1/drafts';
-      const response = await fetch(path, {
-        method: draftId.current ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) throw new Error('Draft autosave failed');
-      const saved = await response.json() as { id: string };
+      const saved = draftId.current
+        ? await api.put<{ id: string }>(path, payload, { silent: true })
+        : await api.post<{ id: string }>(path, payload, { silent: true });
       draftId.current = saved.id;
     });
     draftSave.current = operation;
@@ -93,7 +89,7 @@ export function ComposeModal() {
     if (!draftId.current) return;
     const id = draftId.current;
     draftId.current = null;
-    await fetch(`/api/v1/drafts/${id}`, { method: 'DELETE' });
+    await api.delete(`/api/v1/drafts/${id}`);
   }, []);
 
   const handleClose = useCallback(async () => {
@@ -124,10 +120,7 @@ export function ComposeModal() {
         ? body + '\n\n' + buildQuotedBlock(compose.quotedText, compose.quotedFrom)
         : body) + sigBlock;
       const encodedAttachments = await encodeAttachments(attachments);
-      const resp = await fetch('/api/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      await api.post('/api/v1/messages', {
           accountId: compose.accountId,
           to: splitAddrs(to),
           cc: splitAddrs(cc),
@@ -136,17 +129,11 @@ export function ComposeModal() {
           textBody: fullBody,
           inReplyTo: compose.inReplyTo,
           attachments: encodedAttachments,
-        }),
-      });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: 'Send failed' }));
-        setError((err as { error?: string }).error ?? 'Send failed');
-      } else {
-        await removeDraft().catch(() => {});
-        closeCompose();
-      }
-    } catch {
-      setError('Network error');
+        }, { silent: true });
+      await removeDraft().catch(() => {});
+      closeCompose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Send failed');
     } finally {
       setSending(false);
     }

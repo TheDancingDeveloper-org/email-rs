@@ -1,3 +1,4 @@
+import { api } from '../api/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 export interface SyncProgress {
@@ -77,14 +78,7 @@ export function useApi<T>(
     setLoading(true);
     setError(null);
 
-    fetch(url, { signal: ctrl.signal })
-      .then(async (res) => {
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-        }
-        return res.json() as Promise<T>;
-      })
+    api.get<T>(url, { signal: ctrl.signal })
       .then((json) => {
         setData(json);
         setLoading(false);
@@ -104,16 +98,7 @@ export function useApi<T>(
   return { data, loading, error, refetch: fetch_ };
 }
 
-// POST helper
-export async function apiPost<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
-  }
-  return res.json() as Promise<T>;
+// POST helper: errors are thrown to the caller, who shows them, so the global report is skipped.
+export function apiPost<T>(url: string, body: unknown): Promise<T> {
+  return api.post<T>(url, body, { silent: true });
 }
