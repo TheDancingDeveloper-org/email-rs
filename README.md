@@ -61,7 +61,7 @@ Open **http://localhost:8585**, sign in with the bootstrap credentials, then go
 to Settings → Add Account. Remove `EMAIL_RS_BOOTSTRAP_PASSWORD` from `.env`
 after the first successful startup; the stored credential is an Argon2id hash.
 
-The backend hot-reloads via `cargo-watch`; the frontend via Vite HMR. The first start takes ~60s while Rust compiles inside the container.
+This checked-in Compose stack is for local development: the backend hot-reloads via `cargo-watch` and the frontend uses Vite HMR. The first start takes about 60 seconds while Rust compiles inside the container. Production deployments should build the root `Dockerfile` instead.
 
 ---
 
