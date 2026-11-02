@@ -80,8 +80,8 @@ class RuleDto:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.rule_action_dto import RuleActionDto
-        from ..models.rule_condition_dto import RuleConditionDto
+        from ..models.rule_action_dto import RuleActionDto  # noqa: PLC0415
+        from ..models.rule_condition_dto import RuleConditionDto  # noqa: PLC0415
 
         d = dict(src_dict)
         account_id = d.pop("accountId")

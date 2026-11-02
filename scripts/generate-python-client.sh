@@ -7,8 +7,11 @@ trap 'rm -f "$SPEC"' EXIT
 
 cd "$ROOT"
 cargo run -q -p email-server --bin export_openapi --locked > "$SPEC"
+if [ "${OPENAPI_SPEC_OUTPUT:-}" ]; then
+  cp "$SPEC" "$OPENAPI_SPEC_OUTPUT"
+fi
 mkdir -p clients
-uvx openapi-python-client generate \
+uvx --from openapi-python-client==0.29.1 openapi-python-client generate \
   --path "$SPEC" \
   --config openapi-python-client.json \
   --meta uv \

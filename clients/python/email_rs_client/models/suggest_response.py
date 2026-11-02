@@ -50,8 +50,8 @@ class SuggestResponse:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.calendar_suggestion import CalendarSuggestion
-        from ..models.message_suggestion import MessageSuggestion
+        from ..models.calendar_suggestion import CalendarSuggestion  # noqa: PLC0415
+        from ..models.message_suggestion import MessageSuggestion  # noqa: PLC0415
 
         d = dict(src_dict)
         events = []
