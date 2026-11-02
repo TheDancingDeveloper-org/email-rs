@@ -24,6 +24,7 @@ pub mod rules;
 pub mod search;
 pub mod smart_folders;
 pub mod snooze;
+pub mod threads;
 pub mod webhooks;
 
 pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
@@ -38,6 +39,7 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/folders/{id}/messages"),
     ("POST", "/messages/bulk"),
     ("GET", "/messages/{id}"),
+    ("GET", "/threads/{id}"),
     ("PATCH", "/messages/{id}"),
     ("DELETE", "/messages/{id}"),
     ("GET", "/messages/{id}/attachments"),
@@ -154,6 +156,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/folders/{id}/mark-read", post(folders::mark_folder_read))
         .route("/folders/{id}/messages", get(messages::list_messages))
         .route("/messages/bulk", post(messages::bulk_messages))
+        .route("/threads/{id}", get(threads::get_thread))
         .route(
             "/messages/{id}",
             get(messages::get_message)
