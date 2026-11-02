@@ -1,0 +1,12 @@
+{
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "enabledManagers": ["github-actions", "dockerfile", "regex"],
+  "regexManagers": [
+    {
+      "fileMatch": ["(^|/)\\.woodpecker/.*\\.ya?ml$", "(^|/)docker-compose\\.ya?ml$"],
+      "matchStrings": ["image:\\s+(?<depName>[^@\\s]+)@(?<currentDigest>sha256:[0-9a-f]{64})\\s+#\\s*(?<currentValue>[^\\s]+)"],
+      "datasourceTemplate": "docker"
+    }
+  ]
+}
