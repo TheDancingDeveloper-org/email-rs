@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
-    SqlitePool,
+    SqliteConnection, SqlitePool,
 };
 
 #[derive(sqlx::FromRow)]
@@ -345,216 +345,276 @@ fn is_sqlite_locked(error: &sqlx::Error) -> bool {
         || message.contains("sqlite_busy")
 }
 
+type StepFuture<'c> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'c>>;
+
+enum Apply {
+    /// Runs inside the transaction the runner opens; the version row is
+    /// written in the same transaction, so a failure leaves no trace.
+    Transaction(for<'c> fn(&'c mut SqliteConnection) -> StepFuture<'c>),
+    /// Rebuilds tables with `PRAGMA foreign_keys = OFF`, which SQLite ignores
+    /// inside a transaction, so the step manages its own transaction.
+    SelfManaged(for<'c> fn(&'c SqlitePool) -> StepFuture<'c>),
+}
+
+struct Migration {
+    version: i64,
+    name: &'static str,
+    apply: Apply,
+}
+
+macro_rules! in_transaction {
+    ($step:path) => {{
+        fn wrapped(conn: &mut SqliteConnection) -> StepFuture<'_> {
+            Box::pin($step(conn))
+        }
+        Apply::Transaction(wrapped)
+    }};
+}
+
+/// Every schema migration, in the order it is applied. Versions are strictly
+/// increasing. Add new steps at the end with the next version number; never
+/// reorder or renumber an entry that has shipped.
+fn migrations() -> Vec<Migration> {
+    fn identity(pool: &SqlitePool) -> StepFuture<'_> {
+        Box::pin(run_message_identity_migration(pool))
+    }
+    vec![
+        Migration {
+            version: 11,
+            name: "legacy_sql_baseline",
+            apply: in_transaction!(run_legacy_sql_baseline),
+        },
+        Migration {
+            version: 12,
+            name: "message_identity",
+            apply: Apply::SelfManaged(identity),
+        },
+        Migration {
+            version: 13,
+            name: "attachment_metadata",
+            apply: in_transaction!(run_attachment_metadata_migration),
+        },
+        Migration {
+            version: 14,
+            name: "application_auth",
+            apply: in_transaction!(run_application_auth_migration),
+        },
+        Migration {
+            version: 15,
+            name: "integration_tokens",
+            apply: in_transaction!(run_integration_token_migration),
+        },
+        Migration {
+            version: 16,
+            name: "logical_message_id",
+            apply: in_transaction!(run_logical_message_id_migration),
+        },
+        Migration {
+            version: 17,
+            name: "clean_body",
+            apply: in_transaction!(run_clean_body_migration),
+        },
+        Migration {
+            version: 18,
+            name: "search_index",
+            apply: in_transaction!(run_search_index_migration),
+        },
+        Migration {
+            version: 19,
+            name: "provider_subject",
+            apply: in_transaction!(run_provider_subject_migration),
+        },
+        Migration {
+            version: 20,
+            name: "outbox",
+            apply: in_transaction!(run_outbox_migration),
+        },
+        Migration {
+            version: 21,
+            name: "thread_backfill",
+            apply: in_transaction!(run_thread_backfill_migration),
+        },
+        Migration {
+            version: 22,
+            name: "webhook_secret",
+            apply: in_transaction!(run_webhook_secret_migration),
+        },
+        Migration {
+            version: 23,
+            name: "message_pagination",
+            apply: in_transaction!(run_message_pagination_migration),
+        },
+    ]
+}
+
+/// Apply every migration this database has not recorded, oldest first.
+///
+/// Refuses to touch a database whose recorded schema is newer than this
+/// binary knows, so an older build never runs against a newer layout.
 async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
-    // Run the initial migration inline to avoid needing DATABASE_URL at compile time.
-    let migration_sql = include_str!("migrations/001_initial.sql");
+    apply_migrations(pool, &migrations()).await
+}
 
-    // Split on statement boundaries and execute each statement.
-    // SQLite doesn't support multi-statement execute, so we split manually.
-    for statement in migration_sql.split(';') {
-        let trimmed = statement.trim();
-        if !trimmed.is_empty() {
-            sqlx::query(trimmed).execute(pool).await?;
+async fn apply_migrations(pool: &SqlitePool, steps: &[Migration]) -> anyhow::Result<()> {
+    debug_assert!(steps
+        .windows(2)
+        .all(|pair| pair[0].version < pair[1].version));
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))",
+    )
+    .execute(pool)
+    .await?;
+
+    let latest = steps.last().map_or(0, |step| step.version);
+    let recorded: Vec<i64> = sqlx::query_scalar("SELECT version FROM schema_migrations")
+        .fetch_all(pool)
+        .await?;
+    if let Some(newest) = recorded.iter().copied().max() {
+        if newest > latest {
+            anyhow::bail!(
+                "database schema version {newest} is newer than this build supports (version {latest}); refusing to start. Upgrade email-rs or restore a matching backup"
+            );
         }
     }
 
-    // Migration 002: add token_expiry, smtp_host, smtp_port columns.
-    // ALTER TABLE fails if the column already exists; ignore "duplicate column name" errors.
-    let migration_002 = include_str!("migrations/002_token_expiry.sql");
-    for statement in migration_002.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
+    for step in steps {
+        if recorded.contains(&step.version) {
             continue;
         }
-        if let Err(e) = sqlx::query(trimmed).execute(pool).await {
-            let msg = e.to_string();
-            if msg.contains("duplicate column name") {
-                // Column already exists from a previous run — safe to skip.
-            } else {
-                return Err(e.into());
+        tracing::info!(
+            version = step.version,
+            name = step.name,
+            "applying migration"
+        );
+        let context = || format!("migration {} ({}) failed", step.version, step.name);
+        match &step.apply {
+            Apply::Transaction(apply) => {
+                let mut tx = begin_write(pool).await?;
+                match apply(&mut tx).await {
+                    Ok(()) => {
+                        sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
+                            .bind(step.version)
+                            .execute(&mut *tx)
+                            .await?;
+                        tx.commit().await?;
+                    }
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        return Err(error.context(context()));
+                    }
+                }
+            }
+            Apply::SelfManaged(apply) => {
+                apply(pool)
+                    .await
+                    .map_err(|error| error.context(context()))?;
+                sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
+                    .bind(step.version)
+                    .execute(pool)
+                    .await?;
             }
         }
     }
-
-    let migration_003 = include_str!("migrations/003_settings.sql");
-    for statement in migration_003.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Err(e) = sqlx::query(trimmed).execute(pool).await {
-            let msg = e.to_string();
-            if msg.contains("duplicate column name") {
-                // Column already exists — safe to skip.
-            } else {
-                return Err(e.into());
-            }
-        }
-    }
-
-    let migration_004 = include_str!("migrations/004_webhooks.sql");
-    for statement in migration_004.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Err(e) = sqlx::query(trimmed).execute(pool).await {
-            let msg = e.to_string();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                // Table already exists — safe to skip.
-            } else {
-                return Err(e.into());
-            }
-        }
-    }
-
-    let migration_006 = include_str!("migrations/006_password.sql");
-    for statement in migration_006.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Err(e) = sqlx::query(trimmed).execute(pool).await {
-            if e.to_string().contains("duplicate column name") {
-                continue;
-            }
-            return Err(e.into());
-        }
-    }
-
-    let migration_007 = include_str!("migrations/007_calendar_links.sql");
-    for statement in migration_007.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Err(e) = sqlx::query(trimmed).execute(pool).await {
-            let msg = e.to_string();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(e.into());
-        }
-    }
-
-    let migration_010 = include_str!("migrations/010_labels.sql");
-    for statement in migration_010.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Err(e) = sqlx::query(trimmed).execute(pool).await {
-            let msg = e.to_string();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(e.into());
-        }
-    }
-
-    let migration_009 = include_str!("migrations/009_rules.sql");
-    for statement in migration_009.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Err(e) = sqlx::query(trimmed).execute(pool).await {
-            let msg = e.to_string();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(e.into());
-        }
-    }
-
-    let migration_008 = include_str!("migrations/008_snooze.sql");
-    for statement in migration_008.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Err(e) = sqlx::query(trimmed).execute(pool).await {
-            let msg = e.to_string();
-            if msg.contains("already exists") || msg.contains("duplicate column name") {
-                continue;
-            }
-            return Err(e.into());
-        }
-    }
-
-    let migration_011 = include_str!("migrations/011_accounts_unique.sql");
-    for statement in migration_011.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Err(e) = sqlx::query(trimmed).execute(pool).await {
-            let msg = e.to_string();
-            if msg.contains("already exists") || msg.contains("duplicate") {
-                continue;
-            }
-            return Err(e.into());
-        }
-    }
-
-    let migration_012 = include_str!("migrations/012_webhook_deliveries.sql");
-    for statement in migration_012.split(';') {
-        let trimmed = statement.trim();
-        if !trimmed.is_empty() {
-            sqlx::query(trimmed).execute(pool).await?;
-        }
-    }
-
-    run_message_identity_migration(pool).await?;
-    run_provider_subject_migration(pool).await?;
-    run_attachment_metadata_migration(pool).await?;
-    run_application_auth_migration(pool).await?;
-    run_integration_token_migration(pool).await?;
-    run_logical_message_id_migration(pool).await?;
-    run_clean_body_migration(pool).await?;
-    run_search_index_migration(pool).await?;
-    run_outbox_migration(pool).await?;
-    run_thread_backfill_migration(pool).await?;
-    run_webhook_secret_migration(pool).await?;
-    run_message_pagination_migration(pool).await?;
-
     Ok(())
 }
 
-async fn run_message_pagination_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 23")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
+/// Run one statement file. Statements fail with an error naming something that
+/// already exists when an earlier build applied them without recording it; the
+/// messages in `tolerated` are skipped, anything else aborts.
+async fn run_sql_file(
+    conn: &mut SqliteConnection,
+    sql: &str,
+    tolerated: &[&str],
+) -> anyhow::Result<()> {
+    // SQLite doesn't support multi-statement execute, so we split manually.
+    for statement in sql.split(';') {
+        let trimmed = statement.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Err(error) = sqlx::query(trimmed).execute(&mut *conn).await {
+            let message = error.to_string();
+            if tolerated.iter().any(|needle| message.contains(needle)) {
+                continue;
+            }
+            return Err(error.into());
+        }
     }
+    Ok(())
+}
+
+/// The numbered SQL files that predate version tracking. They are idempotent
+/// and run as one baseline step, in the order the old runner applied them.
+async fn run_legacy_sql_baseline(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let dup_column: &[&str] = &["duplicate column name"];
+    let exists: &[&str] = &["already exists", "duplicate"];
+    let exists_or_column: &[&str] = &["already exists", "duplicate column name"];
+    run_sql_file(conn, include_str!("migrations/001_initial.sql"), &[]).await?;
+    run_sql_file(
+        conn,
+        include_str!("migrations/002_token_expiry.sql"),
+        dup_column,
+    )
+    .await?;
+    run_sql_file(
+        conn,
+        include_str!("migrations/003_settings.sql"),
+        dup_column,
+    )
+    .await?;
+    run_sql_file(conn, include_str!("migrations/004_webhooks.sql"), exists).await?;
+    run_sql_file(
+        conn,
+        include_str!("migrations/006_password.sql"),
+        dup_column,
+    )
+    .await?;
+    run_sql_file(
+        conn,
+        include_str!("migrations/007_calendar_links.sql"),
+        exists,
+    )
+    .await?;
+    run_sql_file(conn, include_str!("migrations/010_labels.sql"), exists).await?;
+    run_sql_file(conn, include_str!("migrations/009_rules.sql"), exists).await?;
+    run_sql_file(
+        conn,
+        include_str!("migrations/008_snooze.sql"),
+        exists_or_column,
+    )
+    .await?;
+    run_sql_file(
+        conn,
+        include_str!("migrations/011_accounts_unique.sql"),
+        exists,
+    )
+    .await?;
+    run_sql_file(
+        conn,
+        include_str!("migrations/012_webhook_deliveries.sql"),
+        &[],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn run_message_pagination_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     let migration_sql = include_str!("migrations/023_message_pagination.sql");
     for statement in migration_sql.split(';') {
         let statement = statement.trim();
         if statement.is_empty() {
             continue;
         }
-        sqlx::query(statement).execute(pool).await?;
+        sqlx::query(statement).execute(&mut *conn).await?;
     }
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (23)")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 
-async fn run_webhook_secret_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    if sqlx::query_scalar::<_, i64>("SELECT version FROM schema_migrations WHERE version = 22")
-        .fetch_optional(pool)
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
-
+async fn run_webhook_secret_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     let rows: Vec<(String, Option<String>)> =
         sqlx::query_as("SELECT id, secret FROM webhooks WHERE secret IS NOT NULL")
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await?;
     for (id, secret) in rows {
         let Some(secret) = secret else {
@@ -565,24 +625,14 @@ async fn run_webhook_secret_migration(pool: &SqlitePool) -> anyhow::Result<()> {
             sqlx::query("UPDATE webhooks SET secret = ? WHERE id = ?")
                 .bind(sealed)
                 .bind(id)
-                .execute(pool)
+                .execute(&mut *conn)
                 .await?;
         }
     }
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (22)")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 
-async fn run_outbox_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 20")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
-    }
+async fn run_outbox_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS outbox (
             id TEXT PRIMARY KEY,
@@ -597,26 +647,16 @@ async fn run_outbox_migration(pool: &SqlitePool) -> anyhow::Result<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )"#,
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(status, next_attempt_at)")
-        .execute(pool)
-        .await?;
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (20)")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
 
     Ok(())
 }
 
-async fn run_thread_backfill_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    if sqlx::query_scalar::<_, i64>("SELECT version FROM schema_migrations WHERE version = 21")
-        .fetch_optional(pool)
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
+async fn run_thread_backfill_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     #[derive(sqlx::FromRow)]
     struct Row {
         id: String,
@@ -628,7 +668,7 @@ async fn run_thread_backfill_migration(pool: &SqlitePool) -> anyhow::Result<()> 
     }
     let rows = sqlx::query_as::<_, Row>(
         "SELECT m.id, m.account_id, m.message_id, m.thread_id, m.subject, b.raw_headers FROM messages m LEFT JOIN message_bodies b ON b.message_id = m.id"
-    ).fetch_all(pool).await?;
+    ).fetch_all(&mut *conn).await?;
     for row in &rows {
         let ids = row
             .raw_headers
@@ -666,27 +706,17 @@ async fn run_thread_backfill_migration(pool: &SqlitePool) -> anyhow::Result<()> 
             sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
                 .bind(thread_id)
                 .bind(&row.id)
-                .execute(pool)
+                .execute(&mut *conn)
                 .await?;
         }
     }
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (21)")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 /// Directory identity of an OAuth account (Microsoft tid + oid).
 /// Existing rows stay null until the next successful connect.
-async fn run_provider_subject_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 19")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
-    }
+async fn run_provider_subject_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('accounts')")
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
     for (column, ddl) in [
         (
@@ -699,12 +729,9 @@ async fn run_provider_subject_migration(pool: &SqlitePool) -> anyhow::Result<()>
         ),
     ] {
         if !columns.iter().any(|name| name == column) {
-            sqlx::query(ddl).execute(pool).await?;
+            sqlx::query(ddl).execute(&mut *conn).await?;
         }
     }
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (19)")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 
@@ -712,49 +739,32 @@ async fn run_provider_subject_migration(pool: &SqlitePool) -> anyhow::Result<()>
 /// of the search document the `messages_fts` row of a cached body holds.
 /// Rows start at 0 and are indexed by the background reindex or when their
 /// body is next cleaned.
-async fn run_search_index_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 18")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
-    }
+async fn run_search_index_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     let columns: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('message_bodies')")
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await?;
     if !columns.iter().any(|c| c == "search_version") {
         sqlx::query(
             "ALTER TABLE message_bodies ADD COLUMN search_version INTEGER NOT NULL DEFAULT 0",
         )
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     }
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_message_bodies_search_version ON message_bodies(search_version)",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (18)")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 
 /// Cleaned message bodies. Rows start at `clean_version` 0 and are
 /// cleaned by the background backfill or on their next read.
-async fn run_clean_body_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 17")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
-    }
+async fn run_clean_body_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     let columns: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('message_bodies')")
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await?;
     for (column, ddl) in [
         (
@@ -775,38 +785,29 @@ async fn run_clean_body_migration(pool: &SqlitePool) -> anyhow::Result<()> {
         ),
     ] {
         if !columns.iter().any(|c| c == column) {
-            sqlx::query(ddl).execute(pool).await?;
+            sqlx::query(ddl).execute(&mut *conn).await?;
         }
     }
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_message_bodies_clean_version ON message_bodies(clean_version)",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (17)")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 
-async fn run_logical_message_id_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 16")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
-    }
+async fn run_logical_message_id_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('messages')")
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
     if !columns.iter().any(|column| column == "logical_id") {
         sqlx::query("ALTER TABLE messages ADD COLUMN logical_id TEXT NOT NULL DEFAULT ''")
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
     }
+    // The runner wraps this step in one transaction, so a failing batch
+    // rolls the whole step back. Batches only bound the size of each read.
     loop {
-        let mut transaction = pool.begin().await?;
         let rows: Vec<LogicalIdentityRow> = sqlx::query_as(
             r#"SELECT id, account_id, message_id, from_email, date, subject
                FROM messages
@@ -815,10 +816,9 @@ async fn run_logical_message_id_migration(pool: &SqlitePool) -> anyhow::Result<(
                LIMIT ?"#,
         )
         .bind(LOGICAL_IDENTITY_MIGRATION_BATCH_SIZE)
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut *conn)
         .await?;
         if rows.is_empty() {
-            transaction.rollback().await?;
             break;
         }
         for row in rows {
@@ -833,16 +833,12 @@ async fn run_logical_message_id_migration(pool: &SqlitePool) -> anyhow::Result<(
             sqlx::query("UPDATE messages SET logical_id = ? WHERE id = ?")
                 .bind(logical_id)
                 .bind(row.id)
-                .execute(&mut *transaction)
+                .execute(&mut *conn)
                 .await?;
         }
-        transaction.commit().await?;
     }
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_logical_id ON messages(logical_id)")
-        .execute(pool)
-        .await?;
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (16)")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }
@@ -884,14 +880,7 @@ pub(crate) fn logical_message_id(
     )
 }
 
-async fn run_integration_token_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 15")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
-    }
+async fn run_integration_token_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS integration_tokens (
             id TEXT PRIMARY KEY,
@@ -906,32 +895,22 @@ async fn run_integration_token_migration(pool: &SqlitePool) -> anyhow::Result<()
             revoked_at TEXT
         )"#,
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_integration_tokens_user ON integration_tokens(user_id, created_at)",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_integration_tokens_hash ON integration_tokens(token_hash)",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (15)")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 
-async fn run_application_auth_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 14")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
-    }
+async fn run_application_auth_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS app_users (
             id TEXT PRIMARY KEY,
@@ -940,7 +919,7 @@ async fn run_application_auth_migration(pool: &SqlitePool) -> anyhow::Result<()>
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )"#,
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS app_sessions (
@@ -953,50 +932,37 @@ async fn run_application_auth_migration(pool: &SqlitePool) -> anyhow::Result<()>
             last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
         )"#,
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_app_sessions_expiry ON app_sessions(expires_at)")
-        .execute(pool)
-        .await?;
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (14)")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }
 
-async fn run_attachment_metadata_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 13")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
-    }
+async fn run_attachment_metadata_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     let columns: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('attachments')")
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await?;
     if !columns.iter().any(|column| column == "part_id") {
         sqlx::query("ALTER TABLE attachments ADD COLUMN part_id TEXT")
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
         sqlx::query("UPDATE attachments SET part_id = id WHERE part_id IS NULL")
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
     }
     if !columns.iter().any(|column| column == "content_id") {
         sqlx::query("ALTER TABLE attachments ADD COLUMN content_id TEXT")
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
     }
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_message_part ON attachments(message_id, part_id)",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (13)")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 
@@ -1004,11 +970,6 @@ async fn run_attachment_metadata_migration(pool: &SqlitePool) -> anyhow::Result<
 /// RFC Message-ID remains searchable correlation metadata and is deliberately
 /// not unique: the same message may occur in several folders or accounts.
 async fn run_message_identity_migration(pool: &SqlitePool) -> anyhow::Result<()> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))",
-    )
-    .execute(pool)
-    .await?;
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS migration_backups (
             id TEXT PRIMARY KEY,
@@ -1031,14 +992,6 @@ async fn run_message_identity_migration(pool: &SqlitePool) -> anyhow::Result<()>
     )
     .execute(pool)
     .await?;
-    let applied: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 12")
-            .fetch_optional(pool)
-            .await?;
-    if applied.is_some() {
-        return Ok(());
-    }
-
     let folder_columns: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('folders')")
             .fetch_all(pool)
@@ -1189,9 +1142,6 @@ async fn run_message_identity_migration(pool: &SqlitePool) -> anyhow::Result<()>
             .await?;
     }
 
-    sqlx::query("INSERT INTO schema_migrations (version) VALUES (12)")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 
@@ -1754,7 +1704,16 @@ mod tests {
             sqlx::query(statement).execute(&pool).await.unwrap();
         }
 
-        run_logical_message_id_migration(&pool).await.unwrap();
+        apply_migrations(
+            &pool,
+            &[Migration {
+                version: 16,
+                name: "logical_message_id",
+                apply: in_transaction!(run_logical_message_id_migration),
+            }],
+        )
+        .await
+        .unwrap();
 
         let migrated: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE logical_id LIKE 'lm_%'")
@@ -1801,16 +1760,23 @@ mod tests {
             sqlx::query(statement).execute(&pool).await.unwrap();
         }
 
-        let error = run_logical_message_id_migration(&pool)
-            .await
-            .expect_err("the injected update failure should abort the migration");
-        assert!(error.to_string().contains("injected migration failure"));
+        let error = apply_migrations(
+            &pool,
+            &[Migration {
+                version: 16,
+                name: "logical_message_id",
+                apply: in_transaction!(run_logical_message_id_migration),
+            }],
+        )
+        .await
+        .expect_err("the injected update failure should abort the migration");
+        assert!(format!("{error:#}").contains("injected migration failure"));
         let unchanged: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE logical_id = ''")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(unchanged, 10, "the failing batch must be rolled back");
+        assert_eq!(unchanged, 10, "the failing step must be rolled back");
         let applied: Option<i64> =
             sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 16")
                 .fetch_optional(&pool)
@@ -1897,7 +1863,7 @@ mod tests {
             .await
             .unwrap();
 
-        run_webhook_secret_migration(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
         let stored: String =
             sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = 'legacy-hook'")
                 .fetch_one(&pool)
@@ -1906,7 +1872,7 @@ mod tests {
         assert_ne!(stored, "legacy-secret");
         assert_eq!(crate::credentials::open(&stored).unwrap(), "legacy-secret");
 
-        run_webhook_secret_migration(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
         let applied: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations WHERE version = 22")
                 .fetch_one(&pool)
@@ -1940,5 +1906,171 @@ mod tests {
         let error = super::create_pool(&url).await.unwrap_err();
         assert!(!error.to_string().is_empty());
         let _ = std::fs::remove_file(&blocker);
+    }
+
+    async fn memory_pool() -> SqlitePool {
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                "sqlite::memory:"
+                    .parse::<SqliteConnectOptions>()
+                    .unwrap()
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn migrations_are_strictly_ordered() {
+        let versions: Vec<i64> = migrations().iter().map(|step| step.version).collect();
+        assert!(versions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test]
+    async fn upgrade_from_001_schema_reaches_latest_with_data_intact() {
+        let pool = memory_pool().await;
+        // A version-001 database: only the initial schema, no version table.
+        for statement in include_str!("migrations/001_initial.sql").split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+        for statement in [
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('account-1', 'Legacy', 'legacy@example.test', 'imap', 'password')",
+            "INSERT INTO folders (id, account_id, name, full_path) VALUES ('folder-1', 'account-1', 'Inbox', 'INBOX')",
+            "INSERT INTO messages (id, account_id, folder_id, uid, message_id, from_email, date, subject) VALUES ('message-1', 'account-1', 'folder-1', 7, '<legacy@example>', 'sender@example.test', '2026-07-12T00:00:00Z', 'Legacy')",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_migrations(&pool).await.unwrap();
+
+        let latest = migrations().last().unwrap().version;
+        let applied: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let expected: Vec<i64> = migrations().iter().map(|step| step.version).collect();
+        assert_eq!(applied, expected);
+        assert_eq!(applied.last(), Some(&latest));
+
+        async fn columns(pool: &SqlitePool, table: &str) -> Vec<String> {
+            sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                .fetch_all(pool)
+                .await
+                .unwrap()
+        }
+        for (table, column) in [
+            ("messages", "uid_validity"),
+            ("messages", "logical_id"),
+            ("accounts", "provider_tenant_id"),
+            ("accounts", "provider_object_id"),
+            ("attachments", "part_id"),
+            ("message_bodies", "clean_body"),
+            ("message_bodies", "search_version"),
+        ] {
+            assert!(
+                columns(&pool, table)
+                    .await
+                    .iter()
+                    .any(|name| name == column),
+                "{table}.{column} missing after upgrade"
+            );
+        }
+        for table in [
+            "webhooks",
+            "app_users",
+            "app_sessions",
+            "integration_tokens",
+            "outbox",
+            "migration_backups",
+            "account_reconciliation",
+        ] {
+            let found: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(found, 1, "table {table} missing after upgrade");
+        }
+
+        let (subject, message_id, logical_id): (String, String, String) = sqlx::query_as(
+            "SELECT subject, message_id, logical_id FROM messages WHERE id = 'message-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(subject, "Legacy");
+        assert_eq!(message_id, "<legacy@example>");
+        assert!(logical_id.starts_with("lm_"));
+        let account: String =
+            sqlx::query_scalar("SELECT email FROM accounts WHERE id = 'account-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(account, "legacy@example.test");
+
+        // A second start applies nothing and keeps the data.
+        run_migrations(&pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count as usize, expected.len());
+    }
+
+    #[tokio::test]
+    async fn newer_schema_than_the_binary_knows_is_refused() {
+        let pool = memory_pool().await;
+        run_migrations(&pool).await.unwrap();
+        let latest = migrations().last().unwrap().version;
+        sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
+            .bind(latest + 1)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = run_migrations(&pool).await.unwrap_err();
+        assert!(
+            error.to_string().contains("newer than this build"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_step_rolls_back_and_is_not_recorded() {
+        fn failing(conn: &mut SqliteConnection) -> StepFuture<'_> {
+            Box::pin(async move {
+                sqlx::query("CREATE TABLE half_applied (id INTEGER)")
+                    .execute(&mut *conn)
+                    .await?;
+                anyhow::bail!("injected step failure")
+            })
+        }
+        let pool = memory_pool().await;
+        let steps = [Migration {
+            version: 1,
+            name: "failing",
+            apply: Apply::Transaction(failing),
+        }];
+
+        let error = apply_migrations(&pool, &steps).await.unwrap_err();
+        assert!(format!("{error:#}").contains("injected step failure"));
+        let table: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'half_applied'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(table, 0, "the step's DDL must be rolled back");
+        let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(recorded, 0);
     }
 }
