@@ -197,6 +197,26 @@ pub struct MessageAttachment {
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
+    #[cfg_attr(feature = "server", sqlx(default))]
+    #[serde(default)]
+    pub dangerous_or_double_extension: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthenticationResultStatus {
+    Pass,
+    Fail,
+    #[default]
+    None,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageAuthenticationResults {
+    pub spf: AuthenticationResultStatus,
+    pub dkim: AuthenticationResultStatus,
+    pub dmarc: AuthenticationResultStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -222,6 +242,12 @@ pub struct FullMessage {
     pub has_attachments: bool,
     pub preview: Option<String>,
     pub body: Option<MessageBody>,
+    #[serde(default)]
+    pub authentication_results: MessageAuthenticationResults,
+    #[serde(default)]
+    pub from_reply_to_domain_mismatch: bool,
+    #[serde(default)]
+    pub display_name_spoofing: bool,
     #[serde(default)]
     pub attachments: Vec<MessageAttachment>,
 }
