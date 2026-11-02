@@ -176,8 +176,12 @@ impl ImapSyncEngine {
         event_tx: Option<&broadcast::Sender<String>>,
     ) -> Result<()> {
         let guard = AccountSyncGuard::acquire(account_id)?;
+        crate::metrics::inc(&crate::metrics::SYNC_RUNS);
         let result = self.sync_account_unlocked(account_id, event_tx).await;
         drop(guard);
+        if result.is_err() {
+            crate::metrics::inc(&crate::metrics::SYNC_ERRORS);
+        }
         if result.is_ok() {
             fire_webhooks(
                 &self.pool,
@@ -901,6 +905,10 @@ async fn sync_folder(
 
     // Persist message.created events for genuinely inserted messages.
     if !new_message_payloads.is_empty() {
+        crate::metrics::add(
+            &crate::metrics::MESSAGES_SYNCED,
+            new_message_payloads.len() as u64,
+        );
         let pool_ref = pool.clone();
         let account_id_str = account_id.to_string();
         tokio::spawn(async move {
