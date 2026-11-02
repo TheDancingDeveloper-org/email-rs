@@ -97,6 +97,9 @@ pub async fn cleanup_orphans(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
         tx.commit().await?;
         removed += bodies + attachments;
         if bodies + attachments == 0 {
+            if let Some(dir) = crate::attachment_store::store_dir(pool).await {
+                removed += crate::attachment_store::remove_unreferenced(pool, &dir).await?;
+            }
             return Ok(removed);
         }
     }
