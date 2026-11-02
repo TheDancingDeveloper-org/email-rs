@@ -18,11 +18,21 @@ pub async fn send_message(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SendRequest>,
 ) -> Result<Json<SendResponse>> {
+    crate::api::outbox::enqueue(&state, req).await?;
+    Ok(Json(SendResponse {
+        status: "queued".to_string(),
+    }))
+}
+
+pub(crate) async fn build_outbound(
+    state: &AppState,
+    req: &SendRequest,
+) -> Result<(SmtpConfig, OutboundMessage)> {
     let max_attachment_bytes = std::env::var("EMAIL_RS_MAX_OUTBOUND_ATTACHMENT_BYTES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(25 * 1024 * 1024);
-    let attachments = decode_attachments(req.attachments, max_attachment_bytes)?;
+    let attachments = decode_attachments(req.attachments.clone(), max_attachment_bytes)?;
 
     let account =
         crate::providers::factory::load_account_config(&state.pool, &req.account_id).await?;
@@ -91,21 +101,16 @@ pub async fn send_message(
     let msg = OutboundMessage {
         from: account.email,
         message_id: None,
-        to: req.to,
-        cc: req.cc,
-        bcc: req.bcc,
-        subject: req.subject,
-        text_body: req.text_body,
-        html_body: req.html_body,
-        in_reply_to: req.in_reply_to,
+        to: req.to.clone(),
+        cc: req.cc.clone(),
+        bcc: req.bcc.clone(),
+        subject: req.subject.clone(),
+        text_body: req.text_body.clone(),
+        html_body: req.html_body.clone(),
+        in_reply_to: req.in_reply_to.clone(),
         attachments,
     };
-
-    smtp::send_message(&config, msg).await?;
-
-    Ok(Json(SendResponse {
-        status: "sent".to_string(),
-    }))
+    Ok((config, msg))
 }
 
 fn decode_attachments(
