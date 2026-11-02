@@ -12,7 +12,7 @@ RUN npx vite build --outDir /dist --emptyOutDir
 FROM mirror.gcr.io/library/rust:1.98-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS rust-build
 RUN apt-get update && apt-get install -y ca-certificates pkg-config && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 RUN CARGO_BUILD_JOBS=4 cargo build --release --locked -p email-server
 
