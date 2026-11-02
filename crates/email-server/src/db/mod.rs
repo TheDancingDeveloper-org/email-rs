@@ -453,6 +453,11 @@ fn migrations() -> Vec<Migration> {
             name: "attachment_file_store",
             apply: Apply::SelfManaged(attachment_files),
         },
+        Migration {
+            version: 25,
+            name: "search_attachment_names",
+            apply: in_transaction!(run_search_attachment_names_migration),
+        },
     ]
 }
 
@@ -1307,13 +1312,50 @@ pub async fn mark_account_reconciled(pool: &SqlitePool, account_id: &str) -> any
     Ok(())
 }
 
-/// Every trigger that keeps `messages_fts` in step with `messages`.
-const FTS_TRIGGERS: [&str; 4] = [
+/// Every trigger that keeps `messages_fts` in step with `messages` and
+/// `attachments`.
+const FTS_TRIGGERS: [&str; 7] = [
     "messages_fts_ai",
     "messages_fts_ad",
     "messages_fts_au",
     "messages_fts_au_preview",
+    "messages_fts_att_ai",
+    "messages_fts_att_ad",
+    "messages_fts_att_au",
 ];
+
+/// Migration 25: the search index gains a `filenames` column (attachment
+/// names). An index without it is dropped with its triggers;
+/// [`run_fts_migration`] then creates the new one, fills it from `messages`
+/// and `attachments`, and marks every body for reindexing. Does nothing when
+/// the index is absent (no FTS5) or already current.
+async fn run_search_attachment_names_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('messages_fts')")
+            .fetch_all(&mut *conn)
+            .await?;
+    if columns.is_empty() || columns.iter().any(|c| c == "filenames") {
+        return Ok(());
+    }
+    for trigger in FTS_TRIGGERS {
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
+            .execute(&mut *conn)
+            .await?;
+    }
+    sqlx::query("DROP TABLE messages_fts")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// The attachment names of a message as indexed text, for the message whose
+/// id is `message_id` (an SQL expression).
+fn filenames_sql(message_id: &str) -> String {
+    format!(
+        "coalesce((SELECT group_concat(filename, ' ') FROM attachments
+                    WHERE message_id = {message_id}), '')"
+    )
+}
 
 /// The sender of a message as indexed text: display name and address.
 fn sender_sql(row: &str) -> String {
@@ -1386,6 +1428,7 @@ async fn run_fts_migration(pool: &SqlitePool) -> anyhow::Result<()> {
             recipients,
             body,
             quoted,
+            filenames,
             tokenize = 'unicode61'
         )",
     )
@@ -1402,9 +1445,9 @@ async fn run_fts_migration(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(&format!(
         "CREATE TRIGGER IF NOT EXISTS messages_fts_ai
          AFTER INSERT ON messages BEGIN
-           INSERT INTO messages_fts(rowid, message_id, subject, sender, recipients, body, quoted)
+           INSERT INTO messages_fts(rowid, message_id, subject, sender, recipients, body, quoted, filenames)
            VALUES (new.rowid, new.id, coalesce(new.subject, ''), {}, {},
-                   coalesce(new.preview, ''), '');
+                   coalesce(new.preview, ''), '', '');
          END",
         sender_sql("new"),
         recipients_sql("new"),
@@ -1447,19 +1490,53 @@ async fn run_fts_migration(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // Attachment names follow the `attachments` rows. A message deleted with
+    // its attachments has no index row left to update.
+    for (name, event, row, of) in [
+        ("messages_fts_att_ai", "INSERT", "new", ""),
+        ("messages_fts_att_ad", "DELETE", "old", ""),
+        (
+            "messages_fts_att_au",
+            "UPDATE",
+            "new",
+            " OF filename, message_id",
+        ),
+    ] {
+        sqlx::query(&format!(
+            "CREATE TRIGGER IF NOT EXISTS {name}
+             AFTER {event}{of} ON attachments BEGIN
+               UPDATE messages_fts SET filenames = {names}
+                WHERE rowid = (SELECT rowid FROM messages WHERE id = {row}.message_id);
+             END",
+            names = filenames_sql(&format!("{row}.message_id")),
+        ))
+        .execute(pool)
+        .await?;
+    }
+
     // Add any message not yet in the index (idempotent). Clean bodies follow
     // in the background (`search_index::spawn_reindex`).
+    fill_search_index(pool).await
+}
+
+/// Insert an index row for every message that has none: subject, sender,
+/// recipients, preview and attachment names. Clean bodies are written by
+/// `search_index`.
+pub(crate) async fn fill_search_index<'e, E>(executor: E) -> anyhow::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query(&format!(
-        "INSERT INTO messages_fts(rowid, message_id, subject, sender, recipients, body, quoted)
-         SELECT m.rowid, m.id, coalesce(m.subject, ''), {}, {}, coalesce(m.preview, ''), ''
+        "INSERT INTO messages_fts(rowid, message_id, subject, sender, recipients, body, quoted, filenames)
+         SELECT m.rowid, m.id, coalesce(m.subject, ''), {}, {}, coalesce(m.preview, ''), '', {}
          FROM messages m
          WHERE m.rowid NOT IN (SELECT rowid FROM messages_fts)",
         sender_sql("m"),
         recipients_sql("m"),
+        filenames_sql("m.id"),
     ))
-    .execute(pool)
+    .execute(executor)
     .await?;
-
     Ok(())
 }
 
@@ -2204,5 +2281,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recorded, 0);
+    }
+
+    #[tokio::test]
+    async fn attachment_name_migration_upgrades_an_index_without_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("email.db").display().to_string();
+        let (pool, has_fts) = create_pool(&format!("sqlite:{path}")).await.unwrap();
+        assert!(has_fts);
+        sqlx::query(
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('a','A','a@x','generic_imap','password')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO folders (id, account_id, name, full_path) VALUES ('f','a','INBOX','INBOX')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages (id, account_id, folder_id, uid, subject, message_id) VALUES ('m','a','f',1,'Hi','<m>')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO attachments (id, message_id, filename, content_type, part_id) VALUES ('t','m','oldlayout.pdf','application/pdf','1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Put back the index as release 0.7.x left it: no `filenames`.
+        for trigger in FTS_TRIGGERS {
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DROP TABLE messages_fts")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE VIRTUAL TABLE messages_fts USING fts5(message_id UNINDEXED, subject, sender, recipients, body, quoted, tokenize = 'unicode61')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM schema_migrations WHERE version = 25")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(migrate(&pool).await.unwrap());
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('messages_fts')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(columns.iter().any(|c| c == "filenames"), "{columns:?}");
+        let hits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'oldlayout'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(hits, 1);
     }
 }

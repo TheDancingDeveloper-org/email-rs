@@ -46,7 +46,10 @@ pub async fn store_dir(pool: &SqlitePool) -> Option<PathBuf> {
 }
 
 pub fn is_digest(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn path_for(dir: &Path, digest: &str) -> PathBuf {

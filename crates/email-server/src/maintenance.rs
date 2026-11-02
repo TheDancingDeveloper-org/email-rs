@@ -36,18 +36,41 @@ pub fn spawn(pool: SqlitePool, has_fts: bool, config: MaintenanceConfig) {
                 let operation_pool = fts_pool.clone();
                 run_periodically(fts_pool, config.fts_optimize_interval, || {
                     let pool = operation_pool.clone();
-                    async move {
-                        sqlx::query("INSERT INTO messages_fts(messages_fts) VALUES ('optimize')")
-                            .execute(&pool)
-                            .await?;
-                        Ok::<(), sqlx::Error>(())
-                    }
+                    async move { optimize_fts(&pool).await }
                 })
                 .await;
             }
         };
         tokio::join!(cleanup, vacuum, fts);
     });
+}
+
+/// Merge the FTS5 index segments. Run periodically and by the admin endpoint.
+pub async fn optimize_fts(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO messages_fts(messages_fts) VALUES ('optimize')")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Rebuild the search index from `messages` and `attachments`: drop every
+/// index row, re-create them, and mark each body for reindexing. The clean
+/// bodies are written back by [`crate::search_index::reindex`], which the
+/// caller runs afterwards. Returns the number of messages indexed.
+pub async fn rebuild_fts(pool: &SqlitePool) -> anyhow::Result<i64> {
+    let mut tx = crate::db::begin_write(pool).await?;
+    sqlx::query("DELETE FROM messages_fts")
+        .execute(&mut *tx)
+        .await?;
+    crate::db::fill_search_index(&mut *tx).await?;
+    sqlx::query("UPDATE message_bodies SET search_version = 0 WHERE search_version <> 0")
+        .execute(&mut *tx)
+        .await?;
+    let indexed = sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts")
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(indexed)
 }
 
 async fn run_periodically<F, Fut>(pool: SqlitePool, interval: Duration, mut operation: F)

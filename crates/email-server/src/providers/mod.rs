@@ -151,6 +151,12 @@ pub trait MailProvider: Send + Sync {
     /// this independently of date-windowed metadata fetches to reconcile
     /// messages that were removed or moved by another client.
     async fn list_message_uids(&self, folder: &str) -> Result<Vec<u32>>;
+    /// Ask the server which UIDs in a mailbox contain `text` (IMAP
+    /// `UID SEARCH TEXT`), whatever the local index or sync window holds.
+    /// Providers without server-side search return an empty set.
+    async fn search_uids(&self, _folder: &str, _text: &str) -> Result<Vec<u32>> {
+        Ok(Vec::new())
+    }
     async fn fetch_message_body(&self, folder: &str, uid: u32) -> Result<MessageBody>;
     async fn fetch_attachment(&self, folder: &str, uid: u32, part_id: &str) -> Result<Vec<u8>> {
         let body = self.fetch_message_body(folder, uid).await?;
