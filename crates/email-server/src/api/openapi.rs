@@ -381,8 +381,14 @@ fn doc_microsoft_callback() {}
 #[utoipa::path(get, path = "/smart-folders/{kind}/messages", security(("bearerAuth" = ["mail.metadata.read"])), params(("kind" = String, Path), ("page" = Option<i64>, Query), ("per_page" = Option<i64>, Query, deprecated = true), ("cursor" = Option<String>, Query, description = "Opaque cursor for keyset pagination")), responses((status = 200, body = [Message]), (status = 200, body = CursorMessagesResponse), (status = 404, body = ErrorResponse)))]
 fn doc_smart_messages() {}
 
-#[utoipa::path(get, path = "/search", security(("bearerAuth" = ["mail.metadata.read"])), params(("q" = Option<String>, Query), ("account_id" = Option<String>, Query), ("match" = Option<String>, Query), ("from" = Option<String>, Query), ("to" = Option<String>, Query), ("cc" = Option<String>, Query), ("subject" = Option<String>, Query), ("body" = Option<String>, Query), ("filename" = Option<String>, Query), ("has_attachment" = Option<bool>, Query), ("is_read" = Option<bool>, Query), ("is_flagged" = Option<bool>, Query), ("date_after" = Option<String>, Query), ("date_before" = Option<String>, Query)), responses((status = 200, body = SearchResponse)))]
+#[utoipa::path(get, path = "/search", security(("bearerAuth" = ["mail.metadata.read"])), params(("q" = Option<String>, Query), ("account_id" = Option<String>, Query), ("match" = Option<String>, Query), ("from" = Option<String>, Query), ("to" = Option<String>, Query), ("cc" = Option<String>, Query), ("subject" = Option<String>, Query), ("body" = Option<String>, Query), ("filename" = Option<String>, Query), ("has_attachment" = Option<bool>, Query), ("is_read" = Option<bool>, Query), ("is_flagged" = Option<bool>, Query), ("date_after" = Option<String>, Query), ("date_before" = Option<String>, Query), ("remote" = Option<bool>, Query)), responses((status = 200, body = SearchResponse)))]
 fn doc_search() {}
+
+#[utoipa::path(post, path = "/admin/search-index/optimize", security(("bearerAuth" = [])), responses((status = 200, body = super::search::IndexAdminResponse), (status = 400, body = ErrorResponse), (status = 401, body = ErrorResponse), (status = 403, body = ErrorResponse)))]
+fn doc_optimize_search_index() {}
+
+#[utoipa::path(post, path = "/admin/search-index/rebuild", security(("bearerAuth" = [])), responses((status = 202, body = super::search::IndexAdminResponse), (status = 400, body = ErrorResponse), (status = 401, body = ErrorResponse), (status = 403, body = ErrorResponse)))]
+fn doc_rebuild_search_index() {}
 
 #[utoipa::path(get, path = "/search/suggest", security(("bearerAuth" = ["mail.metadata.read"])), params(("q" = String, Query), ("account_id" = Option<String>, Query)), responses((status = 200, body = SuggestResponse)))]
 fn doc_search_suggest() {}
@@ -521,6 +527,8 @@ fn doc_events() {}
         doc_smart_messages,
         doc_search,
         doc_search_suggest,
+        doc_optimize_search_index,
+        doc_rebuild_search_index,
         doc_contacts_suggest,
         doc_snooze_message,
         doc_unsnooze_message,
@@ -581,6 +589,7 @@ fn doc_events() {}
         DraftResponse,
         AuthorizeResponse
         , SearchResponse
+        , super::search::IndexAdminResponse
         , SuggestResponse
         , Contact
         , SnoozeRequest

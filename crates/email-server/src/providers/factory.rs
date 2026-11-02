@@ -269,6 +269,14 @@ impl MailProvider for TestMailProvider {
         Ok(Vec::new())
     }
 
+    async fn search_uids(&self, _folder: &str, text: &str) -> Result<Vec<u32>> {
+        Ok(if text == "serversideonly" {
+            vec![1]
+        } else {
+            Vec::new()
+        })
+    }
+
     async fn list_message_uids(&self, _folder: &str) -> Result<Vec<u32>> {
         Ok(Vec::new())
     }

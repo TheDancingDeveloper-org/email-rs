@@ -67,6 +67,8 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/events"),
     ("GET", "/search"),
     ("GET", "/search/suggest"),
+    ("POST", "/admin/search-index/optimize"),
+    ("POST", "/admin/search-index/rebuild"),
     ("GET", "/contacts/suggest"),
     ("GET", "/smart-folders/{kind}/messages"),
     ("GET", "/labels"),
@@ -205,6 +207,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/events", get(events::sse_events))
         .route("/search", get(search::search_messages))
         .route("/search/suggest", get(search::suggest_messages))
+        .route("/admin/search-index/optimize", post(search::optimize_index))
+        .route("/admin/search-index/rebuild", post(search::rebuild_index))
         .route("/contacts/suggest", get(search::suggest_contacts))
         .route(
             "/smart-folders/{kind}/messages",
