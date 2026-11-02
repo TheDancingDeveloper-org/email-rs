@@ -4,6 +4,7 @@ WORKDIR /build
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
+COPY shared/ /shared/
 # Build into /dist (override vite outDir to avoid needing the crates tree)
 RUN npx vite build --outDir /dist --emptyOutDir
 
