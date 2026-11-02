@@ -4,7 +4,7 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use tokio::sync::{broadcast, Mutex};
 
-use crate::auth::app::AuthSettings;
+use crate::auth::app::{AuthSettings, LoginThrottle};
 use crate::config::WebhookPolicy;
 
 #[derive(Clone, Debug)]
@@ -27,6 +27,8 @@ pub struct AppState {
     /// Broadcast channel for push-notifying connected SSE clients of sync events.
     pub event_tx: broadcast::Sender<String>,
     pub auth: AuthSettings,
+    /// Bounded, in-memory failed-login tracking shared by all API routes.
+    pub login_throttle: Arc<Mutex<LoginThrottle>>,
     /// SSRF policy applied when a webhook URL is stored.
     pub webhook_policy: WebhookPolicy,
 }
@@ -44,6 +46,7 @@ impl AppState {
             oauth_states: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
             auth,
+            login_throttle: Arc::new(Mutex::new(LoginThrottle::default())),
             webhook_policy: WebhookPolicy::from_env(),
         }
     }
