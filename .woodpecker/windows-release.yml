@@ -18,7 +18,7 @@ labels:
 steps:
   # ── Create/refresh Forgejo release before uploading ──────────────────────────
   - name: create-release
-    image: powershell
+    image: mcr.microsoft.com/powershell@sha256:810c4f1e0c9d23022c3ec18c50a6205ee4b60766f1739d329b2948df1fd7d5b0 # latest
     environment:
       FORGEJO_TOKEN:
         from_secret: git_auth_token
@@ -56,7 +56,7 @@ steps:
 
   # ── Build frontend + Rust binary + MSI ───────────────────────────────────────
   - name: build-msi
-    image: powershell
+    image: mcr.microsoft.com/powershell@sha256:810c4f1e0c9d23022c3ec18c50a6205ee4b60766f1739d329b2948df1fd7d5b0 # latest
     depends_on: [create-release]
     commands:
       - |
@@ -108,7 +108,7 @@ steps:
 
   # ── Upload .msi to the Forgejo release ───────────────────────────────────────
   - name: upload-msi
-    image: powershell
+    image: mcr.microsoft.com/powershell@sha256:810c4f1e0c9d23022c3ec18c50a6205ee4b60766f1739d329b2948df1fd7d5b0 # latest
     depends_on: [build-msi]
     environment:
       FORGEJO_TOKEN:
@@ -131,7 +131,7 @@ steps:
 
   # ── Notifications ────────────────────────────────────────────────────────────
   - name: discord-success
-    image: powershell
+    image: mcr.microsoft.com/powershell@sha256:810c4f1e0c9d23022c3ec18c50a6205ee4b60766f1739d329b2948df1fd7d5b0 # latest
     depends_on: [upload-msi]
     environment:
       DISCORD_WEBHOOK_URL:
@@ -157,7 +157,7 @@ steps:
       - status: [success]
 
   - name: discord-failure
-    image: powershell
+    image: mcr.microsoft.com/powershell@sha256:810c4f1e0c9d23022c3ec18c50a6205ee4b60766f1739d329b2948df1fd7d5b0 # latest
     depends_on: [build-msi]
     environment:
       DISCORD_WEBHOOK_URL:
