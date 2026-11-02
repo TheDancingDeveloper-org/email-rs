@@ -438,7 +438,30 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     run_outbox_migration(pool).await?;
     run_thread_backfill_migration(pool).await?;
     run_webhook_secret_migration(pool).await?;
+    run_message_pagination_migration(pool).await?;
 
+    Ok(())
+}
+
+async fn run_message_pagination_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = 23")
+            .fetch_optional(pool)
+            .await?;
+    if applied.is_some() {
+        return Ok(());
+    }
+    let migration_sql = include_str!("migrations/023_message_pagination.sql");
+    for statement in migration_sql.split(';') {
+        let statement = statement.trim();
+        if statement.is_empty() {
+            continue;
+        }
+        sqlx::query(statement).execute(pool).await?;
+    }
+    sqlx::query("INSERT INTO schema_migrations (version) VALUES (23)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -574,7 +597,6 @@ async fn run_thread_backfill_migration(pool: &SqlitePool) -> anyhow::Result<()> 
         .await?;
     Ok(())
 }
-
 /// Directory identity of an OAuth account (Microsoft tid + oid).
 /// Existing rows stay null until the next successful connect.
 async fn run_provider_subject_migration(pool: &SqlitePool) -> anyhow::Result<()> {
