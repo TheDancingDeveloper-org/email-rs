@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{
         header::{CONTENT_DISPOSITION, CONTENT_TYPE},
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, StatusCode,
     },
     response::{IntoResponse, Response},
     Json,
@@ -377,8 +377,16 @@ pub async fn download_attachment(
     let mut headers = HeaderMap::new();
     headers.insert(
         CONTENT_TYPE,
-        HeaderValue::from_str(&row.content_type)
+        HeaderValue::from_str(&safe_attachment_content_type(&row.content_type))
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("sandbox; default-src 'none'"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
     );
     headers.insert(
         CONTENT_DISPOSITION,
@@ -514,6 +522,38 @@ pub(crate) async fn cache_provider_attachments_tx(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+/// Content types the sender may choose that are inert when rendered inline.
+/// Anything else (html, svg, xml, js, unknown) is served as an opaque download.
+const SAFE_ATTACHMENT_TYPES: &[&str] = &[
+    "application/pdf",
+    "text/plain",
+    "text/csv",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wav",
+    "video/mp4",
+    "video/webm",
+];
+
+fn safe_attachment_content_type(content_type: &str) -> String {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if SAFE_ATTACHMENT_TYPES.contains(&essence.as_str()) {
+        essence
+    } else {
+        "application/octet-stream".to_string()
+    }
 }
 
 fn attachment_content_disposition(filename: &str) -> String {
@@ -733,6 +773,33 @@ pub async fn get_message(
     });
 
     Ok(Json(result))
+}
+
+#[cfg(test)]
+mod attachment_type_tests {
+    use super::safe_attachment_content_type as safe;
+
+    #[test]
+    fn active_types_are_forced_to_octet_stream() {
+        for t in [
+            "text/html",
+            "TEXT/HTML; charset=utf-8",
+            "image/svg+xml",
+            "application/xml",
+            "text/xml",
+            "application/javascript",
+            "application/xhtml+xml",
+            "",
+        ] {
+            assert_eq!(safe(t), "application/octet-stream", "{t}");
+        }
+    }
+
+    #[test]
+    fn allowlisted_types_pass() {
+        assert_eq!(safe("Image/PNG"), "image/png");
+        assert_eq!(safe("application/pdf; name=a.pdf"), "application/pdf");
+    }
 }
 
 #[cfg(test)]
