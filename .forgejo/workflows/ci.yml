@@ -31,6 +31,9 @@ jobs:
       - name: Verify locked dependency resolution
         run: cargo metadata --locked --format-version 1 > /dev/null
 
+      - name: Audit Rust dependencies
+        uses: https://github.com/EmbarkStudios/cargo-deny-action@v2
+
       - name: cargo fmt check
         run: cargo fmt --all -- --check
 
@@ -81,6 +84,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - run: npm ci
+      - name: Audit frontend dependencies
+        run: |
+          npm audit --audit-level=high --json > /tmp/frontend-audit.json || true
+          node ../scripts/check-npm-audit.mjs /tmp/frontend-audit.json audit-waivers.json
       - run: npx vite build --outDir /tmp/frontend-dist --emptyOutDir
 
   mobile:
@@ -96,5 +103,9 @@ jobs:
           cache: 'npm'
           cache-dependency-path: mobile/package-lock.json
       - run: npm ci
+      - name: Audit mobile dependencies
+        run: |
+          npm audit --audit-level=high --json > /tmp/mobile-audit.json || true
+          node ../scripts/check-npm-audit.mjs /tmp/mobile-audit.json audit-waivers.json
       - run: npm test
       - run: npm run build
