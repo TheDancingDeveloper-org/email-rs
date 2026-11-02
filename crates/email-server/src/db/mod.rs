@@ -60,7 +60,11 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool
             .max_connections(1)
             .connect_with(opts)
             .await?;
+        sqlx::query("PRAGMA auto_vacuum = INCREMENTAL")
+            .execute(&pool)
+            .await?;
         let has_fts = migrate(&pool).await?;
+        check_integrity(&pool, false).await?;
         return Ok((pool, has_fts));
     }
 
@@ -75,9 +79,26 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool
         .max_connections(1)
         .connect_with(opts.clone())
         .await?;
+    sqlx::query("PRAGMA auto_vacuum = INCREMENTAL")
+        .execute(&migration_pool)
+        .await?;
     let migrated = migrate(&migration_pool).await;
+    let integrity = if migrated.is_ok() {
+        check_integrity(
+            &migration_pool,
+            std::env::var("EMAIL_RS_ALLOW_CORRUPT_DATABASE")
+                .ok()
+                .is_some_and(|value| {
+                    matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+                }),
+        )
+        .await
+    } else {
+        Ok(())
+    };
     migration_pool.close().await;
     let has_fts = migrated?;
+    integrity?;
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -90,6 +111,63 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<(SqlitePool, bool
     restrict_database_files(std::path::Path::new(&file_path))?;
 
     Ok((pool, has_fts))
+}
+
+pub(crate) async fn check_integrity(pool: &SqlitePool, allow_corrupt: bool) -> anyhow::Result<()> {
+    let result: String = match sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_one(pool)
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(%error, "database quick_check could not run");
+            if allow_corrupt {
+                tracing::warn!("continuing after a failed database quick_check because EMAIL_RS_ALLOW_CORRUPT_DATABASE is set");
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+    };
+    handle_integrity_result(&result, allow_corrupt)
+}
+
+fn handle_integrity_result(result: &str, allow_corrupt: bool) -> anyhow::Result<()> {
+    if result.eq_ignore_ascii_case("ok") {
+        tracing::info!("database quick_check passed");
+        return Ok(());
+    }
+    tracing::error!(result = %result, "database quick_check reported corruption");
+    if allow_corrupt {
+        tracing::warn!(
+            "continuing with a corrupt database because EMAIL_RS_ALLOW_CORRUPT_DATABASE is set"
+        );
+        Ok(())
+    } else {
+        anyhow::bail!("database integrity check failed: {result}")
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn quick_check_refuses_corrupt_schema_without_override() {
+        let options = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE valid (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(handle_integrity_result("*** in database main ***", false).is_err());
+        assert!(handle_integrity_result("*** in database main ***", true).is_ok());
+    }
 }
 
 /// Run every schema migration; returns whether FTS5 search is available.

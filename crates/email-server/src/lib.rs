@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod imap;
+pub mod maintenance;
 pub mod outbox;
 pub mod providers;
 pub mod rules;
@@ -44,6 +45,7 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
     if has_fts {
         search_index::spawn_reindex(pool.clone());
     }
+    maintenance::spawn(pool.clone(), has_fts, cfg.maintenance.clone());
     SyncOrchestrator::spawn_background(pool, app_state.event_tx.clone());
     outbox::spawn_worker(app_state.pool.clone());
 
