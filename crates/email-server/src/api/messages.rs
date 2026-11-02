@@ -11,8 +11,8 @@ use axum::{
     Json,
 };
 use email_types::{
-    BulkAction, BulkRequest, BulkResponse, BulkResult, Message as MessageRow, MessageAttachment,
-    PatchMessageRequest,
+    AuthenticationResultStatus, BulkAction, BulkRequest, BulkResponse, BulkResult,
+    Message as MessageRow, MessageAttachment, MessageAuthenticationResults, PatchMessageRequest,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -411,16 +411,169 @@ async fn load_message_attachments(
     pool: &sqlx::SqlitePool,
     message_id: &str,
 ) -> Result<Vec<MessageAttachment>> {
-    sqlx::query_as::<_, MessageAttachment>(
-        r#"SELECT id, message_id, filename, content_type, size_bytes
+    let mut attachments = sqlx::query_as::<_, MessageAttachment>(
+        r#"SELECT id, message_id, filename, content_type, size_bytes,
+                  0 AS dangerous_or_double_extension
            FROM attachments
            WHERE message_id = ?
            ORDER BY filename COLLATE NOCASE, id"#,
     )
     .bind(message_id)
     .fetch_all(pool)
-    .await
-    .map_err(Into::into)
+    .await?;
+    for attachment in &mut attachments {
+        attachment.dangerous_or_double_extension =
+            dangerous_or_double_extension(&attachment.filename);
+    }
+    Ok(attachments)
+}
+
+const DANGEROUS_ATTACHMENT_EXTENSIONS: &[&str] = &[
+    "app", "bat", "cmd", "com", "cpl", "exe", "hta", "jar", "js", "jse", "lnk", "msi", "pif",
+    "ps1", "reg", "scr", "vbe", "vbs", "wsf",
+];
+
+fn dangerous_or_double_extension(filename: &str) -> bool {
+    let filename = filename.trim().trim_end_matches('.').to_ascii_lowercase();
+    let extensions = filename
+        .split('.')
+        .skip(1)
+        .filter(|extension| !extension.is_empty())
+        .collect::<Vec<_>>();
+    let Some(extension) = extensions.last() else {
+        return false;
+    };
+    DANGEROUS_ATTACHMENT_EXTENSIONS.contains(extension)
+        || (extensions.len() > 1
+            && !matches!(
+                (extensions[extensions.len() - 2], *extension),
+                ("tar", "gz" | "bz2" | "xz")
+            ))
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MessageTrustSignals {
+    authentication_results: MessageAuthenticationResults,
+    from_reply_to_domain_mismatch: bool,
+    display_name_spoofing: bool,
+}
+
+fn message_trust_signals(
+    raw_headers: Option<&str>,
+    fallback_from: Option<&str>,
+) -> MessageTrustSignals {
+    let Some(raw_headers) = raw_headers else {
+        return MessageTrustSignals::default();
+    };
+    let headers = unfolded_headers(raw_headers);
+    let authentication_results = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("Authentication-Results"))
+        .fold(
+            MessageAuthenticationResults::default(),
+            |mut results, (_, value)| {
+                results.spf = authentication_status(value, "spf", results.spf);
+                results.dkim = authentication_status(value, "dkim", results.dkim);
+                results.dmarc = authentication_status(value, "dmarc", results.dmarc);
+                results
+            },
+        );
+    let from = header_value(&headers, "From")
+        .and_then(parse_address)
+        .or_else(|| fallback_from.map(|email| (String::new(), email.to_ascii_lowercase())));
+    let reply_to = header_value(&headers, "Reply-To").and_then(parse_address);
+    let from_reply_to_domain_mismatch = from.as_ref().zip(reply_to.as_ref()).is_some_and(
+        |((_, from_email), (_, reply_to_email))| {
+            email_domain(from_email) != email_domain(reply_to_email)
+        },
+    );
+    let display_name_spoofing = from.as_ref().is_some_and(|(display_name, from_email)| {
+        embedded_email(display_name)
+            .is_some_and(|display_email| !display_email.eq_ignore_ascii_case(from_email))
+    });
+
+    MessageTrustSignals {
+        authentication_results,
+        from_reply_to_domain_mismatch,
+        display_name_spoofing,
+    }
+}
+
+fn unfolded_headers(raw_headers: &str) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for line in raw_headers.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with([' ', '\t']) {
+            if let Some((_, value)) = headers.last_mut() {
+                value.push(' ');
+                value.push_str(line.trim());
+            }
+        } else if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_string(), value.trim().to_string()));
+        }
+    }
+    headers
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn authentication_status(
+    value: &str,
+    method: &str,
+    current: AuthenticationResultStatus,
+) -> AuthenticationResultStatus {
+    value
+        .split(|character: char| character == ';' || character.is_whitespace())
+        .find_map(|token| {
+            let (name, result) = token.split_once('=')?;
+            name.eq_ignore_ascii_case(method)
+                .then(|| match result.to_ascii_lowercase().as_str() {
+                    "pass" => AuthenticationResultStatus::Pass,
+                    "none" => AuthenticationResultStatus::None,
+                    _ => AuthenticationResultStatus::Fail,
+                })
+        })
+        .unwrap_or(current)
+}
+
+fn parse_address(value: &str) -> Option<(String, String)> {
+    let (display_name, address) = match (value.rfind('<'), value.rfind('>')) {
+        (Some(start), Some(end)) if start < end => (&value[..start], &value[start + 1..end]),
+        _ => ("", value.split(',').next()?),
+    };
+    let address = address.trim().to_ascii_lowercase();
+    address.contains('@').then(|| {
+        (
+            display_name.trim().trim_matches('"').trim().to_string(),
+            address,
+        )
+    })
+}
+
+fn embedded_email(value: &str) -> Option<&str> {
+    value
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, '<' | '>' | '(' | ')' | '"')
+        })
+        .map(|token| {
+            token.trim_matches(|character: char| matches!(character, ',' | ';' | ':' | '[' | ']'))
+        })
+        .find(|token| {
+            token.split_once('@').is_some_and(|(local, domain)| {
+                !local.is_empty() && domain.contains('.') && !domain.ends_with('.')
+            })
+        })
+}
+
+fn email_domain(email: &str) -> Option<&str> {
+    email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim_end_matches('.'))
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -742,6 +895,10 @@ pub async fn get_message(
         .await?;
     refresh_folder_counts(&state.pool, &msg.folder_id).await?;
     let attachments = load_message_attachments(&state.pool, &message_id).await?;
+    let trust_signals = message_trust_signals(
+        body.as_ref().and_then(|body| body.raw_headers.as_deref()),
+        msg.from_email.as_deref(),
+    );
 
     let result = serde_json::json!({
         "id": msg.id,
@@ -769,6 +926,9 @@ pub async fn get_message(
             "quotedHistory": b.quoted_history,
             "signatureStripped": b.signature_stripped,
         })),
+        "authenticationResults": trust_signals.authentication_results,
+        "fromReplyToDomainMismatch": trust_signals.from_reply_to_domain_mismatch,
+        "displayNameSpoofing": trust_signals.display_name_spoofing,
         "attachments": attachments,
     });
 
@@ -777,7 +937,7 @@ pub async fn get_message(
 
 #[cfg(test)]
 mod attachment_type_tests {
-    use super::safe_attachment_content_type as safe;
+    use super::{dangerous_or_double_extension as dangerous, safe_attachment_content_type as safe};
 
     #[test]
     fn active_types_are_forced_to_octet_stream() {
@@ -799,6 +959,63 @@ mod attachment_type_tests {
     fn allowlisted_types_pass() {
         assert_eq!(safe("Image/PNG"), "image/png");
         assert_eq!(safe("application/pdf; name=a.pdf"), "application/pdf");
+    }
+
+    #[test]
+    fn dangerous_and_double_extensions_are_flagged() {
+        for filename in [
+            "invoice.exe",
+            "invoice.pdf.exe",
+            "scan.pdf.js",
+            "photo.jpg.zip",
+        ] {
+            assert!(dangerous(filename), "{filename}");
+        }
+        for filename in ["invoice.pdf", "archive.tar.gz", "README"] {
+            assert!(!dangerous(filename), "{filename}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod trust_signal_tests {
+    use super::message_trust_signals;
+    use email_types::AuthenticationResultStatus::{Fail, None as NoResult, Pass};
+
+    #[test]
+    fn parses_realistic_folded_authentication_results() {
+        let headers = concat!(
+            "From: Example Billing <billing@example.com>\r\n",
+            "Reply-To: Support <support.example@payments.test>\r\n",
+            "Authentication-Results: mx.example.net;\r\n",
+            " spf=pass smtp.mailfrom=example.com;\r\n",
+            " dkim=fail header.d=example.com; dmarc=none header.from=example.com\r\n",
+        );
+
+        let signals = message_trust_signals(Some(headers), None);
+
+        assert_eq!(signals.authentication_results.spf, Pass);
+        assert_eq!(signals.authentication_results.dkim, Fail);
+        assert_eq!(signals.authentication_results.dmarc, NoResult);
+        assert!(signals.from_reply_to_domain_mismatch);
+        assert!(!signals.display_name_spoofing);
+    }
+
+    #[test]
+    fn detects_display_name_address_spoofing() {
+        let headers = concat!(
+            "From: \"accounts@example.com\" <attacker@evil.test>\r\n",
+            "Reply-To: attacker@evil.test\r\n",
+            "Authentication-Results: gateway.test; spf=fail; dkim=pass; dmarc=fail\r\n",
+        );
+
+        let signals = message_trust_signals(Some(headers), None);
+
+        assert_eq!(signals.authentication_results.spf, Fail);
+        assert_eq!(signals.authentication_results.dkim, Pass);
+        assert_eq!(signals.authentication_results.dmarc, Fail);
+        assert!(!signals.from_reply_to_domain_mismatch);
+        assert!(signals.display_name_spoofing);
     }
 }
 
@@ -1089,6 +1306,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["id"], "msg-get");
         assert_eq!(body["subject"], "Subject of msg-get");
+        assert_eq!(body["authenticationResults"]["spf"], "none");
+        assert_eq!(body["authenticationResults"]["dkim"], "none");
+        assert_eq!(body["authenticationResults"]["dmarc"], "none");
+        assert_eq!(body["fromReplyToDomainMismatch"], false);
+        assert_eq!(body["displayNameSpoofing"], false);
     }
 
     async fn seed_body(

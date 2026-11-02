@@ -9,12 +9,12 @@ use utoipa::{Modify, OpenApi, ToSchema};
 
 use email_types::{
     Account, AccountSettings, AddLinkBody, AddLinkResponse, AuthCredentials, AuthIdentity,
-    AuthSession, AuthorizeResponse, BulkRequest, BulkResponse, CalendarEvent, Contact,
-    CreateAccount, CreateLabelBody, CreateRuleBody, CreateWebhook, DraftRequest, DraftResponse,
-    EventLink, Folder, FullMessage, Label, Message, MessageAttachment, PatchFolder,
-    PatchMessageRequest, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
-    StatusResponse, SuggestResponse, UpdateAccount, UpdateLabelBody, UpdateRuleBody, UpdateWebhook,
-    Webhook,
+    AuthSession, AuthenticationResultStatus, AuthorizeResponse, BulkRequest, BulkResponse,
+    CalendarEvent, Contact, CreateAccount, CreateLabelBody, CreateRuleBody, CreateWebhook,
+    DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, Message, MessageAttachment,
+    MessageAuthenticationResults, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
+    SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount,
+    UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 
 use super::integration_tokens::{
@@ -568,6 +568,8 @@ fn doc_events() {}
         Message,
         FullMessage,
         MessageAttachment,
+        MessageAuthenticationResults,
+        AuthenticationResultStatus,
         PatchMessageRequest,
         BulkRequest,
         BulkResponse,
