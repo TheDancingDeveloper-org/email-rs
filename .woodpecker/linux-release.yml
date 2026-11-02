@@ -18,7 +18,7 @@ when:
 steps:
   # ── Build frontend (for the binary tarball) ───────────────────────────────────
   - name: build-frontend
-    image: node:22-alpine
+    image: node@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 # 22-alpine
     commands:
       - export HOME=/tmp  # Node B agents mount .netrc read-only under the default HOME
       - cd frontend && npm ci && npx vite build --outDir ../release/static --emptyOutDir
@@ -26,7 +26,7 @@ steps:
   # ── Build server and native FluentGUI Linux binaries ────────────────────────
   - name: build-binary
     # The locked Fluent desktop graph includes crates whose MSRV is Rust 1.88.
-    image: rust:1.88-slim
+    image: rust@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 # 1.88-slim
     depends_on: [build-frontend]
     commands:
       - export HOME=/tmp  # Node B agents mount .netrc read-only under the default HOME
@@ -41,7 +41,7 @@ steps:
 
   # ── Build and push Docker image to Forgejo registry ──────────────────────────
   - name: docker
-    image: woodpeckerci/plugin-docker-buildx
+    image: woodpeckerci/plugin-docker-buildx@sha256:22008d33ac0973296438cb62dba877ca5d6fab455d2576662fee026022b5f971 # latest
     settings:
       registry: repo.indexarr.net
       repo: repo.indexarr.net/indexarr/email-rs
@@ -54,7 +54,7 @@ steps:
 
   # Publish the generated Python SDK under the same immutable product/API version.
   - name: publish-python-client
-    image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+    image: ghcr.io/astral-sh/uv@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca # python3.13-bookworm-slim
     environment:
       FORGEJO_TOKEN:
         from_secret: forgejo_token
@@ -65,7 +65,7 @@ steps:
 
   # ── Upload tarball to Forgejo release ────────────────────────────────────────
   - name: upload-assets
-    image: alpine:3.19
+    image: alpine@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1 # 3.19
     depends_on: [build-binary]
     environment:
       FORGEJO_TOKEN:
@@ -109,7 +109,7 @@ steps:
 
   # ── Notifications ─────────────────────────────────────────────────────────────
   - name: discord-success
-    image: alpine:3.19
+    image: alpine@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1 # 3.19
     depends_on: [upload-assets, docker]
     environment:
       DISCORD_WEBHOOK_URL:
@@ -127,7 +127,7 @@ steps:
       - status: [success]
 
   - name: discord-failure
-    image: alpine:3.19
+    image: alpine@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1 # 3.19
     depends_on: [upload-assets, docker]
     environment:
       DISCORD_WEBHOOK_URL:
