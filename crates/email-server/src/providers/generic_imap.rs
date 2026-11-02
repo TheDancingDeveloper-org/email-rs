@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_imap::types::{Flag, NameAttribute};
 use async_trait::async_trait;
@@ -9,7 +10,7 @@ use rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 use uuid::Uuid;
 
-use super::{Folder, MailProvider, Message, MessageBody};
+use super::{Folder, IdleEvent, MailProvider, Message, MessageBody};
 use crate::error::{AppError, Result};
 use tracing::info;
 
@@ -159,6 +160,43 @@ impl MailProvider for GenericImapProvider {
             return Err(AppError::Auth("no password configured".to_string()));
         }
         Ok(())
+    }
+
+    async fn wait_for_idle(&self, timeout: Duration) -> Result<IdleEvent> {
+        let mut session = self.connect().await?;
+        let capabilities = session
+            .capabilities()
+            .await
+            .map_err(|e| AppError::Imap(format!("CAPABILITY failed: {e}")))?;
+        if !capabilities.has_str("IDLE") {
+            return Err(AppError::Provider(
+                "IMAP server does not support IDLE".into(),
+            ));
+        }
+        session
+            .select("INBOX")
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT INBOX failed: {e}")))?;
+
+        let mut idle = session.idle();
+        idle.init()
+            .await
+            .map_err(|e| AppError::Imap(format!("IDLE init failed: {e}")))?;
+        let (wait, interrupt) = idle.wait_with_timeout(timeout);
+        let result = wait
+            .await
+            .map_err(|e| AppError::Imap(format!("IDLE wait failed: {e}")))?;
+        drop(interrupt);
+        let _session = idle
+            .done()
+            .await
+            .map_err(|e| AppError::Imap(format!("IDLE DONE failed: {e}")))?;
+
+        match result {
+            async_imap::extensions::idle::IdleResponse::Timeout => Ok(IdleEvent::Timeout),
+            async_imap::extensions::idle::IdleResponse::ManualInterrupt
+            | async_imap::extensions::idle::IdleResponse::NewData(_) => Ok(IdleEvent::Changed),
+        }
     }
 
     async fn list_folders(&self) -> Result<Vec<Folder>> {
