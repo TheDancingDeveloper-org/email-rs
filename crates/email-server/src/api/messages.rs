@@ -1008,7 +1008,7 @@ pub async fn get_message(
         "hasAttachments": msg.has_attachments,
         "preview": msg.preview,
         "body": body.map(|b| serde_json::json!({
-            "htmlBody": b.html_body,
+            "htmlBody": b.html_body.as_deref().map(crate::sanitize::sanitize_html),
             "textBody": b.text_body,
             "cleanBody": b.clean_body,
             "quotedHistory": b.quoted_history,
@@ -1538,6 +1538,34 @@ mod tests {
         .unwrap();
         assert_eq!(stale, 0);
         assert_eq!(crate::clean::backfill(&state.pool).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn get_message_serves_sanitized_html() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "msg-hostile", "acc1", "fld1").await;
+        seed_body(
+            &state.pool,
+            "msg-hostile",
+            None,
+            Some(r#"<p onclick="x()">Hi</p><script>alert(1)</script><img src="https://t.example/p.gif"><a href="javascript:alert(1)">l</a>"#),
+        )
+        .await;
+
+        let (_, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "GET",
+            "/messages/msg-hostile",
+            None,
+        )
+        .await;
+        let html = body["body"]["htmlBody"].as_str().unwrap();
+        assert!(html.contains("Hi"));
+        for bad in ["script", "onclick", "t.example", "javascript:"] {
+            assert!(!html.contains(bad), "{bad} survived: {html}");
+        }
     }
 
     #[tokio::test]
