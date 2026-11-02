@@ -6,7 +6,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -97,6 +96,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     outputs:
       image_digest: ${{ steps.image.outputs.digest }}
     runs-on: [self-hosted, docker, publish]
@@ -118,6 +118,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Refuse to overwrite an existing image tag
+        run: |
+          set -euo pipefail
+          for tag in "${GITHUB_REF_NAME}" "sha-${GITHUB_SHA}"; do
+            if docker buildx imagetools inspect "${IMAGE}:${tag}" >/dev/null 2>&1; then
+              echo "refusing to overwrite existing image tag: ${IMAGE}:${tag}" >&2
+              exit 1
+            fi
+          done
+
       - name: Build and publish the versioned server image
         id: image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -130,6 +140,24 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ github.ref_name }}
             ${{ env.IMAGE }}:sha-${{ github.sha }}
+
+      - name: Generate an SBOM for the published image digest
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.image.outputs.digest }}
+          format: spdx-json
+          output-file: image.spdx.json
+          artifact-name: image-sbom
+          upload-artifact: true
+          upload-release-assets: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+
+      - name: Sign the published image digest with GitHub OIDC
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${IMAGE_DIGEST}"
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -431,6 +459,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: release-artifacts
+          name: image-sbom
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: release-artifacts
           pattern: desktop-*
           merge-multiple: true
         continue-on-error: true
@@ -456,6 +489,7 @@ jobs:
           done
           test "$missing" -eq 0
           test -s release-artifacts/SHA256SUMS
+          test -s release-artifacts/image.spdx.json
 
       - name: Python client wheel and sdist are present
         shell: bash
@@ -485,6 +519,8 @@ jobs:
             echo "Digest: \`${IMAGE}@${IMAGE_DIGEST}\`"
             echo
             echo "Immutable tag: \`${IMAGE}:sha-${GITHUB_SHA}\`"
+            echo
+            echo "The image digest has a keyless Sigstore signature, and \`image.spdx.json\` is its SPDX SBOM."
           } > "$notes"
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GH_REPO" \

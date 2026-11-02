@@ -196,7 +196,10 @@ Additional operational and developer documentation is indexed in
 
 The GitHub Actions release workflow builds the `email-server` browser/headless
 binary and `email-desktop-fluent` native binary explicitly, then package them
-with the browser assets. The Docker image builds only `email-server`.
+with the browser assets. The Docker image builds only `email-server`. Releases
+publish only immutable version and commit-SHA image tags. Each release includes
+checksums and SPDX/CycloneDX SBOMs, and the image digest is signed keylessly
+with Sigstore using GitHub Actions OIDC. Manual runs cannot publish a release.
 
 ---
 
