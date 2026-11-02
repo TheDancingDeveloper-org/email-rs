@@ -21,7 +21,7 @@ Provider credentials authorize email-rs to access Gmail, Microsoft, or IMAP. App
 |---|---|---|
 | `GET` | `/api/v1/health` | Minimal health response (`ok`). |
 | `GET` | `/api/v1/openapi.json` | Generated route/security contract. |
-| `POST` | `/api/v1/app-auth/bootstrap` | Create the first user from a direct loopback connection only. |
+| `POST` | `/api/v1/app-auth/bootstrap` | Create the first user from a direct loopback connection only; forwarded requests are rejected. |
 | `POST` | `/api/v1/app-auth/login` | Verify the password and issue a cookie or bearer session. |
 | `GET` | `/api/v1/auth/gmail/callback` | Google OAuth callback. |
 | `GET` | `/api/v1/auth/microsoft/callback` | Microsoft OAuth callback. |
