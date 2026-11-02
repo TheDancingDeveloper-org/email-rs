@@ -665,6 +665,7 @@ fn valid_origin(headers: &HeaderMap, settings: &AuthSettings) -> bool {
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
+        .filter(|scheme| matches!(*scheme, "http" | "https"))
         .unwrap_or(if settings.secure_cookies {
             "https"
         } else {
