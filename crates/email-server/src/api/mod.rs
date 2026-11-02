@@ -248,6 +248,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/webhooks/{id}",
             patch(webhooks::update_webhook).delete(webhooks::delete_webhook),
         )
+        .route("/metrics", get(crate::metrics::handler))
         .route("/integration-events", get(webhooks::list_events))
         .route("/webhook-deliveries", get(webhooks::list_deliveries))
         .route_layer(middleware::from_fn_with_state(
@@ -266,6 +267,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/auth/gmail/callback", get(auth::gmail_callback))
         .route("/auth/microsoft/callback", get(auth::microsoft_callback))
         .merge(protected)
+        .layer(middleware::from_fn(crate::metrics::track_http))
         .with_state(state)
 }
 
