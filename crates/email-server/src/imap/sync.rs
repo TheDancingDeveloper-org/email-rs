@@ -1387,17 +1387,21 @@ mod tests {
         .await
         .unwrap();
 
-        let state = remote.read().unwrap();
-        let since = state.fetched_since[0].expect("days limit supplies a fetch floor");
+        let (since, fetched_by_uid_is_empty) = {
+            let state = remote.read().unwrap();
+            (
+                state.fetched_since[0].expect("days limit supplies a fetch floor"),
+                state.fetched_by_uid.is_empty(),
+            )
+        };
         assert!(
             since <= Utc::now() - chrono::Duration::days(29),
             "reset must not reuse the previous synced_at"
         );
         assert!(
-            state.fetched_by_uid.is_empty(),
+            fetched_by_uid_is_empty,
             "reset must not repair-fetch messages outside the days limit"
         );
-        drop(state);
         let uids: Vec<i64> = sqlx::query_scalar("SELECT uid FROM messages WHERE folder_id='f'")
             .fetch_all(&pool)
             .await
