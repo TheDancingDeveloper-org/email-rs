@@ -1,4 +1,5 @@
 pub mod api;
+pub mod attachment_store;
 pub mod auth;
 pub mod calendar;
 pub mod clean;
