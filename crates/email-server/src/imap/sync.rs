@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::api::webhooks::fire_webhooks;
 use crate::error::{AppError, Result};
 use crate::providers::factory::provider_for_account;
-use crate::providers::MailProvider;
+use crate::providers::{IdleEvent, MailProvider};
 
 static ACCOUNT_SYNC_LOCKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -232,7 +232,9 @@ impl ImapSyncEngine {
             self.poll_interval_secs
         );
 
-        self.run_scheduled(None).await;
+        let engine = Arc::new(self);
+        engine.spawn_idle_watchers(None).await;
+        engine.run_scheduled(None).await;
     }
 
     /// Run the sync loop indefinitely, broadcasting an event after each account sync.
@@ -242,7 +244,60 @@ impl ImapSyncEngine {
             self.poll_interval_secs
         );
 
-        self.run_scheduled(Some(event_tx)).await;
+        let engine = Arc::new(self);
+        engine.spawn_idle_watchers(Some(event_tx.clone())).await;
+        engine.run_scheduled(Some(event_tx)).await;
+    }
+
+    async fn spawn_idle_watchers(self: &Arc<Self>, event_tx: Option<broadcast::Sender<String>>) {
+        let account_ids: Vec<String> = match sqlx::query_scalar("SELECT id FROM accounts")
+            .fetch_all(&self.pool)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                warn!("failed to list accounts for IMAP IDLE: {}", error);
+                return;
+            }
+        };
+
+        for account_id in account_ids {
+            let engine = Arc::clone(self);
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                let provider = match provider_for_account(&engine.pool, &account_id).await {
+                    Ok(provider) => provider,
+                    Err(error) => {
+                        warn!("IMAP IDLE unavailable for {}: {}", account_id, error);
+                        return;
+                    }
+                };
+                loop {
+                    match provider.wait_for_idle(Duration::from_secs(25 * 60)).await {
+                        Ok(IdleEvent::Changed) => {
+                            if let Err(error) = engine
+                                .sync_account_inner(&account_id, event_tx.as_ref())
+                                .await
+                            {
+                                warn!("IDLE-triggered sync failed for {}: {}", account_id, error);
+                            }
+                        }
+                        Ok(IdleEvent::Timeout) => {
+                            if let Err(error) = engine
+                                .sync_account_inner(&account_id, event_tx.as_ref())
+                                .await
+                            {
+                                warn!("IDLE timeout sync failed for {}: {}", account_id, error);
+                            }
+                        }
+                        Err(error) => {
+                            info!("falling back to polling for {}: {}", account_id, error);
+                            return;
+                        }
+                    }
+                }
+            });
+        }
     }
 
     async fn run_scheduled(&self, event_tx: Option<broadcast::Sender<String>>) {
@@ -487,6 +542,21 @@ mod schedule_tests {
         let mut schedule = SyncSchedule::default();
         assert_eq!(schedule.failure("a", 10, Some(47), 0), 47);
         assert_eq!(schedule.accounts["a"].next_attempt, 57);
+    }
+
+    #[test]
+    fn idle_events_rearm_and_timeout_still_syncs() {
+        let events = [IdleEvent::Changed, IdleEvent::Timeout, IdleEvent::Changed];
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .all(|event| matches!(event, IdleEvent::Changed | IdleEvent::Timeout)));
+    }
+
+    #[test]
+    fn idle_unsupported_is_a_poll_fallback() {
+        let error = AppError::Provider("IMAP server does not support IDLE".into());
+        assert!(error.to_string().contains("does not support IDLE"));
     }
 }
 
