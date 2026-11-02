@@ -14,9 +14,15 @@ pub struct SmtpConfig {
     pub username: String,
     /// For XOAUTH2: the OAuth2 access token. For Basic: the password.
     pub password: String,
-    pub use_tls: bool,
+    pub tls_mode: SmtpTlsMode,
     /// Use XOAUTH2 mechanism (Gmail OAuth2) instead of PLAIN/LOGIN.
     pub xoauth2: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SmtpTlsMode {
+    Implicit,
+    StartTls,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,19 +158,19 @@ pub async fn send_message(config: &SmtpConfig, msg: OutboundMessage) -> Result<V
         vec![Mechanism::Plain, Mechanism::Login]
     };
 
-    let transport = if config.use_tls {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)
-            .map_err(|e| AppError::Smtp(e.to_string()))?
-            .credentials(creds)
-            .authentication(mechanisms)
-            .build()
-    } else {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
+    let transport = match config.tls_mode {
+        SmtpTlsMode::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)
             .map_err(|e| AppError::Smtp(e.to_string()))?
             .port(config.port)
             .credentials(creds)
             .authentication(mechanisms)
-            .build()
+            .build(),
+        SmtpTlsMode::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
+            .map_err(|e| AppError::Smtp(e.to_string()))?
+            .port(config.port)
+            .credentials(creds)
+            .authentication(mechanisms)
+            .build(),
     };
 
     transport
@@ -178,6 +184,18 @@ pub async fn send_message(config: &SmtpConfig, msg: OutboundMessage) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_modes_serialize_with_explicit_names() {
+        assert_eq!(
+            serde_json::to_string(&SmtpTlsMode::Implicit).unwrap(),
+            "\"Implicit\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SmtpTlsMode>("\"StartTls\"").unwrap(),
+            SmtpTlsMode::StartTls
+        );
+    }
 
     #[test]
     fn builds_multipart_message_with_cc_bcc_and_attachment() {
