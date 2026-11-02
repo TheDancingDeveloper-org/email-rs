@@ -21,6 +21,12 @@ pub enum AppError {
     #[error("provider error: {0}")]
     Provider(String),
 
+    #[error("rate limited ({retry_after_secs}s): {message}")]
+    RateLimited {
+        retry_after_secs: u64,
+        message: String,
+    },
+
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
 
@@ -47,6 +53,9 @@ impl IntoResponse for AppError {
             AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AppError::Provider(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+            AppError::RateLimited { message, .. } => {
+                (StatusCode::TOO_MANY_REQUESTS, message.clone())
+            }
             AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
             AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
