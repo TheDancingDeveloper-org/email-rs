@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import styles from './MailDetailScreen.module.css';
 import { sanitizeEmailHtml } from '../utils/sanitizeEmailHtml';
 import { useAppStore } from '../store';
+import { EMAIL_BODY_SANDBOX } from '../utils/emailBodySandbox';
 import { api } from '../api/client';
 import type { MessageBody } from '../types';
 
@@ -112,7 +113,7 @@ export function MailDetailScreen() {
           <iframe
             className={styles.iframe}
             srcDoc={sanitizeEmailHtml(body.body.htmlBody)}
-            sandbox=""
+            sandbox={EMAIL_BODY_SANDBOX}
             referrerPolicy="no-referrer"
             title="Email body"
           />

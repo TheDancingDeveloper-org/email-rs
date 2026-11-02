@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import styles from './ReadingPane.module.css';
 import { useAppStore } from '../../store';
+import { EMAIL_BODY_SANDBOX } from '../../utils/emailBodySandbox';
 import { useApi } from '../../hooks/useApi';
 import { useContextMenu } from '../ContextMenu/ContextMenu';
 import type { Label } from '../../types';
@@ -565,7 +566,7 @@ export function ReadingPane() {
           <iframe
             className={styles.bodyFrame}
             srcDoc={sanitizeEmailHtml(message.body.htmlBody, theme === 'dark')}
-            sandbox=""
+            sandbox={EMAIL_BODY_SANDBOX}
             referrerPolicy="no-referrer"
             title="Message body"
           />
