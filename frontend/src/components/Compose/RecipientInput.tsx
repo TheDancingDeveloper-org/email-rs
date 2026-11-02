@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { api, reportApiError } from '../../api/client';
 import styles from './RecipientInput.module.css';
 import type { Suggestion } from '../../types';
 
@@ -38,9 +39,7 @@ export function RecipientInput({ value, onChange, placeholder, autoFocus }: Prop
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/v1/search/suggest?q=${encodeURIComponent(tok)}`);
-        if (!res.ok) return;
-        const data = await res.json() as { messages: Suggestion[] };
+        const data = await api.get<{ messages: Suggestion[] }>(`/api/v1/search/suggest?q=${encodeURIComponent(tok)}`);
         // Dedupe by fromEmail.
         const seen = new Set<string>();
         const unique = (data.messages ?? []).filter((s) => {
@@ -51,7 +50,7 @@ export function RecipientInput({ value, onChange, placeholder, autoFocus }: Prop
         setSuggestions(unique.slice(0, 6));
         setOpen(unique.length > 0);
         setActiveIdx(0);
-      } catch { /* ignore */ }
+      } catch (e) { reportApiError(e); }
     }, 150);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [value]);

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { api } from '../../api/client';
 import styles from './CommandPalette.module.css';
 import { useAppStore } from '../../store';
 
@@ -164,7 +165,7 @@ export function CommandPalette() {
         hint: 'e',
         group: 'Message',
         keywords: ['archive', 'message'],
-        handler: () => fetch(`/api/v1/messages/${selectedMessage.id}/archive`, { method: 'POST' })
+        handler: () => api.post(`/api/v1/messages/${selectedMessage.id}/archive`)
           .then(() => removeMessage(selectedMessage.id)),
       });
       list.push({
@@ -173,7 +174,7 @@ export function CommandPalette() {
         hint: '#',
         group: 'Message',
         keywords: ['delete', 'trash', 'remove'],
-        handler: () => fetch(`/api/v1/messages/${selectedMessage.id}`, { method: 'DELETE' })
+        handler: () => api.delete(`/api/v1/messages/${selectedMessage.id}`)
           .then(() => removeMessage(selectedMessage.id)),
       });
       list.push({
@@ -182,22 +183,14 @@ export function CommandPalette() {
         hint: 'u',
         group: 'Message',
         keywords: ['read', 'unread', 'mark'],
-        handler: () => fetch(`/api/v1/messages/${selectedMessage.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isRead: !selectedMessage.isRead }),
-        }).then(() => patchMessage(selectedMessage.id, { isRead: !selectedMessage.isRead })),
+        handler: () => api.patch(`/api/v1/messages/${selectedMessage.id}`, { isRead: !selectedMessage.isRead }).then(() => patchMessage(selectedMessage.id, { isRead: !selectedMessage.isRead })),
       });
       list.push({
         id: selectedMessage.isFlagged ? 'msg:unflag' : 'msg:flag',
         label: selectedMessage.isFlagged ? 'Remove Flag' : 'Flag Message',
         group: 'Message',
         keywords: ['flag', 'star', 'unflag'],
-        handler: () => fetch(`/api/v1/messages/${selectedMessage.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isFlagged: !selectedMessage.isFlagged }),
-        }).then(() => patchMessage(selectedMessage.id, { isFlagged: !selectedMessage.isFlagged })),
+        handler: () => api.patch(`/api/v1/messages/${selectedMessage.id}`, { isFlagged: !selectedMessage.isFlagged }).then(() => patchMessage(selectedMessage.id, { isFlagged: !selectedMessage.isFlagged })),
       });
     }
 

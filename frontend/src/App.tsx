@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { api, ApiError, listAccounts, onApiError, reportApiError } from './api/client';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { MessageList } from './components/MessageList/MessageList';
 import { ReadingPane } from './components/ReadingPane/ReadingPane';
@@ -10,7 +11,6 @@ import { CalendarView } from './components/Calendar/CalendarView';
 import { useAppStore } from './store';
 import { applyDensity } from './utils/density';
 import { handleOAuthCallback } from './utils/oauthCallback';
-import type { Account } from './types';
 
 const SIDEBAR_W_KEY = 'email_sidebar_w';
 const MSGLIST_W_KEY  = 'email_msglist_w';
@@ -32,15 +32,7 @@ function AuthGate({ onAuthenticated }: { onAuthenticated: () => void }) {
     setSubmitting(true);
     setError(null);
     try {
-      const response = await fetch(`/api/v1/app-auth/${firstRun ? 'bootstrap' : 'login'}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, client: 'cookie' }),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({})) as { error?: string };
-        throw new Error(body.error || `${response.status} ${response.statusText}`);
-      }
+      await api.post(`/api/v1/app-auth/${firstRun ? 'bootstrap' : 'login'}`, { username, password, client: 'cookie' }, { silent: true });
       onAuthenticated();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Authentication failed');
@@ -131,6 +123,14 @@ export function App() {
   const { theme, densityLevel, accounts, setAccounts, folders, compose, settingsOpen, openPalette, closePalette, paletteOpen, view } = useAppStore();
   const [accountsLoaded, setAccountsLoaded] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
+
+  useEffect(() => onApiError((e) => setApiError(e.message)), []);
+  useEffect(() => {
+    if (!apiError) return;
+    const t = setTimeout(() => setApiError(null), 6000);
+    return () => clearTimeout(t);
+  }, [apiError]);
 
   const sidebar = usePanelResize(SIDEBAR_W_KEY,  DEFAULT_SIDEBAR_W, MIN_W, MAX_SIDEBAR_W);
   const msglist = usePanelResize(MSGLIST_W_KEY,  DEFAULT_MSGLIST_W, MIN_W, MAX_MSGLIST_W);
@@ -156,23 +156,21 @@ export function App() {
   }, [paletteOpen, openPalette, closePalette]);
 
   const fetchAccounts = () => {
-    fetch('/api/v1/accounts')
-      .then(async (res) => {
-        if (res.status === 401) {
-          setAuthRequired(true);
-          setAccountsLoaded(true);
-          return null;
-        }
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        return res.json() as Promise<Account[]>;
-      })
+    listAccounts()
       .then((data) => {
-        if (!data) return;
         setAuthRequired(false);
         setAccounts(data);
         setAccountsLoaded(true);
       })
-      .catch(() => { setAccounts([]); setAccountsLoaded(true); });
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 401) {
+          setAuthRequired(true);
+        } else {
+          reportApiError(e);
+          setAccounts([]);
+        }
+        setAccountsLoaded(true);
+      });
   };
 
   useEffect(() => {
@@ -187,6 +185,15 @@ export function App() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+      {apiError && (
+        <div
+          role="alert"
+          onClick={() => setApiError(null)}
+          style={{ position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, padding: '8px 14px', borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--divider)', color: 'var(--text)', fontSize: 13, cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,.25)' }}
+        >
+          {apiError}
+        </div>
+      )}
         <div style={{ width: sidebar.width, flexShrink: 0, overflow: 'hidden', height: '100%' }}>
           <Sidebar onAccountAdded={fetchAccounts} />
         </div>

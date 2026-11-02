@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { api } from '../../api/client';
 import styles from './MessageList.module.css';
 import { MessageRow } from './MessageRow';
 import { useAppStore } from '../../store';
@@ -68,14 +69,7 @@ type BulkAction = 'archive' | 'delete' | 'mark_read' | 'mark_unread';
 interface BulkResponse { processed: number; failed: number; results: { id: string; success: boolean; error?: string }[] }
 
 async function callBulkApi(ids: string[], action: BulkAction): Promise<BulkResponse> {
-  const response = await fetch('/api/v1/messages/bulk', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ids, action }),
-  });
-  const body = await response.json() as BulkResponse & { error?: string };
-  if (!response.ok) throw new Error(body.error || `${response.status} ${response.statusText}`);
-  return body;
+  return api.post<BulkResponse>('/api/v1/messages/bulk', { ids, action });
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -220,7 +214,7 @@ export function MessageList() {
 
       // e — archive focused message
       if (e.key === 'e') {
-        fetch(`/api/v1/messages/${selectedMessageId}/archive`, { method: 'POST' }).then(() => {
+        api.post(`/api/v1/messages/${selectedMessageId}/archive`).then(() => {
           setSelectedMessage(null);
           refetch();
         }).catch(() => undefined);
@@ -229,7 +223,7 @@ export function MessageList() {
 
       // Delete / Backspace — trash focused message
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        fetch(`/api/v1/messages/${selectedMessageId}`, { method: 'DELETE' }).then(() => {
+        api.delete(`/api/v1/messages/${selectedMessageId}`).then(() => {
           setSelectedMessage(null);
           refetch();
         }).catch(() => undefined);
@@ -240,11 +234,7 @@ export function MessageList() {
       if (e.key === 'u') {
         const msg = messages.find((m) => m.id === selectedMessageId);
         if (msg) {
-          fetch(`/api/v1/messages/${selectedMessageId}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ isRead: !msg.isRead }),
-          }).then(() => refetch()).catch(() => undefined);
+          api.patch(`/api/v1/messages/${selectedMessageId}`, { isRead: !msg.isRead }).then(() => refetch()).catch(() => undefined);
         }
         return;
       }
@@ -307,7 +297,7 @@ export function MessageList() {
     {
       label: 'Archive',
       action: () => {
-        fetch(`/api/v1/messages/${msg.id}/archive`, { method: 'POST' })
+        api.post(`/api/v1/messages/${msg.id}/archive`)
           .then(() => { refetch(); refetchSmart(); })
           .catch(() => undefined);
       },
@@ -315,7 +305,7 @@ export function MessageList() {
     {
       label: 'Move to Trash',
       action: () => {
-        fetch(`/api/v1/messages/${msg.id}`, { method: 'DELETE' })
+        api.delete(`/api/v1/messages/${msg.id}`)
           .then(() => { if (selectedMessageId === msg.id) setSelectedMessage(null); refetch(); refetchSmart(); })
           .catch(() => undefined);
       },
@@ -324,41 +314,25 @@ export function MessageList() {
     {
       label: 'Mark Read',
       action: () => {
-        fetch(`/api/v1/messages/${msg.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isRead: true }),
-        }).then(() => { refetch(); refetchSmart(); }).catch(() => undefined);
+        api.patch(`/api/v1/messages/${msg.id}`, { isRead: true }).then(() => { refetch(); refetchSmart(); }).catch(() => undefined);
       },
     },
     {
       label: 'Mark Unread',
       action: () => {
-        fetch(`/api/v1/messages/${msg.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isRead: false }),
-        }).then(() => { refetch(); refetchSmart(); }).catch(() => undefined);
+        api.patch(`/api/v1/messages/${msg.id}`, { isRead: false }).then(() => { refetch(); refetchSmart(); }).catch(() => undefined);
       },
     },
     {
       label: 'Flag',
       action: () => {
-        fetch(`/api/v1/messages/${msg.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isFlagged: true }),
-        }).then(() => { refetch(); refetchSmart(); }).catch(() => undefined);
+        api.patch(`/api/v1/messages/${msg.id}`, { isFlagged: true }).then(() => { refetch(); refetchSmart(); }).catch(() => undefined);
       },
     },
     {
       label: 'Unflag',
       action: () => {
-        fetch(`/api/v1/messages/${msg.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isFlagged: false }),
-        }).then(() => { refetch(); refetchSmart(); }).catch(() => undefined);
+        api.patch(`/api/v1/messages/${msg.id}`, { isFlagged: false }).then(() => { refetch(); refetchSmart(); }).catch(() => undefined);
       },
     },
   ], [selectedMessageId, setSelectedMessage, refetch, refetchSmart]);
@@ -464,7 +438,7 @@ export function MessageList() {
               className={styles.markAllReadBtn}
               title="Mark all as read"
               onClick={() => {
-                fetch(`/api/v1/folders/${selectedFolderId}/mark-read`, { method: 'POST' })
+                api.post(`/api/v1/folders/${selectedFolderId}/mark-read`)
                   .then(() => refetch())
                   .catch(() => undefined);
               }}
