@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import styles from './AccountSetup.module.css';
 import { useAppStore } from '../../store';
 import { apiPost } from '../../hooks/useApi';
+import { api, listAccounts } from '../../api/client';
 import type { Account } from '../../types';
 
 // ── Microsoft icon ────────────────────────────────────────────────────────────
@@ -76,9 +77,7 @@ function MicrosoftAppPasswordForm({ onSuccess, styles: s }: MicrosoftAppPassword
         smtpPort: 587,
         smtpPassword: password,
       });
-      const res = await fetch('/api/v1/accounts');
-      const data = (await res.json()) as Account[];
-      setAccounts(data);
+      setAccounts(await listAccounts());
       onSuccess();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -162,9 +161,7 @@ function ManualForm({ onSuccess, styles: s }: ManualFormProps) {
         smtpPassword: samePassword ? imapPassword : smtpPassword,
       });
       // Refetch accounts list from parent
-      const res = await fetch('/api/v1/accounts');
-      const data = (await res.json()) as Account[];
-      setAccounts(data);
+      setAccounts(await listAccounts());
       onSuccess();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -307,18 +304,7 @@ export function AccountSetup({ onAccountAdded }: AccountSetupProps) {
     done(true);
     setOauthError(null);
     try {
-      const res = await fetch(path);
-      if (!res.ok) {
-        let msg = `OAuth not available (HTTP ${res.status})`;
-        try {
-          const data = (await res.json()) as { error?: string };
-          if (data.error) msg = data.error;
-        } catch { /* empty body or non-JSON error response */ }
-        setOauthError(msg);
-        done(false);
-        return;
-      }
-      const data = (await res.json()) as { url?: string; error?: string };
+      const data = await api.get<{ url?: string; error?: string }>(path, { silent: true });
       if (!data.url) {
         setOauthError(data.error ?? 'OAuth not available');
         done(false);

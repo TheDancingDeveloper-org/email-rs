@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { api, reportApiError } from '../../api/client';
 import styles from './Sidebar.module.css';
 import { useAppStore } from '../../store';
 import { useApi, useSyncEvents } from '../../hooks/useApi';
@@ -338,9 +339,8 @@ export function Sidebar({ onAccountAdded }: SidebarProps) {
     }
     const t = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/v1/search/suggest?q=${encodeURIComponent(q)}`);
-        if (res.ok) {
-          const data = (await res.json()) as SuggestResponse;
+        {
+          const data = await api.get<SuggestResponse>(`/api/v1/search/suggest?q=${encodeURIComponent(q)}`);
           const items: SuggestItem[] = [
             ...data.messages.map((m): SuggestItem => ({ kind: 'message', data: m })),
             ...data.events.map((e): SuggestItem => ({ kind: 'event', data: e })),
@@ -349,7 +349,7 @@ export function Sidebar({ onAccountAdded }: SidebarProps) {
           setShowSuggestions(items.length > 0);
           setActiveSuggestion(-1);
         }
-      } catch { /* ignore */ }
+      } catch (e) { reportApiError(e); }
     }, 150);
     return () => clearTimeout(t);
   }, [searchQuery]);
@@ -643,7 +643,7 @@ export function Sidebar({ onAccountAdded }: SidebarProps) {
                           {
                             label: 'Mark all as read',
                             action: () => {
-                              fetch(`/api/v1/folders/${folder.id}/mark-read`, { method: 'POST' }).catch(() => undefined);
+                              api.post(`/api/v1/folders/${folder.id}/mark-read`).catch(() => undefined);
                             },
                           },
                         ])}
@@ -687,7 +687,7 @@ export function Sidebar({ onAccountAdded }: SidebarProps) {
                               {
                                 label: 'Mark all as read',
                                 action: () => {
-                                  fetch(`/api/v1/folders/${folder.id}/mark-read`, { method: 'POST' }).catch(() => undefined);
+                                  api.post(`/api/v1/folders/${folder.id}/mark-read`).catch(() => undefined);
                                 },
                               },
                             ])}

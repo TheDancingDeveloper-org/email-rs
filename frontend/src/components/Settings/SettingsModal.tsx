@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { api, reportApiError } from '../../api/client';
 import styles from './SettingsModal.module.css';
 import { useAppStore } from '../../store';
 import { DENSITY_MIN, DENSITY_MAX, DENSITY_LABELS } from '../../utils/density';
@@ -79,15 +80,15 @@ function AccountTab({ account, folders, onDeleted }: AccountTabProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/v1/accounts/${account.id}/settings`)
-      .then((r) => r.json())
-      .then((s: AccountSettings) => {
+    api.get<AccountSettings>(`/api/v1/accounts/${account.id}/settings`)
+      .then((s) => {
         setSettings(s);
         setName(s.name);
         setSyncDays(s.syncDaysLimit != null ? String(s.syncDaysLimit) : '');
         setSignature(s.signature ?? '');
       })
-      .catch(() => {
+      .catch((e) => {
+        reportApiError(e);
         setName(account.name);
       });
   }, [account.id, account.name]);
@@ -101,34 +102,26 @@ function AccountTab({ account, folders, onDeleted }: AccountTabProps) {
       else body.syncDaysLimit = null;
       body.signature = signature || null;
 
-      const resp = await fetch(`/api/v1/accounts/${account.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (resp.ok) {
-        setStatus({ msg: 'Saved', ok: true });
-      } else {
-        setStatus({ msg: 'Save failed', ok: false });
-      }
-    } catch {
-      setStatus({ msg: 'Network error', ok: false });
+      await api.patch(`/api/v1/accounts/${account.id}`, body, { silent: true });
+      setStatus({ msg: 'Saved', ok: true });
+    } catch (e) {
+      setStatus({ msg: e instanceof Error ? `Save failed: ${e.message}` : 'Save failed', ok: false });
     } finally {
       setSaving(false);
     }
   }, [account.id, name, syncDays, signature]);
 
   const handleDelete = useCallback(async () => {
-    const resp = await fetch(`/api/v1/accounts/${account.id}`, { method: 'DELETE' });
-    if (resp.ok) onDeleted();
+    try {
+      await api.delete(`/api/v1/accounts/${account.id}`);
+      onDeleted();
+    } catch {
+      // reported to the user by the API client
+    }
   }, [account.id, onDeleted]);
 
   const toggleFolder = useCallback(async (folder: Folder) => {
-    await fetch(`/api/v1/folders/${folder.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isExcluded: !folder.isExcluded }),
-    });
+    await api.patch(`/api/v1/folders/${folder.id}`, { isExcluded: !folder.isExcluded });
     // Optimistically reflect the change; parent can re-fetch later.
     folder.isExcluded = !folder.isExcluded;
   }, []);
@@ -263,10 +256,9 @@ function WebhooksTab() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    fetch('/api/v1/webhooks')
-      .then((r) => r.json())
-      .then((data: Webhook[]) => setWebhooks(data))
-      .catch(() => {});
+    api.get<Webhook[]>('/api/v1/webhooks')
+      .then((data) => setWebhooks(data))
+      .catch(reportApiError);
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -276,40 +268,28 @@ function WebhooksTab() {
     setAdding(true);
     setError(null);
     try {
-      const resp = await fetch('/api/v1/webhooks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      await api.post('/api/v1/webhooks', {
           url: newUrl.trim(),
           secret: newSecret.trim() || null,
           events: newEvents || 'new_message',
-        }),
-      });
-      if (resp.ok) {
-        setNewUrl('');
-        setNewSecret('');
-        load();
-      } else {
-        setError('Failed to add webhook');
-      }
-    } catch {
-      setError('Network error');
+        }, { silent: true });
+      setNewUrl('');
+      setNewSecret('');
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to add webhook');
     } finally {
       setAdding(false);
     }
   }, [newUrl, newSecret, newEvents, load]);
 
   const handleToggle = useCallback(async (wh: Webhook) => {
-    await fetch(`/api/v1/webhooks/${wh.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !wh.enabled }),
-    });
+    await api.patch(`/api/v1/webhooks/${wh.id}`, { enabled: !wh.enabled });
     load();
   }, [load]);
 
   const handleDelete = useCallback(async (id: string) => {
-    await fetch(`/api/v1/webhooks/${id}`, { method: 'DELETE' });
+    await api.delete(`/api/v1/webhooks/${id}`);
     load();
   }, [load]);
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { api, reportApiError } from '../../api/client';
 import styles from './EventDetail.module.css';
 import { useAppStore } from '../../store';
 import type { CalendarEvent, EventLink } from '../../types';
@@ -38,14 +39,13 @@ export function EventDetail({ event, onClose }: Props) {
 
   useEffect(() => {
     setLinksLoading(true);
-    fetch(`/api/v1/calendar/events/${event.id}/links`)
-      .then((r) => r.json() as Promise<EventLink[]>)
+    api.get<EventLink[]>(`/api/v1/calendar/events/${event.id}/links`)
       .then((data) => { setLinks(data); setLinksLoading(false); })
-      .catch(() => { setLinks([]); setLinksLoading(false); });
+      .catch((e) => { reportApiError(e); setLinks([]); setLinksLoading(false); });
   }, [event.id]);
 
   const handleUnlink = async (messageId: string) => {
-    await fetch(`/api/v1/calendar/events/${event.id}/links/${messageId}`, { method: 'DELETE' });
+    await api.delete(`/api/v1/calendar/events/${event.id}/links/${messageId}`);
     setLinks((prev) => prev.filter((l) => l.messageId !== messageId));
   };
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { api } from '../../api/client';
 import styles from './RulesTab.module.css';
 import { ConditionBuilder, defaultConditionGroup } from '../ConditionBuilder/ConditionBuilder';
 import { useAppStore } from '../../store';
@@ -119,17 +120,9 @@ function RuleEditor({ accountId, folders, initial, onSaved, onCancel }: RuleEdit
     try {
       let resp: Response;
       if (initial) {
-        resp = await fetch(`/api/v1/rules/${initial.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
+        resp = await api.put(`/api/v1/rules/${initial.id}`, body);
       } else {
-        resp = await fetch('/api/v1/rules', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
+        resp = await api.post('/api/v1/rules', body);
       }
       if (resp.ok) {
         onSaved();
@@ -241,27 +234,23 @@ export function RulesTab({ accountId }: RulesTabProps) {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    fetch(`/api/v1/rules?account_id=${encodeURIComponent(accountId)}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: RuleDto[]) => {
+    api.get<RuleDto[]>(`/api/v1/rules?account_id=${encodeURIComponent(accountId)}`)
+      .then((data) => {
         setRules(data);
         setError(null);
       })
-      .catch(() => setError('Failed to load rules'));
+      .catch((e) => setError(e instanceof Error ? `Failed to load rules: ${e.message}` : 'Failed to load rules'));
   }, [accountId]);
 
   useEffect(() => { load(); }, [load]);
 
   const handleToggle = useCallback(async (rule: RuleDto) => {
-    await fetch(`/api/v1/rules/${rule.id}/toggle`, { method: 'POST' });
+    await api.post(`/api/v1/rules/${rule.id}/toggle`);
     load();
   }, [load]);
 
   const handleDelete = useCallback(async (id: string) => {
-    await fetch(`/api/v1/rules/${id}`, { method: 'DELETE' });
+    await api.delete(`/api/v1/rules/${id}`);
     load();
   }, [load]);
 

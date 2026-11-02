@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { api } from '../../api/client';
 import styles from './ReadingPane.module.css';
 import { useAppStore } from '../../store';
 import { EMAIL_BODY_SANDBOX } from '../../utils/emailBodySandbox';
@@ -188,13 +189,13 @@ export function ReadingPane() {
 
   const handleArchive = useCallback(async () => {
     if (!selectedMessageId) return;
-    await fetch(`/api/v1/messages/${selectedMessageId}/archive`, { method: 'POST' });
+    await api.post(`/api/v1/messages/${selectedMessageId}/archive`);
     setSelectedMessage(null);
   }, [selectedMessageId, setSelectedMessage]);
 
   const handleDelete = useCallback(async () => {
     if (!selectedMessageId) return;
-    await fetch(`/api/v1/messages/${selectedMessageId}`, { method: 'DELETE' });
+    await api.delete(`/api/v1/messages/${selectedMessageId}`);
     setSelectedMessage(null);
   }, [selectedMessageId, setSelectedMessage]);
 
@@ -202,21 +203,13 @@ export function ReadingPane() {
     if (!selectedMessageId || !message) return;
     const newRead = !isRead;
     setLocalRead(newRead);
-    await fetch(`/api/v1/messages/${selectedMessageId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isRead: newRead }),
-    });
+    await api.patch(`/api/v1/messages/${selectedMessageId}`, { isRead: newRead });
   }, [selectedMessageId, message, isRead]);
 
   const handleSnooze = useCallback(async (until: string) => {
     if (!selectedMessageId) return;
     setSnoozeOpen(false);
-    await fetch(`/api/v1/messages/${selectedMessageId}/snooze`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ until }),
-    });
+    await api.post(`/api/v1/messages/${selectedMessageId}/snooze`, { until });
     setSelectedMessage(null);
   }, [selectedMessageId, setSelectedMessage]);
 
@@ -247,13 +240,13 @@ export function ReadingPane() {
   const handleAddLabel = useCallback(async (labelId: string) => {
     if (!selectedMessageId) return;
     setShowLabelDropdown(false);
-    await fetch(`/api/v1/messages/${selectedMessageId}/labels/${labelId}`, { method: 'POST' });
+    await api.post(`/api/v1/messages/${selectedMessageId}/labels/${labelId}`);
     refetchMessageLabels();
   }, [selectedMessageId, refetchMessageLabels]);
 
   const handleRemoveLabel = useCallback(async (labelId: string) => {
     if (!selectedMessageId) return;
-    await fetch(`/api/v1/messages/${selectedMessageId}/labels/${labelId}`, { method: 'DELETE' });
+    await api.delete(`/api/v1/messages/${selectedMessageId}/labels/${labelId}`);
     refetchMessageLabels();
   }, [selectedMessageId, refetchMessageLabels]);
 
@@ -302,10 +295,7 @@ export function ReadingPane() {
     setSending(true);
     setSendError(null);
     try {
-      const resp = await fetch('/api/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      await api.post('/api/v1/messages', {
           accountId: message.accountId,
           to: [message.fromEmail ?? ''],
           cc: [],
@@ -313,16 +303,10 @@ export function ReadingPane() {
           subject: message.subject ? `Re: ${message.subject}` : 'Re:',
           textBody: replyText,
           inReplyTo: message.messageId,
-        }),
-      });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: 'Send failed' }));
-        setSendError(err.error ?? 'Send failed');
-      } else {
-        setReplyText('');
-      }
+        }, { silent: true });
+      setReplyText('');
     } catch (e) {
-      setSendError('Network error');
+      setSendError(e instanceof Error ? e.message : 'Send failed');
     } finally {
       setSending(false);
     }
@@ -448,20 +432,12 @@ export function ReadingPane() {
           { separator: true },
           { label: 'Mark Read', action: () => {
             if (!selectedMessageId) return;
-            fetch(`/api/v1/messages/${selectedMessageId}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ isRead: true }),
-            }).catch(() => undefined);
+            api.patch(`/api/v1/messages/${selectedMessageId}`, { isRead: true }).catch(() => undefined);
             setLocalRead(true);
           }},
           { label: 'Mark Unread', action: () => {
             if (!selectedMessageId) return;
-            fetch(`/api/v1/messages/${selectedMessageId}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ isRead: false }),
-            }).catch(() => undefined);
+            api.patch(`/api/v1/messages/${selectedMessageId}`, { isRead: false }).catch(() => undefined);
             setLocalRead(false);
           }},
           { label: 'Copy sender email', action: () => {
