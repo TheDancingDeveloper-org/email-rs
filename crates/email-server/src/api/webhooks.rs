@@ -677,6 +677,7 @@ async fn deliver_one(
     let attempt = row.attempts + 1;
     match request.send().await {
         Ok(response) if response.status().is_success() => {
+            crate::metrics::inc(&crate::metrics::WEBHOOK_DELIVERIES);
             let _ = sqlx::query(
                 r#"UPDATE webhook_deliveries
                    SET status = 'delivered', attempts = ?, response_status = ?,
@@ -691,6 +692,7 @@ async fn deliver_one(
             .await;
         }
         result => {
+            crate::metrics::inc(&crate::metrics::WEBHOOK_FAILURES);
             let (response_status, error) = match result {
                 Ok(response) => (
                     Some(i64::from(response.status().as_u16())),

@@ -54,10 +54,7 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        tracing_subscriber::registry()
-            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        init_logging();
 
         #[cfg(feature = "desktop")]
         {
@@ -82,14 +79,27 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        tracing_subscriber::registry()
-            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        init_logging();
         tokio::runtime::Runtime::new()?.block_on(run_server(cfg))?;
     }
 
     Ok(())
+}
+
+/// Text logs by default; `EMAIL_RS_LOG_FORMAT=json` switches to one JSON object per line.
+#[cfg(not(target_os = "windows"))]
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let json =
+        std::env::var("EMAIL_RS_LOG_FORMAT").is_ok_and(|value| value.eq_ignore_ascii_case("json"));
+    let registry = tracing_subscriber::registry().with(filter);
+    if json {
+        registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        registry.with(tracing_subscriber::fmt::layer()).init();
+    }
 }
 
 /// On first startup, re-exec with a clean environment to prevent snap's ancient
