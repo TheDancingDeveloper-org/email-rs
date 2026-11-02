@@ -11,7 +11,7 @@ use email_types::{
 
 use crate::auth::oauth2::StoredToken;
 use crate::error::{AppError, Result};
-use crate::smtp::{self, OutboundAttachment, OutboundMessage, SmtpConfig};
+use crate::smtp::{self, OutboundAttachment, OutboundMessage, SmtpConfig, SmtpTlsMode};
 use crate::state::AppState;
 
 pub async fn send_message(
@@ -56,7 +56,7 @@ pub(crate) async fn build_outbound(
                 port: 587,
                 username: account.email.clone(),
                 password: stored.access_token,
-                use_tls: false,
+                tls_mode: SmtpTlsMode::StartTls,
                 xoauth2: true,
             }
         }
@@ -74,7 +74,7 @@ pub(crate) async fn build_outbound(
                 port,
                 username: account.email.clone(),
                 password,
-                use_tls: false,
+                tls_mode: SmtpTlsMode::StartTls,
                 xoauth2: false,
             }
         }
@@ -92,7 +92,7 @@ pub(crate) async fn build_outbound(
                 port: account.smtp_port.or(account.port).unwrap_or(587) as u16,
                 username: account.email.clone(),
                 password,
-                use_tls: true,
+                tls_mode: SmtpTlsMode::Implicit,
                 xoauth2: false,
             }
         }
