@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { api, reportApiError } from '../../api/client';
 import styles from './CalendarView.module.css';
 import { useAppStore } from '../../store';
 import { EventDetail } from './EventDetail';
@@ -102,10 +103,9 @@ export function CalendarView() {
   useEffect(() => {
     const from = weekStart.toISOString();
     const to = weekEnd.toISOString();
-    fetch(`/api/v1/calendar/events?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
-      .then((r) => r.json() as Promise<CalendarEvent[]>)
+    api.get<CalendarEvent[]>(`/api/v1/calendar/events?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
       .then(setEvents)
-      .catch(() => setEvents([]));
+      .catch((e) => { reportApiError(e); setEvents([]); });
   }, [weekStart, weekEnd]);
 
   // Scroll to 8am on mount
