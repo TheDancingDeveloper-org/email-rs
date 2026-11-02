@@ -383,14 +383,10 @@ async fn sync_folder(
             .map(|ndt| ndt.and_utc())
     });
 
-    // If never synced and a days limit is configured, use that as the floor.
-    let since = if mailbox_reset {
-        None
-    } else {
-        since.or_else(|| {
-            sync_days_limit.map(|days| chrono::Utc::now() - chrono::Duration::days(days))
-        })
-    };
+    // If never synced (including after UIDVALIDITY reset) and a days limit is
+    // configured, use that as the floor rather than downloading the mailbox.
+    let since = since
+        .or_else(|| sync_days_limit.map(|days| chrono::Utc::now() - chrono::Duration::days(days)));
 
     let mut messages = provider.fetch_messages(&db_folder.full_path, since).await?;
     let remote_uids: std::collections::HashSet<u32> = provider
@@ -415,9 +411,21 @@ async fn sync_folder(
     .collect();
     let fetched_uids: std::collections::HashSet<u32> =
         messages.iter().map(|message| message.uid).collect();
+    // With a bounded history window, only repair UIDs allocated after the
+    // cache's high-water mark. An empty cache has no watermark, so its initial
+    // date-windowed fetch is authoritative; otherwise this repair would fetch
+    // every older UID and defeat sync_days_limit. Moves receive a new UID, so
+    // subsequent move repair remains covered without scanning old history.
+    let repair_watermark = sync_days_limit
+        .is_some()
+        .then(|| cached_uids.iter().copied().max())
+        .flatten();
     let missing_uids: Vec<u32> = remote_uids
         .difference(&cached_uids)
         .filter(|uid| !fetched_uids.contains(uid))
+        .filter(|uid| {
+            sync_days_limit.is_none() || repair_watermark.is_some_and(|mark| **uid > mark)
+        })
         .copied()
         .collect();
     if !missing_uids.is_empty() {
@@ -817,6 +825,7 @@ mod tests {
         uid_validity: u32,
         messages: Vec<Message>,
         incremental_uids: Vec<u32>,
+        fetched_by_uid: Vec<Vec<u32>>,
     }
 
     struct MockProvider(Arc<RwLock<RemoteMailbox>>);
@@ -859,6 +868,16 @@ mod tests {
                 .messages
                 .iter()
                 .map(|m| m.uid)
+                .collect())
+        }
+        async fn fetch_messages_by_uid(&self, _: &str, uids: &[u32]) -> Result<Vec<Message>> {
+            let mut state = self.0.write().unwrap();
+            state.fetched_by_uid.push(uids.to_vec());
+            Ok(state
+                .messages
+                .iter()
+                .filter(|message| uids.contains(&message.uid))
+                .cloned()
                 .collect())
         }
         async fn fetch_message_body(&self, _: &str, _: u32) -> Result<MessageBody> {
@@ -932,12 +951,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_folder_days_limit_does_not_repair_fetch_out_of_window_uids() {
+        let (pool, _) = setup().await;
+        sqlx::query("UPDATE folders SET synced_at = NULL WHERE id = 'f'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let remote = Arc::new(RwLock::new(RemoteMailbox {
+            uid_validity: 1,
+            messages: vec![
+                message(10, Some("old@example.test")),
+                message(20, Some("recent@example.test")),
+            ],
+            incremental_uids: vec![20],
+            fetched_by_uid: Vec::new(),
+        }));
+
+        sync_folder(
+            Arc::new(MockProvider(remote.clone())),
+            pool.clone(),
+            "a",
+            folder(&pool).await,
+            Some(30),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            remote.read().unwrap().fetched_by_uid.is_empty(),
+            "the repair path must not bypass the initial date window"
+        );
+        let uids: Vec<i64> = sqlx::query_scalar("SELECT uid FROM messages WHERE folder_id='f'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(uids, vec![20]);
+
+        remote
+            .write()
+            .unwrap()
+            .messages
+            .push(message(30, Some("moved@example.test")));
+        sync_folder(
+            Arc::new(MockProvider(remote.clone())),
+            pool.clone(),
+            "a",
+            folder(&pool).await,
+            Some(30),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(remote.read().unwrap().fetched_by_uid, vec![vec![30]]);
+        let uids: Vec<i64> = sqlx::query_scalar("SELECT uid FROM messages WHERE folder_id='f'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(uids, vec![20, 30]);
+    }
+
+    #[tokio::test]
     async fn sync_contract_handles_missing_message_id_repeat_and_remote_delete() {
         let (pool, db_folder) = setup().await;
         let remote = Arc::new(RwLock::new(RemoteMailbox {
             uid_validity: 1,
             messages: vec![message(10, None), message(11, Some("same@example.test"))],
             incremental_uids: vec![10, 11],
+            fetched_by_uid: Vec::new(),
         }));
         let provider: Arc<dyn MailProvider> = Arc::new(MockProvider(remote.clone()));
         sync_folder(provider.clone(), pool.clone(), "a", db_folder, None)
@@ -982,6 +1062,7 @@ mod tests {
             uid_validity: 1,
             messages: vec![message(20, Some("moved@example.test"))],
             incremental_uids: Vec::new(),
+            fetched_by_uid: Vec::new(),
         }));
         let provider: Arc<dyn MailProvider> = Arc::new(MockProvider(remote.clone()));
         sync_folder(provider.clone(), pool.clone(), "a", db_folder, None)
@@ -1002,6 +1083,7 @@ mod tests {
             uid_validity: 2,
             messages: vec![replacement],
             incremental_uids: Vec::new(),
+            fetched_by_uid: Vec::new(),
         };
         sync_folder(provider, pool.clone(), "a", folder(&pool).await, None)
             .await
