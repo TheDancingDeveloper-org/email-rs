@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use sqlx::SqlitePool;
@@ -14,6 +15,84 @@ use crate::providers::factory::provider_for_account;
 use crate::providers::MailProvider;
 
 static ACCOUNT_SYNC_LOCKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+const MAX_SYNC_CONCURRENCY: usize = 4;
+const ACCOUNT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_BACKOFF: u64 = 30 * 60;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AccountSchedule {
+    failures: u32,
+    next_attempt: u64,
+}
+
+#[derive(Debug, Default)]
+struct SyncSchedule {
+    accounts: HashMap<String, AccountSchedule>,
+}
+
+impl SyncSchedule {
+    fn due(&mut self, account_id: &str, now: u64) -> bool {
+        self.accounts
+            .entry(account_id.to_string())
+            .or_default()
+            .next_attempt
+            <= now
+    }
+
+    fn success(&mut self, account_id: &str, now: u64, interval: u64) {
+        self.accounts.insert(
+            account_id.to_string(),
+            AccountSchedule {
+                failures: 0,
+                next_attempt: now.saturating_add(interval),
+            },
+        );
+    }
+
+    fn failure(&mut self, account_id: &str, now: u64, retry_after: Option<u64>, salt: u64) -> u64 {
+        let state = self.accounts.entry(account_id.to_string()).or_default();
+        state.failures = state.failures.saturating_add(1);
+        let exponential = 2u64.saturating_pow(state.failures.min(10)).min(MAX_BACKOFF);
+        let jitter = deterministic_jitter(account_id, state.failures, salt, exponential / 4);
+        let delay = retry_after
+            .unwrap_or(exponential.saturating_add(jitter))
+            .min(MAX_BACKOFF);
+        state.next_attempt = now.saturating_add(delay);
+        delay
+    }
+}
+
+fn deterministic_jitter(account_id: &str, failures: u32, salt: u64, bound: u64) -> u64 {
+    if bound == 0 {
+        return 0;
+    }
+    let hash = account_id
+        .bytes()
+        .fold(salt ^ failures as u64, |value, byte| {
+            value.wrapping_mul(31).wrapping_add(byte as u64)
+        });
+    hash % (bound + 1)
+}
+
+fn retry_after(error: &AppError) -> Option<u64> {
+    if let AppError::RateLimited {
+        retry_after_secs, ..
+    } = error
+    {
+        return Some(*retry_after_secs);
+    }
+    let text = error.to_string().to_ascii_lowercase();
+    let marker = "retry-after";
+    let start = text.find(marker)? + marker.len();
+    text[start..]
+        .trim_start_matches(|character: char| character == ':' || character.is_whitespace())
+        .split_whitespace()
+        .next()?
+        .trim_matches(|character: char| !character.is_ascii_digit())
+        .parse()
+        .ok()
+}
 
 /// Marks an account as synchronizing for as long as it lives. Dropping it,
 /// whether the sync finished, its future was cancelled or it panicked,
@@ -153,12 +232,7 @@ impl ImapSyncEngine {
             self.poll_interval_secs
         );
 
-        loop {
-            if let Err(e) = self.sync_all_accounts().await {
-                error!("sync cycle error: {}", e);
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(self.poll_interval_secs)).await;
-        }
+        self.run_scheduled(None).await;
     }
 
     /// Run the sync loop indefinitely, broadcasting an event after each account sync.
@@ -168,32 +242,66 @@ impl ImapSyncEngine {
             self.poll_interval_secs
         );
 
+        self.run_scheduled(Some(event_tx)).await;
+    }
+
+    async fn run_scheduled(&self, event_tx: Option<broadcast::Sender<String>>) {
+        let mut schedule = SyncSchedule::default();
         loop {
             let account_ids: Vec<String> = match sqlx::query_scalar("SELECT id FROM accounts")
                 .fetch_all(&self.pool)
                 .await
             {
                 Ok(ids) => ids,
-                Err(e) => {
-                    error!("failed to list accounts: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(self.poll_interval_secs))
-                        .await;
-                    continue;
+                Err(error) => {
+                    error!("failed to list accounts: {}", error);
+                    Vec::new()
                 }
             };
-
-            for id in account_ids {
-                if let Err(e) = self.sync_account_inner(&id, Some(&event_tx)).await {
-                    error!("failed to sync account {}: {}", id, e);
-                } else {
-                    let _ = event_tx.send(format!(
-                        "{{\"type\":\"sync_complete\",\"accountId\":\"{}\"}}",
-                        id
-                    ));
+            let now = monotonic_seconds();
+            let due: Vec<String> = account_ids
+                .into_iter()
+                .filter(|id| schedule.due(id, now))
+                .collect();
+            let results = stream::iter(due.into_iter().map(|id| {
+                let event_tx = event_tx.clone();
+                async move {
+                    let result = tokio::time::timeout(
+                        ACCOUNT_SYNC_TIMEOUT,
+                        self.sync_account_inner(&id, event_tx.as_ref()),
+                    )
+                    .await;
+                    (id, result)
+                }
+            }))
+            .buffer_unordered(MAX_SYNC_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+            for (id, result) in results {
+                match result {
+                    Ok(Ok(())) => {
+                        schedule.success(&id, now, self.poll_interval_secs);
+                        if let Some(tx) = &event_tx {
+                            let _ = tx.send(format!(
+                                "{{\"type\":\"sync_complete\",\"accountId\":\"{}\"}}",
+                                id
+                            ));
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        let delay = schedule.failure(&id, now, retry_after(&error), now);
+                        error!(
+                            "failed to sync account {} (retry in {}s): {}",
+                            id, delay, error
+                        );
+                    }
+                    Err(_) => {
+                        let delay = schedule.failure(&id, now, None, now);
+                        error!("sync timed out for account {} (retry in {}s)", id, delay);
+                    }
                 }
             }
-
-            tokio::time::sleep(tokio::time::Duration::from_secs(self.poll_interval_secs)).await;
+            tokio::time::sleep(Duration::from_secs(self.poll_interval_secs.max(1))).await;
         }
     }
 
@@ -340,6 +448,45 @@ impl ImapSyncEngine {
         }
 
         Ok(())
+    }
+}
+
+fn monotonic_seconds() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    struct FakeClock(u64);
+    impl FakeClock {
+        fn advance(&mut self, seconds: u64) {
+            self.0 += seconds;
+        }
+    }
+
+    #[test]
+    fn failed_account_waits_for_backoff_and_fake_clock() {
+        let mut clock = FakeClock(0);
+        let mut schedule = SyncSchedule::default();
+        assert!(schedule.due("a", clock.0));
+        let delay = schedule.failure("a", clock.0, None, 0);
+        assert!(delay >= 2);
+        assert!(!schedule.due("a", clock.0));
+        clock.advance(delay);
+        assert!(schedule.due("a", clock.0));
+    }
+
+    #[test]
+    fn retry_after_overrides_exponential_backoff() {
+        let mut schedule = SyncSchedule::default();
+        assert_eq!(schedule.failure("a", 10, Some(47), 0), 47);
+        assert_eq!(schedule.accounts["a"].next_attempt, 57);
     }
 }
 
