@@ -1,4 +1,9 @@
-use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
 
 use argon2::{
     password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
@@ -17,9 +22,107 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use tokio::sync::Semaphore;
+
 use crate::{error::AppError, state::AppState};
 
 pub const SESSION_COOKIE: &str = "email_rs_session";
+const LOGIN_FAILURE_LIMIT: u32 = 5;
+const LOGIN_THROTTLE_CAPACITY: usize = 4096;
+const ARGON2_CONCURRENCY: usize = 4;
+const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$BwcHBwcHBwcHBwcHBwcHBw$WLRGUa13/B3MXznFse33FId4O++DaYL6ulYUMEhpRqE";
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum LoginKey {
+    Account(String),
+    Ip(IpAddr),
+}
+
+#[derive(Clone, Debug)]
+struct FailedLogins {
+    failures: u32,
+    blocked_until: Option<Instant>,
+    touched_at: Instant,
+}
+
+/// Bounded failed-login state. Entries are deliberately process-local: it
+/// protects this single-user server without adding attacker-controlled rows to
+/// its database.
+#[derive(Debug)]
+pub struct LoginThrottle {
+    entries: HashMap<LoginKey, FailedLogins>,
+    capacity: usize,
+}
+
+impl Default for LoginThrottle {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity: LOGIN_THROTTLE_CAPACITY,
+        }
+    }
+}
+
+impl LoginThrottle {
+    fn is_blocked(&mut self, account: &str, ip: Option<IpAddr>, now: Instant) -> bool {
+        [
+            Some(LoginKey::Account(account.to_owned())),
+            ip.map(LoginKey::Ip),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|key| {
+            self.entries.get_mut(&key).is_some_and(|entry| {
+                entry.touched_at = now;
+                entry.blocked_until.is_some_and(|until| until > now)
+            })
+        })
+    }
+
+    fn record_failure(&mut self, account: &str, ip: Option<IpAddr>, now: Instant) {
+        for key in [
+            Some(LoginKey::Account(account.to_owned())),
+            ip.map(LoginKey::Ip),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.make_room_for(&key);
+            let entry = self.entries.entry(key).or_insert(FailedLogins {
+                failures: 0,
+                blocked_until: None,
+                touched_at: now,
+            });
+            entry.failures = entry.failures.saturating_add(1);
+            entry.touched_at = now;
+            if entry.failures >= LOGIN_FAILURE_LIMIT {
+                let exponent = (entry.failures - LOGIN_FAILURE_LIMIT).min(6);
+                entry.blocked_until = Some(now + Duration::from_secs(1 << exponent));
+            }
+        }
+    }
+
+    fn record_success(&mut self, account: &str, ip: Option<IpAddr>) {
+        self.entries.remove(&LoginKey::Account(account.to_owned()));
+        if let Some(ip) = ip {
+            self.entries.remove(&LoginKey::Ip(ip));
+        }
+    }
+
+    fn make_room_for(&mut self, key: &LoginKey) {
+        if self.entries.len() < self.capacity || self.entries.contains_key(key) {
+            return;
+        }
+        if let Some(oldest) = self
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.touched_at)
+            .map(|(key, _)| key.clone())
+        {
+            self.entries.remove(&oldest);
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AuthSettings {
@@ -214,22 +317,55 @@ pub async fn bootstrap(
 
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(credentials): Json<Credentials>,
 ) -> Response {
+    let account = credentials.username.trim().to_owned();
+    let peer_ip = peer.map(|Extension(ConnectInfo(peer))| peer.ip());
+    if state
+        .login_throttle
+        .lock()
+        .await
+        .is_blocked(&account, peer_ip, Instant::now())
+    {
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "login temporarily unavailable",
+        );
+    }
     let user = match sqlx::query_as::<_, UserPassword>(
         "SELECT id, password_hash FROM app_users WHERE username = ?",
     )
-    .bind(credentials.username.trim())
+    .bind(&account)
     .fetch_optional(&state.pool)
     .await
     {
-        Ok(Some(user)) => user,
-        Ok(None) => return error(StatusCode::UNAUTHORIZED, "invalid username or password"),
+        Ok(user) => user,
         Err(err) => return AppError::Database(err).into_response(),
     };
-    match verify_password(credentials.password, user.password_hash).await {
-        Ok(true) => issue_session(&state, user.id, credentials.client).await,
-        Ok(false) => error(StatusCode::UNAUTHORIZED, "invalid username or password"),
+    // Always run Argon2, including for an unknown account, so response timing
+    // does not disclose whether a username exists.
+    let encoded = user.as_ref().map_or_else(
+        || DUMMY_PASSWORD_HASH.to_owned(),
+        |user| user.password_hash.clone(),
+    );
+    match verify_password(credentials.password, encoded).await {
+        Ok(true) if user.is_some() => {
+            state
+                .login_throttle
+                .lock()
+                .await
+                .record_success(&account, peer_ip);
+            issue_session(&state, user.expect("checked above").id, credentials.client).await
+        }
+        Ok(_) => {
+            state
+                .login_throttle
+                .lock()
+                .await
+                .record_failure(&account, peer_ip, Instant::now());
+            error(StatusCode::UNAUTHORIZED, "invalid username or password")
+        }
         Err(err) => err.into_response(),
     }
 }
@@ -588,6 +724,10 @@ fn validate_password(password: &str) -> Result<(), &'static str> {
 }
 
 async fn hash_password(password: String) -> Result<String, AppError> {
+    let permit = argon2_semaphore()
+        .acquire()
+        .await
+        .map_err(|_| AppError::Auth("password hashing unavailable".into()))?;
     tokio::task::spawn_blocking(move || {
         // A random v4 UUID is a 16-byte salt, the PHC-recommended length.
         Argon2::default()
@@ -597,9 +737,14 @@ async fn hash_password(password: String) -> Result<String, AppError> {
     })
     .await
     .map_err(|error| AppError::Auth(format!("password hashing task failed: {error}")))?
+    .inspect(|_| drop(permit))
 }
 
 async fn verify_password(password: String, encoded: String) -> Result<bool, AppError> {
+    let permit = argon2_semaphore()
+        .acquire()
+        .await
+        .map_err(|_| AppError::Auth("password verification unavailable".into()))?;
     tokio::task::spawn_blocking(move || {
         let parsed = PasswordHash::new(&encoded)
             .map_err(|error| AppError::Auth(format!("stored password hash is invalid: {error}")))?;
@@ -609,6 +754,12 @@ async fn verify_password(password: String, encoded: String) -> Result<bool, AppE
     })
     .await
     .map_err(|error| AppError::Auth(format!("password verification task failed: {error}")))?
+    .inspect(|_| drop(permit))
+}
+
+fn argon2_semaphore() -> &'static Semaphore {
+    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Semaphore::new(ARGON2_CONCURRENCY))
 }
 
 fn new_token() -> String {
@@ -726,6 +877,91 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         (headers, body)
+    }
+
+    #[tokio::test]
+    async fn login_is_throttled_after_repeated_account_failures() {
+        let state = setup().await;
+        seed_user(&state).await;
+        for attempt in 0..LOGIN_FAILURE_LIMIT {
+            let (status, _, body) = send(
+                crate::api::router(Arc::clone(&state)),
+                Method::POST,
+                "/app-auth/login",
+                Some(serde_json::json!({
+                    "username": "admin",
+                    "password": "definitely not the password",
+                })),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "attempt {attempt}: {body}"
+            );
+            assert_eq!(body["error"], "invalid username or password");
+        }
+        let (status, _, body) = send(
+            crate::api::router(state),
+            Method::POST,
+            "/app-auth/login",
+            Some(serde_json::json!({
+                "username": "admin",
+                "password": "correct horse battery",
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert_eq!(body["error"], "login temporarily unavailable");
+    }
+
+    #[tokio::test]
+    async fn unknown_and_known_accounts_return_the_same_login_error() {
+        let state = setup().await;
+        seed_user(&state).await;
+        let mut errors = Vec::new();
+        for username in ["admin", "missing-user"] {
+            let (status, _, body) = send(
+                crate::api::router(Arc::clone(&state)),
+                Method::POST,
+                "/app-auth/login",
+                Some(serde_json::json!({
+                    "username": username,
+                    "password": "definitely not the password",
+                })),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            errors.push(body);
+        }
+        assert_eq!(errors[0], errors[1]);
+    }
+
+    #[test]
+    fn login_throttle_is_bounded_and_tracks_ip_independently() {
+        let mut throttle = LoginThrottle {
+            entries: HashMap::new(),
+            capacity: 8,
+        };
+        let now = Instant::now();
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+        for index in 0..LOGIN_FAILURE_LIMIT {
+            throttle.record_failure(&format!("user-{index}"), Some(ip), now);
+        }
+        assert!(throttle.entries.len() <= 8);
+        assert!(throttle.is_blocked("another-user", Some(ip), now));
+        for index in 5..20 {
+            throttle.record_failure(&format!("user-{index}"), None, now);
+        }
+        assert!(throttle.entries.len() <= 8);
+    }
+
+    #[test]
+    fn argon2_work_is_capped() {
+        assert_eq!(argon2_semaphore().available_permits(), ARGON2_CONCURRENCY);
     }
 
     #[tokio::test]
