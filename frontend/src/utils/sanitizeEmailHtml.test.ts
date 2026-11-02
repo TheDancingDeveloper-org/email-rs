@@ -26,4 +26,16 @@ describe('sanitizeEmailHtml', () => {
     expect(sanitized).toContain('target="_blank"');
     expect(sanitized).toContain('rel="noopener noreferrer"');
   });
+
+  it('strips javascript URLs, srcset, and unsafe style attributes', () => {
+    const sanitized = sanitizeEmailHtml(
+      '<a href="javascript:alert(1)">Bad</a><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP" srcset="x 1x"><p style="color:red;background-image:url(https://tracker)">Text</p>',
+      false,
+    );
+
+    expect(sanitized).not.toContain('javascript:');
+    expect(sanitized).not.toContain('srcset');
+    expect(sanitized).not.toContain('background-image');
+    expect(sanitized).toContain('<p>Text</p>');
+  });
 });
