@@ -1057,6 +1057,7 @@ pub(crate) fn begin_full_message_load(
     state.attachment_busy = false;
     state.attachment_notice = None;
     state.attachment_error = None;
+    state.pending_external_link = None;
     state.show_external_images = state
         .messages
         .iter()
