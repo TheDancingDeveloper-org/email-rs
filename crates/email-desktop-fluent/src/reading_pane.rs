@@ -1425,7 +1425,12 @@ pub(crate) fn reading_placeholder(
 pub(crate) fn selected_document(state: &NativeAppState) -> RichDocument {
     if let Some(message) = state.selected_full_message.as_ref() {
         if let Some(body) = message.body.as_ref() {
-            if let Some(text) = body.text_body.as_deref() {
+            if body
+                .html_body
+                .as_ref()
+                .is_none_or(|html| html.trim().is_empty())
+                && body.text_body.as_deref().is_some()
+            {
                 let (clean, quoted) = conversation_body(body);
                 let display = if state.quoted_text_expanded {
                     quoted
@@ -1437,7 +1442,6 @@ pub(crate) fn selected_document(state: &NativeAppState) -> RichDocument {
                 if !display.trim().is_empty() {
                     return RichDocument::from_plain_text(&display);
                 }
-                let _ = text;
             }
             if let Some(html) = body
                 .html_body
