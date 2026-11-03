@@ -537,10 +537,39 @@ fn remote_images_are_blocked_by_default_and_allowlist_is_case_insensitive() {
         .remote_image_allowlist
         .insert("alice@example.test".to_string());
     let mut trusted = full_message("trusted", "inbox", true, false);
-    trusted.authentication_results.spf = AuthenticationResultStatus::Pass;
+    trusted.authentication_results.dmarc = AuthenticationResultStatus::Pass;
+    trusted.from_email = Some("alice@example.test".to_string());
     state.selected_full_message = Some(trusted);
     assert!(sender_images_allowed(&state, " Alice@EXAMPLE.TEST "));
     assert!(!sender_images_allowed(&state, "bob@example.test"));
+}
+
+#[test]
+fn allowlist_is_applied_by_the_real_full_message_load_path() {
+    let mut state = NativeAppState::default();
+    state
+        .remote_image_allowlist
+        .insert("alice@example.test".to_string());
+    let mut summary = message("trusted", "inbox", true);
+    summary.from_email = Some("alice@example.test".to_string());
+    state.messages = vec![summary];
+    let mut loaded = full_message("trusted", "inbox", true, false);
+    loaded.from_email = Some("alice@example.test".to_string());
+    loaded.authentication_results.dmarc = AuthenticationResultStatus::Pass;
+
+    begin_full_message_load(&mut state, "trusted").expect("request");
+    assert!(!state.show_external_images);
+    let request = state.selected_message_resource.current_request().unwrap();
+    assert!(apply_loaded_full_message(
+        &mut state,
+        request,
+        "trusted",
+        LoadedFullMessage {
+            message: loaded,
+            labels: Vec::new(),
+        },
+    ));
+    assert!(state.show_external_images);
 }
 
 #[test]
@@ -1596,6 +1625,31 @@ fn selected_document_prefers_safe_html_body() {
     assert!(text.contains("Body & more"));
     assert!(!text.contains("alert"));
     assert!(!text.contains("Text fallback"));
+}
+
+#[test]
+fn selected_document_strips_external_images_unless_shown() {
+    let mut full = full_message("message", "inbox", true, false);
+    full.body = Some(MessageBody {
+        html_body: Some(
+            r#"<p>hi</p><img src="https://tracker.example/p.png"><img src="cid:logo">"#.to_string(),
+        ),
+        ..Default::default()
+    });
+    let mut state = NativeAppState {
+        selected_full_message: Some(full),
+        show_external_images: false,
+        ..NativeAppState::default()
+    };
+    let remote = |doc: &RichDocument| {
+        doc.blocks.iter().any(|block| {
+            matches!(block, RichDocumentBlock::Image { src, .. } if src.starts_with("https://"))
+        })
+    };
+
+    assert!(!remote(&selected_document(&state)));
+    state.show_external_images = true;
+    assert!(remote(&selected_document(&state)));
 }
 
 #[test]
