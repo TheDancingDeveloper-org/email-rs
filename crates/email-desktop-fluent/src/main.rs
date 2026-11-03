@@ -130,6 +130,27 @@ fn main() -> Result<()> {
         cx.bind_keys(native_key_bindings());
 
         let state_entity = cx.new(|_| initial_state.clone());
+        let shutdown_state = state_entity.clone();
+        let _ = cx.on_app_quit(move |cx| {
+            let pending = shutdown_state.update(cx, |state, _| {
+                state.pending_undo.take().map(|pending| {
+                    let request = begin_sync_complete_refresh(state);
+                    (state.api_base_url.clone(), request, pending.mutation)
+                })
+            });
+            let task = pending.map(|(base_url, request, mutation)| {
+                cx.background_executor()
+                    .spawn(async move { mutate_message_and_refresh(base_url, mutation, request) })
+            });
+            async move {
+                // App shutdown waits for this future, ensuring the mutation
+                // reaches the server even when the five-second undo timer has
+                // not fired yet.
+                if let Some(task) = task {
+                    let _ = task.await;
+                }
+            }
+        });
         start_initial_account_load(&state_entity, cx);
 
         let modal_host = cx.new(ModalHost::new);
