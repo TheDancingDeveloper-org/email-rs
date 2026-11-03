@@ -10,6 +10,7 @@ mod calendar_actions;
 mod compose;
 mod compose_view;
 mod conversation;
+mod export;
 mod message_actions;
 mod message_list;
 mod palette;
@@ -49,6 +50,8 @@ use compose::*;
 use compose_view::*;
 #[allow(unused_imports)]
 use conversation::*;
+#[allow(unused_imports)]
+use export::*;
 #[allow(unused_imports)]
 use message_actions::*;
 #[allow(unused_imports)]
