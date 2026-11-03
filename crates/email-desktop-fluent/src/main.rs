@@ -13,6 +13,7 @@ mod conversation;
 mod export;
 mod message_actions;
 mod message_list;
+mod message_move;
 mod palette;
 mod preferences;
 mod prelude;
@@ -56,6 +57,8 @@ use export::*;
 use message_actions::*;
 #[allow(unused_imports)]
 use message_list::*;
+#[allow(unused_imports)]
+use message_move::*;
 #[allow(unused_imports)]
 use palette::*;
 #[allow(unused_imports)]
