@@ -1057,7 +1057,12 @@ pub(crate) fn begin_full_message_load(
     state.attachment_busy = false;
     state.attachment_notice = None;
     state.attachment_error = None;
-    state.show_external_images = false;
+    state.show_external_images = state
+        .messages
+        .iter()
+        .find(|message| message.id == message_id)
+        .and_then(|message| message.from_email.as_deref())
+        .is_some_and(|email| sender_images_allowed(state, email));
     state.last_error = None;
     Some(state.selected_message_resource.begin_load())
 }
