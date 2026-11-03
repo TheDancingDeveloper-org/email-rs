@@ -201,6 +201,7 @@ pub(crate) struct PendingUndo {
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub(crate) struct NativeAppState {
+    pub(crate) show_shortcut_help: bool,
     pub(crate) api_base_url: String,
     pub(crate) auth_required: bool,
     pub(crate) theme: ThemeMode,
@@ -248,6 +249,7 @@ pub(crate) struct NativeAppState {
 impl Default for NativeAppState {
     fn default() -> Self {
         Self {
+            show_shortcut_help: false,
             api_base_url: String::new(),
             auth_required: true,
             theme: ThemeMode::Dark,

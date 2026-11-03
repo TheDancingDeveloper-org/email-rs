@@ -1189,6 +1189,54 @@ pub(crate) fn reading_placeholder(
                                     }
                                 })
                         })
+                        .child({
+                            let state_entity = state_entity.clone();
+                            Button::new("reading-view-source")
+                                .label("View source")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(move |_, _, app_cx| {
+                                    if let Some(message) =
+                                        state_entity.read(app_cx).selected_full_message.as_ref()
+                                    {
+                                        if let Err(error) = open_source(message) {
+                                            tracing::warn!(%error, "unable to open message source");
+                                        }
+                                    }
+                                })
+                        })
+                        .child({
+                            let state_entity = state_entity.clone();
+                            Button::new("reading-save-eml")
+                                .label("Save .eml")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(move |_, _, app_cx| {
+                                    if let Some(message) =
+                                        state_entity.read(app_cx).selected_full_message.as_ref()
+                                    {
+                                        if let Err(error) = save_eml(message) {
+                                            tracing::warn!(%error, "unable to save message source");
+                                        }
+                                    }
+                                })
+                        })
+                        .child({
+                            let state_entity = state_entity.clone();
+                            Button::new("reading-print")
+                                .label("Print")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(move |_, _, app_cx| {
+                                    if let Some(message) =
+                                        state_entity.read(app_cx).selected_full_message.as_ref()
+                                    {
+                                        if let Err(error) = print_message(message) {
+                                            tracing::warn!(%error, "unable to print message");
+                                        }
+                                    }
+                                })
+                        })
                         .child(
                             Button::new("reading-toggle-read")
                                 .label(if is_read { "Mark unread" } else { "Mark read" })
