@@ -6,8 +6,8 @@ import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
+from ...models.cursor_messages_response import CursorMessagesResponse
 from ...models.error_response import ErrorResponse
-from ...models.message import Message
 from ...types import UNSET, Response, Unset
 
 
@@ -17,6 +17,7 @@ def _get_kwargs(
     page: int | Unset = UNSET,
     per_page: int | Unset = UNSET,
     unread_only: bool | Unset = UNSET,
+    cursor: str | Unset = UNSET,
 ) -> dict[str, Any]:
 
     params: dict[str, Any] = {}
@@ -26,6 +27,8 @@ def _get_kwargs(
     params["per_page"] = per_page
 
     params["unread_only"] = unread_only
+
+    params["cursor"] = cursor
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -42,14 +45,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | list[Message] | None:
+) -> CursorMessagesResponse | ErrorResponse | None:
     if response.status_code == 200:
-        response_200 = []
-        _response_200 = response.json()
-        for response_200_item_data in _response_200:
-            response_200_item = Message.from_dict(response_200_item_data)
-
-            response_200.append(response_200_item)
+        response_200 = CursorMessagesResponse.from_dict(response.json())
 
         return response_200
 
@@ -71,7 +69,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | list[Message]]:
+) -> Response[CursorMessagesResponse | ErrorResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -87,20 +85,22 @@ def sync_detailed(
     page: int | Unset = UNSET,
     per_page: int | Unset = UNSET,
     unread_only: bool | Unset = UNSET,
-) -> Response[ErrorResponse | list[Message]]:
+    cursor: str | Unset = UNSET,
+) -> Response[CursorMessagesResponse | ErrorResponse]:
     """
     Args:
         id (str):
         page (int | Unset):
         per_page (int | Unset):
         unread_only (bool | Unset):
+        cursor (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | list[Message]]
+        Response[CursorMessagesResponse | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
@@ -108,6 +108,7 @@ def sync_detailed(
         page=page,
         per_page=per_page,
         unread_only=unread_only,
+        cursor=cursor,
     )
 
     response = client.get_httpx_client().request(
@@ -124,20 +125,22 @@ def sync(
     page: int | Unset = UNSET,
     per_page: int | Unset = UNSET,
     unread_only: bool | Unset = UNSET,
-) -> ErrorResponse | list[Message] | None:
+    cursor: str | Unset = UNSET,
+) -> CursorMessagesResponse | ErrorResponse | None:
     """
     Args:
         id (str):
         page (int | Unset):
         per_page (int | Unset):
         unread_only (bool | Unset):
+        cursor (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | list[Message]
+        CursorMessagesResponse | ErrorResponse
     """
 
     return sync_detailed(
@@ -146,6 +149,7 @@ def sync(
         page=page,
         per_page=per_page,
         unread_only=unread_only,
+        cursor=cursor,
     ).parsed
 
 
@@ -156,20 +160,22 @@ async def asyncio_detailed(
     page: int | Unset = UNSET,
     per_page: int | Unset = UNSET,
     unread_only: bool | Unset = UNSET,
-) -> Response[ErrorResponse | list[Message]]:
+    cursor: str | Unset = UNSET,
+) -> Response[CursorMessagesResponse | ErrorResponse]:
     """
     Args:
         id (str):
         page (int | Unset):
         per_page (int | Unset):
         unread_only (bool | Unset):
+        cursor (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | list[Message]]
+        Response[CursorMessagesResponse | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
@@ -177,6 +183,7 @@ async def asyncio_detailed(
         page=page,
         per_page=per_page,
         unread_only=unread_only,
+        cursor=cursor,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -191,20 +198,22 @@ async def asyncio(
     page: int | Unset = UNSET,
     per_page: int | Unset = UNSET,
     unread_only: bool | Unset = UNSET,
-) -> ErrorResponse | list[Message] | None:
+    cursor: str | Unset = UNSET,
+) -> CursorMessagesResponse | ErrorResponse | None:
     """
     Args:
         id (str):
         page (int | Unset):
         per_page (int | Unset):
         unread_only (bool | Unset):
+        cursor (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | list[Message]
+        CursorMessagesResponse | ErrorResponse
     """
 
     return (
@@ -214,5 +223,6 @@ async def asyncio(
             page=page,
             per_page=per_page,
             unread_only=unread_only,
+            cursor=cursor,
         )
     ).parsed

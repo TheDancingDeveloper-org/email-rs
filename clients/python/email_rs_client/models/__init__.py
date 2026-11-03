@@ -10,6 +10,7 @@ from .auth_client_kind import AuthClientKind
 from .auth_credentials import AuthCredentials
 from .auth_identity import AuthIdentity
 from .auth_session import AuthSession
+from .authentication_result_status import AuthenticationResultStatus
 from .authorize_response import AuthorizeResponse
 from .bulk_action import BulkAction
 from .bulk_request import BulkRequest
@@ -27,17 +28,20 @@ from .create_label_body import CreateLabelBody
 from .create_rule_body import CreateRuleBody
 from .create_webhook import CreateWebhook
 from .created_integration_token import CreatedIntegrationToken
+from .cursor_messages_response import CursorMessagesResponse
 from .draft_request import DraftRequest
 from .draft_response import DraftResponse
 from .error_response import ErrorResponse
 from .event_link import EventLink
 from .folder import Folder
 from .full_message import FullMessage
+from .index_admin_response import IndexAdminResponse
 from .integration_event import IntegrationEvent
 from .integration_token import IntegrationToken
 from .label import Label
 from .message import Message
 from .message_attachment import MessageAttachment
+from .message_authentication_results import MessageAuthenticationResults
 from .message_body import MessageBody
 from .message_suggestion import MessageSuggestion
 from .outgoing_attachment import OutgoingAttachment
@@ -69,6 +73,7 @@ __all__ = (
     "Attendee",
     "AuthClientKind",
     "AuthCredentials",
+    "AuthenticationResultStatus",
     "AuthIdentity",
     "AuthorizeResponse",
     "AuthSession",
@@ -88,17 +93,20 @@ __all__ = (
     "CreateLabelBody",
     "CreateRuleBody",
     "CreateWebhook",
+    "CursorMessagesResponse",
     "DraftRequest",
     "DraftResponse",
     "ErrorResponse",
     "EventLink",
     "Folder",
     "FullMessage",
+    "IndexAdminResponse",
     "IntegrationEvent",
     "IntegrationToken",
     "Label",
     "Message",
     "MessageAttachment",
+    "MessageAuthenticationResults",
     "MessageBody",
     "MessageSuggestion",
     "OutgoingAttachment",

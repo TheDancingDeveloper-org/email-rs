@@ -10,6 +10,7 @@ from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.message_attachment import MessageAttachment
+    from ..models.message_authentication_results import MessageAuthenticationResults
     from ..models.message_body import MessageBody
 
 
@@ -31,10 +32,13 @@ class FullMessage:
         occurrence_id (str):
         uid (int):
         attachments (list[MessageAttachment] | Unset):
+        authentication_results (MessageAuthenticationResults | Unset):
         body (MessageBody | None | Unset):
         date (None | str | Unset):
+        display_name_spoofing (bool | Unset):
         from_email (None | str | Unset):
         from_name (None | str | Unset):
+        from_reply_to_domain_mismatch (bool | Unset):
         message_id (None | str | Unset):
         preview (None | str | Unset):
         subject (None | str | Unset):
@@ -53,10 +57,13 @@ class FullMessage:
     occurrence_id: str
     uid: int
     attachments: list[MessageAttachment] | Unset = UNSET
+    authentication_results: MessageAuthenticationResults | Unset = UNSET
     body: MessageBody | None | Unset = UNSET
     date: None | str | Unset = UNSET
+    display_name_spoofing: bool | Unset = UNSET
     from_email: None | str | Unset = UNSET
     from_name: None | str | Unset = UNSET
+    from_reply_to_domain_mismatch: bool | Unset = UNSET
     message_id: None | str | Unset = UNSET
     preview: None | str | Unset = UNSET
     subject: None | str | Unset = UNSET
@@ -94,6 +101,10 @@ class FullMessage:
                 attachments_item = attachments_item_data.to_dict()
                 attachments.append(attachments_item)
 
+        authentication_results: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.authentication_results, Unset):
+            authentication_results = self.authentication_results.to_dict()
+
         body: dict[str, Any] | None | Unset
         if isinstance(self.body, Unset):
             body = UNSET
@@ -108,6 +119,8 @@ class FullMessage:
         else:
             date = self.date
 
+        display_name_spoofing = self.display_name_spoofing
+
         from_email: None | str | Unset
         if isinstance(self.from_email, Unset):
             from_email = UNSET
@@ -119,6 +132,8 @@ class FullMessage:
             from_name = UNSET
         else:
             from_name = self.from_name
+
+        from_reply_to_domain_mismatch = self.from_reply_to_domain_mismatch
 
         message_id: None | str | Unset
         if isinstance(self.message_id, Unset):
@@ -168,14 +183,20 @@ class FullMessage:
         )
         if attachments is not UNSET:
             field_dict["attachments"] = attachments
+        if authentication_results is not UNSET:
+            field_dict["authenticationResults"] = authentication_results
         if body is not UNSET:
             field_dict["body"] = body
         if date is not UNSET:
             field_dict["date"] = date
+        if display_name_spoofing is not UNSET:
+            field_dict["displayNameSpoofing"] = display_name_spoofing
         if from_email is not UNSET:
             field_dict["fromEmail"] = from_email
         if from_name is not UNSET:
             field_dict["fromName"] = from_name
+        if from_reply_to_domain_mismatch is not UNSET:
+            field_dict["fromReplyToDomainMismatch"] = from_reply_to_domain_mismatch
         if message_id is not UNSET:
             field_dict["messageId"] = message_id
         if preview is not UNSET:
@@ -192,6 +213,7 @@ class FullMessage:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.message_attachment import MessageAttachment  # noqa: PLC0415
+        from ..models.message_authentication_results import MessageAuthenticationResults  # noqa: PLC0415
         from ..models.message_body import MessageBody  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -224,6 +246,13 @@ class FullMessage:
 
                 attachments.append(attachments_item)
 
+        _authentication_results = d.pop("authenticationResults", UNSET)
+        authentication_results: MessageAuthenticationResults | Unset
+        if isinstance(_authentication_results, Unset):
+            authentication_results = UNSET
+        else:
+            authentication_results = MessageAuthenticationResults.from_dict(_authentication_results)
+
         def _parse_body(data: object) -> MessageBody | None | Unset:
             if data is None:
                 return data
@@ -250,6 +279,8 @@ class FullMessage:
 
         date = _parse_date(d.pop("date", UNSET))
 
+        display_name_spoofing = d.pop("displayNameSpoofing", UNSET)
+
         def _parse_from_email(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -267,6 +298,8 @@ class FullMessage:
             return cast(None | str | Unset, data)
 
         from_name = _parse_from_name(d.pop("fromName", UNSET))
+
+        from_reply_to_domain_mismatch = d.pop("fromReplyToDomainMismatch", UNSET)
 
         def _parse_message_id(data: object) -> None | str | Unset:
             if data is None:
@@ -325,10 +358,13 @@ class FullMessage:
             occurrence_id=occurrence_id,
             uid=uid,
             attachments=attachments,
+            authentication_results=authentication_results,
             body=body,
             date=date,
+            display_name_spoofing=display_name_spoofing,
             from_email=from_email,
             from_name=from_name,
+            from_reply_to_domain_mismatch=from_reply_to_domain_mismatch,
             message_id=message_id,
             preview=preview,
             subject=subject,
