@@ -1011,6 +1011,12 @@ pub(crate) fn reading_placeholder(
         .or_else(|| summary.map(|message| message.is_read))
         .unwrap_or(true);
     let message_id = selected_id.unwrap_or_default();
+    let has_quoted_text = state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| message.body.as_ref())
+        .map(|body| conversation_body(body).1.is_some())
+        .unwrap_or(false);
     let action_busy = state.messages_resource.is_loading() || state.compose.sending;
     let quick_reply_has_body = !quick_reply_input.read(cx).text().trim().is_empty();
     let quick_reply_has_recipient =
@@ -1058,6 +1064,20 @@ pub(crate) fn reading_placeholder(
         .border_l_1()
         .border_color(colors.stroke_neutral_subtle)
         .bg(colors.surface)
+        .when(has_quoted_text, |pane| {
+            let state_entity = state_entity.clone();
+            pane.child(
+                div().mx(px(20.0)).mb(px(4.0)).child(
+                    Button::new("reading-toggle-quoted-text")
+                        .label(quote_toggle_label(state.quoted_text_expanded))
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .on_click(move |_, _, app_cx| {
+                            toggle_quoted_text(&state_entity, app_cx);
+                        }),
+                ),
+            )
+        })
         .child(
             div()
                 .px(px(20.0))
@@ -1380,6 +1400,20 @@ pub(crate) fn reading_placeholder(
 pub(crate) fn selected_document(state: &NativeAppState) -> RichDocument {
     if let Some(message) = state.selected_full_message.as_ref() {
         if let Some(body) = message.body.as_ref() {
+            if let Some(text) = body.text_body.as_deref() {
+                let (clean, quoted) = conversation_body(body);
+                let display = if state.quoted_text_expanded {
+                    quoted
+                        .map(|quote| format!("{clean}\n\n{quote}"))
+                        .unwrap_or_else(|| clean.to_string())
+                } else {
+                    clean.to_string()
+                };
+                if !display.trim().is_empty() {
+                    return RichDocument::from_plain_text(&display);
+                }
+                let _ = text;
+            }
             if let Some(html) = body
                 .html_body
                 .as_ref()
