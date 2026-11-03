@@ -13,13 +13,19 @@ FROM mirror.gcr.io/library/rust:1.98-slim-bookworm@sha256:ff521445a372125ed4f76e
 RUN apt-get update && apt-get install -y ca-certificates pkg-config && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
-COPY crates/ ./crates/
-# A stalled crates download once hung CI inside BuildKit: bound each request,
-# retry, and fetch in its own layer before the build.
+COPY crates/email-server/ ./crates/email-server/
+COPY crates/email-types/ ./crates/email-types/
+# A stalled crates download once hung CI inside BuildKit: bound each request
+# and retry.
 ENV CARGO_HTTP_TIMEOUT=60 \
-    CARGO_NET_RETRY=5 \
-    CARGO_HTTP_LOW_SPEED_LIMIT=10
-RUN cargo fetch --locked
+    CARGO_NET_RETRY=5
+# The server needs only email-types. Cargo resolves every workspace member, so
+# the desktop and UI crates would pull the large fluent-gpui and fluent2-egui
+# git dependencies. Drop those members and prune their entries from the lock
+# file (versions of the remaining packages are kept), then build --locked.
+RUN sed -i -e '/"crates\/email-client"/d' -e '/"crates\/email-desktop-fluent"/d' -e '/"crates\/email-ui"/d' Cargo.toml \
+    && cargo metadata --format-version 1 >/dev/null \
+    && ! grep -q 'source = "git' Cargo.lock
 RUN CARGO_BUILD_JOBS=4 cargo build --release --locked -p email-server
 
 # ── Stage 3: Runtime ─────────────────────────────────��─────────────────────────
