@@ -426,6 +426,35 @@ fn native_key_bindings_include_ctrl_and_cmd_palette_shortcuts() {
 }
 
 #[test]
+fn shortcut_registry_has_no_conflicts() {
+    assert!(shortcut_conflicts().is_empty());
+}
+
+#[test]
+fn shortcut_registry_covers_gmail_and_superhuman_actions() {
+    let actions = SHORTCUT_COVERAGE
+        .iter()
+        .map(|(_, action, _)| *action)
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "Reply",
+        "Archive",
+        "Forward",
+        "Compose",
+        "Search",
+        "Star",
+        "Mark read",
+        "Shortcut help",
+        "Cycle pane",
+    ] {
+        assert!(
+            actions.contains(required),
+            "missing shortcut coverage for {required}"
+        );
+    }
+}
+
+#[test]
 fn advanced_search_key_action_matches_web_modal_shortcuts() {
     assert_eq!(
         advanced_search_key_action("escape", false),
