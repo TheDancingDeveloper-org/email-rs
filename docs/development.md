@@ -9,7 +9,7 @@ The workspace contains:
 - `email-server` — Axum server, SQLite cache, providers, sync, and browser assets;
 - `email-desktop-fluent` — native FluentGUI application.
 
-All FluentGUI crates are fetched from `https://github.com/AusAgentSmith-org/fluent-gpui.git` at exact commit `f601e54b4e58e416bc7495a75468b82af9a10545`. `Cargo.lock` is generated from these canonical dependencies. A sibling checkout must never be needed by CI, Docker, or a clean clone.
+All FluentGUI crates are fetched from `https://github.com/thedancingdeveloper/fluent-gpui.git` at exact commit `2b7730635a872df1981ef4f3ceef1427a5776555`. `Cargo.lock` is generated from these canonical dependencies. A sibling checkout must never be needed by CI, Docker, or a clean clone.
 
 ## Linux dependencies
 
@@ -50,7 +50,7 @@ dependencies. A separate clean checkout builds the production server image.
 Developers changing both repositories may create `.cargo/config.toml`, which is ignored by this repository:
 
 ```toml
-[patch."https://github.com/AusAgentSmith-org/fluent-gpui.git"]
+[patch."https://github.com/thedancingdeveloper/fluent-gpui.git"]
 fluent-app = { path = "../../FluentGUI/crates/fluent-app" }
 fluent-core = { path = "../../FluentGUI/crates/fluent-core" }
 fluent-layout = { path = "../../FluentGUI/crates/fluent-layout" }

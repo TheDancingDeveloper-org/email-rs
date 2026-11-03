@@ -211,7 +211,7 @@ pub(crate) fn start_initial_account_load(state_entity: &Entity<NativeAppState>, 
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_initial_account_load(
@@ -232,9 +232,7 @@ pub(crate) fn start_initial_account_load(state_entity: &Entity<NativeAppState>, 
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native initial account load: {err}");
-                }
+                });
             }
         })
         .detach();
