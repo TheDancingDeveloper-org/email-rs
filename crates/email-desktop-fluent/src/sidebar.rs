@@ -51,6 +51,13 @@ impl Render for SidebarPlaceholder {
         sync_searchbox_value(&self.searchbox, &state.search.query, cx);
 
         let mut account_list = div().flex().flex_col().gap(px(2.0));
+        let focus_ring = colors.accent;
+        let locations = std::sync::Arc::new(message_location_index(&state));
+        let keyboard_payload = state
+            .selected_message_ids
+            .first()
+            .map(|id| move_payload_for_row(&state, id))
+            .filter(|payload| !payload.message_ids.is_empty());
         for account in &state.accounts {
             let folders = state
                 .folders_by_account
@@ -103,18 +110,39 @@ impl Render for SidebarPlaceholder {
                         app_cx.notify();
                     },
                 );
+                let drop_state = self.state.clone();
+                let drop_folder_id = folder.id.clone();
+                let policy_folder = folder.clone();
+                let policy_locations = locations.clone();
+                let focus = self
+                    .label_drop_focus
+                    .entry(format!("folder-{}", folder.id))
+                    .or_insert_with(|| cx.focus_handle())
+                    .clone();
+                let row = sidebar_nav_row(
+                    folder_label(folder),
+                    selected,
+                    Some(folder.unread_count),
+                    folder_indent(folder),
+                    folder_icon(folder),
+                    cx,
+                )
+                .h(px(density.sidebar_row_height.max(28.0)))
+                .cursor_pointer();
                 account_list = account_list.child(
-                    sidebar_nav_row(
-                        folder_label(folder),
-                        selected,
-                        Some(folder.unread_count),
-                        folder_indent(folder),
-                        folder_icon(folder),
-                        cx,
+                    drop_target(
+                        row,
+                        SharedString::from(format!("sidebar-folder-{folder_key}")),
+                        focus,
+                        focus_ring,
+                        DropPolicy::new(move |payload: &MessageDragPayload| {
+                            folder_drop_accepts(payload, &policy_folder, &policy_locations)
+                        }),
+                        move |payload, _operation, _, app_cx| {
+                            start_folder_drop(&drop_state, payload, &drop_folder_id, app_cx)
+                        },
+                        keyboard_payload.clone(),
                     )
-                    .h(px(density.sidebar_row_height.max(28.0)))
-                    .id(SharedString::from(format!("sidebar-folder-{folder_key}")))
-                    .cursor_pointer()
                     .on_click(move |_, _, app_cx| {
                         start_message_collection_load(
                             &state_entity,

@@ -13,7 +13,8 @@ use axum::{
 use base64::Engine;
 use email_types::{
     AuthenticationResultStatus, BulkAction, BulkRequest, BulkResponse, BulkResult,
-    Message as MessageRow, MessageAttachment, MessageAuthenticationResults, PatchMessageRequest,
+    Message as MessageRow, MessageAttachment, MessageAuthenticationResults, MoveMessageRequest,
+    PatchMessageRequest,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -321,6 +322,53 @@ pub async fn archive_message(
     }
 
     Ok(Json(serde_json::json!({ "status": "archived" })))
+}
+
+pub async fn move_message(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+    Json(body): Json<MoveMessageRequest>,
+) -> Result<Json<serde_json::Value>> {
+    ensure_message_exists(&state.pool, &message_id).await?;
+    let event = message_event_context(&state.pool, &message_id).await?;
+    let source_folder_id = message_folder_id(&state.pool, &message_id).await?;
+    let destination: Option<(String,)> = sqlx::query_as(
+        r#"SELECT f.full_path FROM folders f
+           JOIN messages m ON m.account_id = f.account_id
+           WHERE m.id = ? AND f.id = ?"#,
+    )
+    .bind(&message_id)
+    .bind(&body.folder_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let (destination,) = destination.ok_or_else(|| {
+        AppError::Validation("destination folder not found in the message's account".to_string())
+    })?;
+    if source_folder_id.as_deref() == Some(body.folder_id.as_str()) {
+        return Err(AppError::Validation(
+            "message is already in that folder".to_string(),
+        ));
+    }
+
+    let (source, uid, provider) = load_provider(&state, &message_id).await?;
+    provider.move_message(&source, uid, &destination).await?;
+    // The destination UID is chosen by the server; the next sync creates the
+    // destination occurrence, as for archive.
+    sqlx::query("DELETE FROM messages WHERE id = ?")
+        .bind(&message_id)
+        .execute(&state.pool)
+        .await?;
+    if let Some(source_folder_id) = source_folder_id {
+        refresh_folder_counts(&state.pool, &source_folder_id).await?;
+    }
+    if let Some((account_id, mut data)) = event {
+        if let Some(object) = data.as_object_mut() {
+            object.insert("destination".to_string(), destination.into());
+        }
+        fire_webhooks(&state.pool, &account_id, "message.moved", data).await;
+    }
+
+    Ok(Json(serde_json::json!({ "status": "moved" })))
 }
 
 pub async fn list_attachments(
@@ -2039,6 +2087,72 @@ mod tests {
         // IMAP MOVE chooses a new destination UID. The next synchronization
         // creates the destination occurrence with the correct mailbox identity.
         assert_eq!(folder_counts(&state.pool, "fld-archive").await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn move_to_folder_removes_source_occurrence_and_refreshes_counts() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld-inbox", "acc1", Some("inbox")).await;
+        seed_folder(&state.pool, "fld-projects", "acc1", None).await;
+        seed_message(&state.pool, "move-msg", "acc1", "fld-inbox").await;
+
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/move-msg/move",
+            Some(serde_json::json!({"folderId": "fld-projects"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "moved");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id = 'move-msg'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
+        assert_eq!(folder_counts(&state.pool, "fld-inbox").await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn move_rejects_same_folder_and_foreign_account_folder() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        sqlx::query(
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('acc2','T','u2@example.com','test','test')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        seed_folder(&state.pool, "fld-inbox", "acc1", Some("inbox")).await;
+        seed_folder(&state.pool, "fld-other", "acc2", None).await;
+        seed_message(&state.pool, "stay-msg", "acc1", "fld-inbox").await;
+
+        for folder in ["fld-inbox", "fld-other", "missing"] {
+            let (status, _) = req(
+                crate::api::router(Arc::clone(&state)),
+                "POST",
+                "/messages/stay-msg/move",
+                Some(serde_json::json!({ "folderId": folder })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{folder}");
+        }
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/nope/move",
+            Some(serde_json::json!({"folderId": "fld-inbox"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id = 'stay-msg'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 1);
     }
 
     #[tokio::test]

@@ -4,9 +4,9 @@ use email_types::{
     AuthCredentials, AuthIdentity, AuthSession, AuthorizeResponse, BulkRequest, BulkResponse,
     CalendarEvent, ConditionField, ConditionGroup, Contact, CreateAccount, CreateLabelBody,
     CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, MatchMode,
-    Message, MessageAttachment, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
-    SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, SyncEvent,
-    UpdateAccount, UpdateLabelBody, UpdateWebhook,
+    Message, MessageAttachment, MoveMessageRequest, PatchFolder, PatchMessageRequest, RuleDto,
+    SearchResponse, SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse,
+    SyncEvent, UpdateAccount, UpdateLabelBody, UpdateWebhook,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Serialize};
@@ -378,6 +378,17 @@ impl EmailClient {
     pub async fn archive_message(&self, message_id: &str) -> Result<serde_json::Value> {
         self.request(Method::POST, &format!("messages/{message_id}/archive"))
             .await
+    }
+
+    pub async fn move_message(&self, message_id: &str, folder_id: &str) -> Result<StatusResponse> {
+        self.json(
+            Method::POST,
+            &format!("messages/{message_id}/move"),
+            &MoveMessageRequest {
+                folder_id: folder_id.to_string(),
+            },
+        )
+        .await
     }
 
     pub async fn bulk_messages(&self, body: &BulkRequest) -> Result<BulkResponse> {
@@ -797,6 +808,43 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn move_message_posts_folder_id_to_the_move_route() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut chunk).unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if text.contains("\"folderId\"") || n == 0 {
+                    break;
+                }
+            }
+            let body = "{\"status\":\"moved\"}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8_lossy(&buf).to_string()
+        });
+
+        let client = EmailClient::new(&base).unwrap();
+        let status = client.move_message("m1", "f9").await.unwrap();
+        assert_eq!(status.status, "moved");
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("POST /api/v1/messages/m1/move "),
+            "{request}"
+        );
+        assert!(request.contains("{\"folderId\":\"f9\"}"), "{request}");
     }
 
     #[tokio::test]
