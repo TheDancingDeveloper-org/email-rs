@@ -145,7 +145,7 @@ pub(crate) fn start_compose_signature_load(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     if state.compose.revision != revision || !state.compose.open {
                         return;
                     }
@@ -163,9 +163,7 @@ pub(crate) fn start_compose_signature_load(
                         }
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native compose signature: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -226,7 +224,7 @@ pub(crate) fn start_recipient_suggestions_load(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(contacts) => {
                             apply_loaded_recipient_suggestions(state, request, &query, contacts);
@@ -236,9 +234,7 @@ pub(crate) fn start_recipient_suggestions_load(
                         }
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native recipient suggestions: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -452,7 +448,7 @@ pub(crate) fn start_quick_reply_send(
                 let sent = result.is_ok();
                 let error = result.err().map(|err| err.to_string());
 
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     state.compose.sending = false;
                     if sent {
                         state.compose.open = false;
@@ -464,15 +460,13 @@ pub(crate) fn start_quick_reply_send(
                         state.last_error = Some(error);
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native quick reply status: {err}");
-                }
+                });
 
                 if sent {
-                    let _ = quick_reply_input.update(&mut async_cx, |input, cx| {
+                    quick_reply_input.update(&mut async_cx, |input, cx| {
                         input.set_value("", cx);
                     });
-                    let _ = recipient_input.update(&mut async_cx, |input, cx| {
+                    recipient_input.update(&mut async_cx, |input, cx| {
                         input.set_tokens(Vec::<TokenInputToken>::new(), cx);
                     });
                 }
@@ -529,7 +523,7 @@ pub(crate) fn start_compose_send(
                 let sent = result.is_ok();
                 let error = result.err().map(|err| err.to_string());
 
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     state.compose.sending = false;
                     if sent {
                         reset_compose_state(state, Some("Message sent".to_string()));
@@ -539,24 +533,22 @@ pub(crate) fn start_compose_send(
                         state.last_error = Some(error);
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native compose send status: {err}");
-                }
+                });
 
                 if sent {
-                    let _ = to_input.update(&mut async_cx, |input, cx| {
+                    to_input.update(&mut async_cx, |input, cx| {
                         input.set_tokens(Vec::<TokenInputToken>::new(), cx);
                     });
-                    let _ = cc_input.update(&mut async_cx, |input, cx| {
+                    cc_input.update(&mut async_cx, |input, cx| {
                         input.set_tokens(Vec::<TokenInputToken>::new(), cx);
                     });
-                    let _ = bcc_input.update(&mut async_cx, |input, cx| {
+                    bcc_input.update(&mut async_cx, |input, cx| {
                         input.set_tokens(Vec::<TokenInputToken>::new(), cx);
                     });
-                    let _ = subject_input.update(&mut async_cx, |input, cx| {
+                    subject_input.update(&mut async_cx, |input, cx| {
                         input.set_value("", cx);
                     });
-                    let _ = body_input.update(&mut async_cx, |input, cx| {
+                    body_input.update(&mut async_cx, |input, cx| {
                         input.set_value("", cx);
                     });
                 }

@@ -106,7 +106,7 @@ pub(crate) fn start_attachment_action(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     if state.selected_message.as_deref() != Some(message_id.as_str()) {
                         return;
                     }
@@ -141,9 +141,7 @@ pub(crate) fn start_attachment_action(
                         }
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native attachment action: {err}");
-                }
+                });
             }
         })
         .detach();

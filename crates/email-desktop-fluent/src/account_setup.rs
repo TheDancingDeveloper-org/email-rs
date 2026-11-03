@@ -164,7 +164,7 @@ impl Render for AccountSetupModal {
             return div();
         }
         if !self.focused_on_open {
-            window.focus(&self.focus_handle);
+            window.focus(&self.focus_handle, cx);
             self.focused_on_open = true;
         }
 
