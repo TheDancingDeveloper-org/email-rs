@@ -14,19 +14,19 @@
     "cap:open:android": "cap open android"
   },
   "dependencies": {
-    "@aparajita/capacitor-secure-storage": "^6.0.1",
-    "@capacitor/android": "^6.0.0",
-    "@capacitor/core": "^6.0.0",
-    "@capacitor/ios": "^6.0.0",
-    "@capacitor/status-bar": "^6.0.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "zustand": "^4.5.2"
+    "@aparajita/capacitor-secure-storage": "^8.0.1",
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
+    "@capacitor/ios": "^8.6.0",
+    "@capacitor/status-bar": "^8.0.4",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zustand": "^5.0.16"
   },
   "devDependencies": {
-    "@capacitor/cli": "^6.0.0",
-    "@types/react": "^18.3.1",
-    "@types/react-dom": "^18.3.0",
+    "@capacitor/cli": "^8.6.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "jsdom": "^27.4.0",
     "typescript": "^5.4.5",
