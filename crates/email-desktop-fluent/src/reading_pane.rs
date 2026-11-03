@@ -986,6 +986,10 @@ pub(crate) fn reading_placeholder(
     let subject = selected_subject(state);
     let sender = selected_sender(state);
     let sender_email = selected_from_email(state);
+    let trust_status = selected_trust_status(state);
+    let sender_warnings = selected_sender_warnings(state);
+    let external_links = selected_external_links(state);
+    let link_warnings = selected_link_warnings(state);
     let date = selected_date(state).unwrap_or_else(|| "No date".to_string());
     let summary = selected_summary(state);
     let is_flagged = state
@@ -1131,6 +1135,26 @@ pub(crate) fn reading_placeholder(
                         ),
                 )
                 .child(reading_label_row(state_entity, state, &message_id, cx))
+                .when_some(trust_status, |header, status| {
+                    header.child(
+                        div()
+                            .pt(px(6.0))
+                            .text_size(px(typography.caption.size))
+                            .text_color(if status.contains("failed") {
+                                colors.status_error
+                            } else {
+                                colors.on_subtle
+                            })
+                            .child(status),
+                    )
+                })
+                .children(sender_warnings.into_iter().map(|warning| {
+                    div()
+                        .pt(px(6.0))
+                        .text_size(px(typography.caption.size))
+                        .text_color(colors.status_error)
+                        .child(warning)
+                }))
                 .child(
                     div()
                         .pt(px(10.0))
@@ -1383,18 +1407,6 @@ pub(crate) fn reading_placeholder(
                             }),
                     )
                     .when(sender_email.is_some(), |banner| {
-                        let state_entity = state_entity.clone();
-                        banner.child(
-                            Button::new("reading-allow-sender-images")
-                                .label("Always show from sender")
-                                .appearance(ButtonAppearance::Subtle)
-                                .size(ButtonSize::Compact)
-                                .on_click(move |_, _, app_cx| {
-                                    allow_selected_sender_images(&state_entity, app_cx);
-                                }),
-                        )
-                    })
-                    .when(sender_email.is_some(), |banner| {
                         banner.child(
                             Button::new("reading-allow-sender-images")
                                 .label("Always show from sender")
@@ -1405,6 +1417,84 @@ pub(crate) fn reading_placeholder(
                                 }),
                         )
                     }),
+            )
+        })
+        .children(link_warnings.into_iter().map(|warning| {
+            div()
+                .mx(px(20.0))
+                .mt(px(8.0))
+                .p(px(8.0))
+                .rounded(px(4.0))
+                .bg(colors.neutral)
+                .text_size(px(typography.caption.size))
+                .text_color(colors.status_error)
+                .child(warning)
+        }))
+        .when(!external_links.is_empty(), |pane| {
+            pane.child(
+                div()
+                    .mx(px(20.0))
+                    .mt(px(8.0))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .children(external_links.into_iter().enumerate().map(|(index, link)| {
+                        let state_entity = state_entity.clone();
+                        let label = format!(
+                            "Open {}…",
+                            url_domain(&link).unwrap_or_else(|| "external link".to_string())
+                        );
+                        Button::new(("reading-external-link", index))
+                            .label(label)
+                            .appearance(ButtonAppearance::Subtle)
+                            .size(ButtonSize::Compact)
+                            .on_click(move |_, _, app_cx| {
+                                request_external_link_confirmation(
+                                    &state_entity,
+                                    link.clone(),
+                                    app_cx,
+                                );
+                            })
+                    })),
+            )
+        })
+        .when_some(state.pending_external_link.clone(), |pane, link| {
+            let open_state = state_entity.clone();
+            let cancel_state = state_entity.clone();
+            let domain = url_domain(&link).unwrap_or_else(|| "an external site".to_string());
+            pane.child(
+                div()
+                    .mx(px(20.0))
+                    .mt(px(8.0))
+                    .p(px(10.0))
+                    .rounded(px(4.0))
+                    .bg(colors.neutral)
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(format!("Open external link to {domain}?")),
+                    )
+                    .child(
+                        Button::new("reading-confirm-external-link")
+                            .label("Open link")
+                            .appearance(ButtonAppearance::Accent)
+                            .size(ButtonSize::Compact)
+                            .on_click(move |_, _, app_cx| {
+                                confirm_external_link(&open_state, app_cx)
+                            }),
+                    )
+                    .child(
+                        Button::new("reading-cancel-external-link")
+                            .label("Cancel")
+                            .appearance(ButtonAppearance::Subtle)
+                            .size(ButtonSize::Compact)
+                            .on_click(move |_, _, app_cx| {
+                                cancel_external_link(&cancel_state, app_cx)
+                            }),
+                    ),
             )
         })
         .child(
@@ -1550,6 +1640,175 @@ pub(crate) fn selected_document(state: &NativeAppState) -> RichDocument {
         .and_then(|message| message.preview.as_deref())
         .unwrap_or("Select a message to load its body.");
     RichDocument::from_plain_text(preview)
+}
+
+pub(crate) fn selected_trust_status(state: &NativeAppState) -> Option<String> {
+    let auth = &state.selected_full_message.as_ref()?.authentication_results;
+    let status = |value| match value {
+        AuthenticationResultStatus::Pass => "pass",
+        AuthenticationResultStatus::Fail => "failed",
+        AuthenticationResultStatus::None => "not reported",
+    };
+    Some(format!(
+        "Sender authentication: SPF {}, DKIM {}, DMARC {}",
+        status(auth.spf),
+        status(auth.dkim),
+        status(auth.dmarc)
+    ))
+}
+
+pub(crate) fn selected_sender_warnings(state: &NativeAppState) -> Vec<String> {
+    let Some(message) = state.selected_full_message.as_ref() else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    if message.from_reply_to_domain_mismatch {
+        warnings.push("Warning: the From and Reply-To domains differ.".to_string());
+    }
+    if message.display_name_spoofing {
+        warnings
+            .push("Warning: the sender display name may impersonate another address.".to_string());
+    }
+    warnings
+}
+
+pub(crate) fn selected_link_warnings(state: &NativeAppState) -> Vec<String> {
+    let Some(html) = state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| message.body.as_ref())
+        .and_then(|body| body.html_body.as_deref())
+    else {
+        return Vec::new();
+    };
+    link_safety_warnings(html)
+}
+
+pub(crate) fn selected_external_links(state: &NativeAppState) -> Vec<String> {
+    let Some(html) = state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| message.body.as_ref())
+        .and_then(|body| body.html_body.as_deref())
+    else {
+        return Vec::new();
+    };
+    document_links(&RichDocument::from_html_fragment_lossy(html))
+}
+
+fn document_links(document: &RichDocument) -> Vec<String> {
+    let mut links = Vec::new();
+    for block in &document.blocks {
+        let runs = match block {
+            RichDocumentBlock::Heading { runs, .. }
+            | RichDocumentBlock::Paragraph(runs)
+            | RichDocumentBlock::Preformatted(runs) => runs,
+            _ => continue,
+        };
+        for run in runs {
+            if let Some(link) = run
+                .link
+                .as_deref()
+                .filter(|link| link.starts_with("https://") || link.starts_with("http://"))
+            {
+                links.push(link.to_string());
+            }
+        }
+    }
+    links.sort();
+    links.dedup();
+    links
+}
+
+pub(crate) fn link_safety_warnings(html: &str) -> Vec<String> {
+    let document = RichDocument::from_html_fragment_lossy(html);
+    let mut warnings = Vec::new();
+    for block in document.blocks {
+        let runs = match block {
+            RichDocumentBlock::Heading { runs, .. }
+            | RichDocumentBlock::Paragraph(runs)
+            | RichDocumentBlock::Preformatted(runs) => runs,
+            _ => continue,
+        };
+        for run in runs {
+            let Some(href) = run.link.as_deref() else {
+                continue;
+            };
+            let href_domain = url_domain(href);
+            let text_domain = url_domain(run.text.as_ref());
+            if href_domain.as_deref().is_some_and(suspicious_idn_domain) {
+                warnings.push(
+                    "Link uses a punycode, internationalized, or mixed-script domain; verify it before opening."
+                        .to_string(),
+                );
+            }
+            if let (Some(href_domain), Some(text_domain)) = (href_domain, text_domain) {
+                if !same_domain(&href_domain, &text_domain) {
+                    warnings.push(format!(
+                        "Link text names {text_domain}, but the link opens {href_domain}."
+                    ));
+                }
+            }
+        }
+    }
+    warnings.sort();
+    warnings.dedup();
+    warnings
+}
+
+fn url_domain(value: &str) -> Option<String> {
+    let value = value.trim();
+    let authority = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))?;
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = authority
+        .split(['/', '?', '#', ':'])
+        .next()?
+        .trim_matches('.');
+    (host.contains('.') && !host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+fn suspicious_idn_domain(domain: &str) -> bool {
+    let has_non_ascii_letters = domain.chars().any(|c| !c.is_ascii() && c.is_alphabetic());
+    domain.split('.').any(|label| label.starts_with("xn--")) || has_non_ascii_letters
+}
+
+fn same_domain(left: &str, right: &str) -> bool {
+    left.trim_start_matches("www.") == right.trim_start_matches("www.")
+}
+
+pub(crate) fn request_external_link_confirmation(
+    state_entity: &Entity<NativeAppState>,
+    link: String,
+    app_cx: &mut App,
+) {
+    state_entity.update(app_cx, |state, cx| {
+        state.pending_external_link = Some(link);
+        cx.notify();
+    });
+}
+
+pub(crate) fn cancel_external_link(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.pending_external_link = None;
+        cx.notify();
+    });
+}
+
+pub(crate) fn confirm_external_link(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let link = state_entity.update(app_cx, |state, cx| {
+        let link = state.pending_external_link.take();
+        cx.notify();
+        link
+    });
+    if let Some(link) = link {
+        if let Err(error) = open_url_in_browser(&link) {
+            tracing::warn!("failed to open external link: {error:#}");
+        }
+    }
 }
 
 /// Returns true if the full message body contains external (http/https) images
