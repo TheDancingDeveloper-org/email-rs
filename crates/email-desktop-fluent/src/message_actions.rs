@@ -233,7 +233,7 @@ pub(crate) fn start_message_collection_load_with_preferred(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_loaded_message_collection(state, request, loaded);
@@ -244,9 +244,7 @@ pub(crate) fn start_message_collection_load_with_preferred(
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native message collection load: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -435,7 +433,7 @@ pub(crate) fn start_sync_complete_refresh(state_entity: &Entity<NativeAppState>,
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_loaded_sync_refresh(state, request, loaded);
@@ -446,9 +444,7 @@ pub(crate) fn start_sync_complete_refresh(state_entity: &Entity<NativeAppState>,
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native sync refresh: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -476,7 +472,7 @@ pub(crate) fn start_mark_folder_read(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_loaded_sync_refresh(state, request, loaded);
@@ -487,9 +483,7 @@ pub(crate) fn start_mark_folder_read(
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native mark-folder-read refresh: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -517,7 +511,7 @@ pub(crate) fn start_message_mutation_and_refresh(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_loaded_sync_refresh(state, request, loaded);
@@ -528,9 +522,7 @@ pub(crate) fn start_message_mutation_and_refresh(
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native message mutation refresh: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -563,7 +555,7 @@ pub(crate) fn start_message_label_mutation(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     if state.selected_message.as_deref() != Some(message_id.as_str()) {
                         return;
                     }
@@ -588,9 +580,7 @@ pub(crate) fn start_message_label_mutation(
                         }
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native message label mutation: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -625,7 +615,7 @@ pub(crate) fn start_bulk_message_action(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(outcome) => {
                             apply_loaded_sync_refresh(state, request, outcome.loaded);
@@ -637,9 +627,7 @@ pub(crate) fn start_bulk_message_action(
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native bulk message action refresh: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -986,7 +974,7 @@ pub(crate) fn start_full_message_load(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_loaded_full_message(state, request, &message_id, loaded);
@@ -997,9 +985,7 @@ pub(crate) fn start_full_message_load(
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native message load: {err}");
-                }
+                });
             }
         })
         .detach();

@@ -207,7 +207,7 @@ pub(crate) fn start_calendar_events_load(state_entity: &Entity<NativeAppState>, 
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(events) => {
                             apply_loaded_calendar_events(state, request, events);
@@ -217,9 +217,7 @@ pub(crate) fn start_calendar_events_load(state_entity: &Entity<NativeAppState>, 
                         }
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native calendar events load: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -250,7 +248,7 @@ pub(crate) fn start_calendar_event_links_load(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(links) => {
                             apply_loaded_calendar_event_links(state, request, &event_id, links);
@@ -260,9 +258,7 @@ pub(crate) fn start_calendar_event_links_load(
                         }
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native calendar event links load: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -293,7 +289,7 @@ pub(crate) fn start_calendar_event_unlink(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(links) => {
                             apply_loaded_calendar_event_links(state, request, &event_id, links);
@@ -303,9 +299,7 @@ pub(crate) fn start_calendar_event_unlink(
                         }
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native calendar event unlink: {err}");
-                }
+                });
             }
         })
         .detach();
