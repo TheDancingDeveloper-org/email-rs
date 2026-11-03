@@ -14,6 +14,12 @@ RUN apt-get update && apt-get install -y ca-certificates pkg-config && rm -rf /v
 WORKDIR /app
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
+# A stalled crates download once hung CI inside BuildKit: bound each request,
+# retry, and fetch in its own layer before the build.
+ENV CARGO_HTTP_TIMEOUT=60 \
+    CARGO_NET_RETRY=5 \
+    CARGO_HTTP_LOW_SPEED_LIMIT=10
+RUN cargo fetch --locked
 RUN CARGO_BUILD_JOBS=4 cargo build --release --locked -p email-server
 
 # ── Stage 3: Runtime ─────────────────────────────────��─────────────────────────
