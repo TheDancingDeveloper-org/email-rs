@@ -986,8 +986,6 @@ pub(crate) fn reading_placeholder(
     let subject = selected_subject(state);
     let sender = selected_sender(state);
     let sender_email = selected_from_email(state);
-    let trust_status = selected_trust_status(state);
-    let link_warnings = selected_link_warnings(state);
     let date = selected_date(state).unwrap_or_else(|| "No date".to_string());
     let summary = selected_summary(state);
     let is_flagged = state
@@ -1133,28 +1131,6 @@ pub(crate) fn reading_placeholder(
                         ),
                 )
                 .child(reading_label_row(state_entity, state, &message_id, cx))
-                .when_some(trust_status, |header, status| {
-                    header.child(
-                        div()
-                            .pt(px(6.0))
-                            .text_size(px(typography.caption.size))
-                            .text_color(if status.contains("failed") {
-                                colors.status_error
-                            } else {
-                                colors.on_subtle
-                            })
-                            .child(status),
-                    )
-                })
-                .when_some(link_warnings.first().cloned(), |header, warning| {
-                    header.child(
-                        div()
-                            .pt(px(6.0))
-                            .text_size(px(typography.caption.size))
-                            .text_color(colors.status_error)
-                            .child(warning),
-                    )
-                })
                 .child(
                     div()
                         .pt(px(10.0))
@@ -1407,6 +1383,18 @@ pub(crate) fn reading_placeholder(
                             }),
                     )
                     .when(sender_email.is_some(), |banner| {
+                        let state_entity = state_entity.clone();
+                        banner.child(
+                            Button::new("reading-allow-sender-images")
+                                .label("Always show from sender")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(move |_, _, app_cx| {
+                                    allow_selected_sender_images(&state_entity, app_cx);
+                                }),
+                        )
+                    })
+                    .when(sender_email.is_some(), |banner| {
                         banner.child(
                             Button::new("reading-allow-sender-images")
                                 .label("Always show from sender")
@@ -1562,94 +1550,6 @@ pub(crate) fn selected_document(state: &NativeAppState) -> RichDocument {
         .and_then(|message| message.preview.as_deref())
         .unwrap_or("Select a message to load its body.");
     RichDocument::from_plain_text(preview)
-}
-
-pub(crate) fn selected_trust_status(state: &NativeAppState) -> Option<String> {
-    let auth = state
-        .selected_full_message
-        .as_ref()?
-        .authentication_results
-        .clone();
-    let statuses = [
-        ("SPF", auth.spf),
-        ("DKIM", auth.dkim),
-        ("DMARC", auth.dmarc),
-    ];
-    let present: Vec<_> = statuses
-        .iter()
-        .filter(|(_, status)| !matches!(status, AuthenticationResultStatus::None))
-        .map(|(name, status)| format!("{name} {status:?}"))
-        .collect();
-    (!present.is_empty()).then(|| format!("Sender authentication: {}", present.join(" · ")))
-}
-
-pub(crate) fn selected_link_warnings(state: &NativeAppState) -> Vec<String> {
-    let Some(html) = state
-        .selected_full_message
-        .as_ref()
-        .and_then(|message| message.body.as_ref())
-        .and_then(|body| body.html_body.as_deref())
-    else {
-        return Vec::new();
-    };
-    link_safety_warnings(html)
-}
-
-pub(crate) fn link_safety_warnings(html: &str) -> Vec<String> {
-    let document = RichDocument::from_html_fragment_lossy(html);
-    let mut warnings = Vec::new();
-    for block in document.blocks {
-        let runs = match block {
-            RichDocumentBlock::Heading { runs, .. }
-            | RichDocumentBlock::Paragraph(runs)
-            | RichDocumentBlock::Preformatted(runs) => runs,
-            _ => continue,
-        };
-        for run in runs {
-            let Some(href) = run.link.as_deref() else {
-                continue;
-            };
-            let href_domain = url_domain(href);
-            let text_domain = url_domain(run.text.as_ref());
-            if href_domain
-                .as_deref()
-                .is_some_and(|domain| domain.starts_with("xn--") || !domain.is_ascii())
-            {
-                warnings.push(
-                    "Link uses a punycode or internationalized domain; verify it before opening."
-                        .to_string(),
-                );
-            }
-            if let (Some(href_domain), Some(text_domain)) = (href_domain, text_domain) {
-                if !same_domain(&href_domain, &text_domain) {
-                    warnings.push(format!(
-                        "Link text names {text_domain}, but the link opens {href_domain}."
-                    ));
-                }
-            }
-        }
-    }
-    warnings.sort();
-    warnings.dedup();
-    warnings
-}
-
-fn url_domain(value: &str) -> Option<String> {
-    let value = value.trim();
-    let authority = value
-        .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))?;
-    let host = authority
-        .split(['/', '?', '#', ':'])
-        .next()?
-        .trim_matches('.');
-    (host.contains('.') && !host.is_empty()).then(|| host.to_ascii_lowercase())
-}
-
-fn same_domain(left: &str, right: &str) -> bool {
-    left == right
-        || left.strip_prefix("www.") == Some(right)
-        || right.strip_prefix("www.") == Some(left)
 }
 
 /// Returns true if the full message body contains external (http/https) images
