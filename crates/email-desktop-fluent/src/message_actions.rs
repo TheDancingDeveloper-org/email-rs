@@ -1082,12 +1082,9 @@ pub(crate) fn begin_full_message_load(
     state.attachment_notice = None;
     state.attachment_error = None;
     state.pending_external_link = None;
-    state.show_external_images = state
-        .messages
-        .iter()
-        .find(|message| message.id == message_id)
-        .and_then(|message| message.from_email.as_deref())
-        .is_some_and(|email| sender_images_allowed(state, email));
+    // Authentication results are available only on the full message. The
+    // loaded-message path applies the allowlist decision authoritatively.
+    state.show_external_images = false;
     state.last_error = None;
     Some(state.selected_message_resource.begin_load())
 }
@@ -1185,6 +1182,10 @@ pub(crate) fn apply_full_message(state: &mut NativeAppState, full_message: FullM
         decrement_folder_unread(&mut state.folders_by_account, &full_message.folder_id);
     }
     state.selected_message = Some(full_message.id.clone());
+    state.show_external_images = full_message
+        .from_email
+        .as_deref()
+        .is_some_and(|email| sender_images_allowed_for_message(state, &full_message, email));
     state.selected_full_message = Some(full_message);
     state.attachment_notice = None;
     state.attachment_error = None;

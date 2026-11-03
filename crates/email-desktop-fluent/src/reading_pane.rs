@@ -1871,20 +1871,29 @@ pub(crate) fn normalized_sender_key(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
 
+#[allow(dead_code)]
 pub(crate) fn sender_images_allowed(state: &NativeAppState, email: &str) -> bool {
-    let authenticated = state.selected_full_message.as_ref().is_some_and(|message| {
-        matches!(
-            message.authentication_results.spf,
-            AuthenticationResultStatus::Pass
-        ) || matches!(
-            message.authentication_results.dkim,
-            AuthenticationResultStatus::Pass
-        )
-    });
-    authenticated
+    state
+        .selected_full_message
+        .as_ref()
+        .is_some_and(|message| sender_images_allowed_for_message(state, message, email))
+}
+
+pub(crate) fn sender_images_allowed_for_message(
+    state: &NativeAppState,
+    message: &FullMessage,
+    email: &str,
+) -> bool {
+    sender_authentication_is_aligned(message)
         && state
             .remote_image_allowlist
             .contains(&normalized_sender_key(email))
+}
+
+fn sender_authentication_is_aligned(message: &FullMessage) -> bool {
+    // DMARC is the domain-aware, aligned result. A bare SPF or DKIM pass is
+    // not sufficient for a sender allowlist decision.
+    message.authentication_results.dmarc == AuthenticationResultStatus::Pass
 }
 
 pub(crate) fn allow_selected_sender_images(
@@ -1892,6 +1901,10 @@ pub(crate) fn allow_selected_sender_images(
     app_cx: &mut App,
 ) {
     let preferences = state_entity.update(app_cx, |state, cx| {
+        let message = state.selected_full_message.as_ref()?;
+        if !sender_authentication_is_aligned(message) {
+            return None;
+        }
         let email = selected_from_email(state)?;
         state
             .remote_image_allowlist
