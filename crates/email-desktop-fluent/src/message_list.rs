@@ -404,6 +404,7 @@ pub(crate) fn mail_message_list(
         .filter_map(|row| row.message_id().map(str::to_string))
         .collect::<Vec<_>>();
 
+    let list_for_keys = cx.entity();
     let mut root = div()
         .tab_index(0)
         .key_context("NativeMessageList")
@@ -417,7 +418,25 @@ pub(crate) fn mail_message_list(
             let ids = keyboard_ids;
             let selected_id = selected_id.clone();
             let state_entity = state_entity.clone();
-            move |ev: &KeyDownEvent, _, app_cx| {
+            move |ev: &KeyDownEvent, window, app_cx| {
+                if ev.keystroke.key == "m"
+                    && !ev.keystroke.modifiers.control
+                    && !ev.keystroke.modifiers.platform
+                    && !ev.keystroke.modifiers.alt
+                {
+                    let menu = move_to_menu(
+                        &state_entity,
+                        selected_id.clone(),
+                        window.mouse_position(),
+                        app_cx,
+                    );
+                    list_for_keys.update(app_cx, |list, cx| {
+                        list.context_menu = Some(menu);
+                        cx.notify();
+                    });
+                    app_cx.stop_propagation();
+                    return;
+                }
                 if handle_message_list_key(
                     &state_entity,
                     &ids,
@@ -851,175 +870,180 @@ pub(crate) fn mail_message_row(
     let context_state = state_entity.clone();
     let context_list = list_entity.clone();
 
-    div()
-        .id(("native-mail-message-row", idx as u64))
-        .h(px(row_height))
-        .w_full()
-        .flex()
-        .items_center()
-        .bg(if selected {
-            colors.neutral_selected
-        } else {
-            colors.surface
-        })
-        .border_b_1()
-        .border_color(colors.stroke_neutral_subtle)
-        .cursor_pointer()
-        .hover({
-            let hover = colors.subtle_hover;
-            let selected_bg = colors.neutral_selected;
-            move |style| style.bg(if selected { selected_bg } else { hover })
-        })
-        .on_click(move |_, _, app_cx| {
-            open_message_list_row(&click_state, &message_id, click_thread_key.clone(), app_cx);
-        })
-        .on_mouse_down(MouseButton::Right, move |ev, _, app_cx| {
-            let menu = message_row_context_menu(
-                context_state.clone(),
-                context_message.clone(),
-                ev.position,
-                app_cx,
-            );
-            context_list.update(app_cx, |list, cx| {
-                list.context_menu = Some(menu);
-                cx.notify();
-            });
-            app_cx.stop_propagation();
-        })
-        .child(div().h_full().w(px(3.0)).bg(if selected || unread {
-            colors.accent
-        } else {
-            colors.surface
-        }))
-        .child(
-            div()
-                .pl(px(if indented { 28.0 } else { 10.0 }))
-                .pr(px(10.0))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .min_w_0()
-                .flex_1()
-                .child(
-                    Checkbox::new(("message-row-select", idx))
-                        .checked(checked)
-                        .on_click({
-                            move |_, _, _, app_cx| {
-                                app_cx.stop_propagation();
-                                checkbox_state.update(app_cx, |state, cx| {
-                                    toggle_message_selection(state, &checkbox_message_id);
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(30.0))
-                        .rounded(px(999.0))
-                        .bg(if unread {
-                            colors.accent
-                        } else {
-                            colors.neutral
-                        })
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if unread {
-                            colors.on_accent
-                        } else {
-                            colors.on_subtle
-                        })
-                        .child(sender_initials(&sender)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_size(px(typography.body.size))
-                                        .font_weight(if unread {
-                                            FontWeight::SEMIBOLD
-                                        } else {
-                                            FontWeight::NORMAL
-                                        })
-                                        .text_color(colors.on_neutral)
-                                        .child(sender),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .max_w(px(92.0))
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_size(px(typography.caption.size))
-                                        .text_color(colors.on_subtle)
-                                        .child(date),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_size(px(typography.body.size))
-                                        .font_weight(if unread {
-                                            FontWeight::SEMIBOLD
-                                        } else {
-                                            FontWeight::NORMAL
-                                        })
-                                        .text_color(colors.on_neutral)
-                                        .child(subject),
-                                )
-                                .when(message.is_flagged, |row| {
-                                    row.child(message_row_badge("Flagged", cx))
-                                })
-                                .when(message.has_attachments, |row| {
-                                    row.child(message_row_badge("Attachment", cx))
-                                })
-                                .when(message.snoozed_until.is_some(), |row| {
-                                    row.child(message_row_badge("Snoozed", cx))
-                                })
-                                .when(thread_count > 1 && !indented, |row| {
-                                    row.child(message_row_count_badge(thread_count, cx))
-                                }),
-                        )
-                        .child(
-                            div()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(typography.caption.size))
-                                .text_color(colors.on_subtle)
-                                .child(preview),
-                        ),
-                ),
-        )
+    let drag_payload = move_payload_for_row(state_entity.read(cx), &message.id);
+    drag_source(
+        div()
+            .h(px(row_height))
+            .w_full()
+            .flex()
+            .items_center()
+            .bg(if selected {
+                colors.neutral_selected
+            } else {
+                colors.surface
+            })
+            .border_b_1()
+            .border_color(colors.stroke_neutral_subtle),
+        ("native-mail-message-row", idx as u64),
+        drag_payload,
+        |payload, _, _, app_cx| app_cx.new(|_| MessageDragGhost::new(payload)),
+    )
+    .cursor_pointer()
+    .hover({
+        let hover = colors.subtle_hover;
+        let selected_bg = colors.neutral_selected;
+        move |style| style.bg(if selected { selected_bg } else { hover })
+    })
+    .on_click(move |_, _, app_cx| {
+        open_message_list_row(&click_state, &message_id, click_thread_key.clone(), app_cx);
+    })
+    .on_mouse_down(MouseButton::Right, move |ev, _, app_cx| {
+        let menu = message_row_context_menu(
+            context_state.clone(),
+            context_message.clone(),
+            ev.position,
+            app_cx,
+        );
+        context_list.update(app_cx, |list, cx| {
+            list.context_menu = Some(menu);
+            cx.notify();
+        });
+        app_cx.stop_propagation();
+    })
+    .child(div().h_full().w(px(3.0)).bg(if selected || unread {
+        colors.accent
+    } else {
+        colors.surface
+    }))
+    .child(
+        div()
+            .pl(px(if indented { 28.0 } else { 10.0 }))
+            .pr(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .min_w_0()
+            .flex_1()
+            .child(
+                Checkbox::new(("message-row-select", idx))
+                    .checked(checked)
+                    .on_click({
+                        move |_, _, _, app_cx| {
+                            app_cx.stop_propagation();
+                            checkbox_state.update(app_cx, |state, cx| {
+                                toggle_message_selection(state, &checkbox_message_id);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(30.0))
+                    .rounded(px(999.0))
+                    .bg(if unread {
+                        colors.accent
+                    } else {
+                        colors.neutral
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if unread {
+                        colors.on_accent
+                    } else {
+                        colors.on_subtle
+                    })
+                    .child(sender_initials(&sender)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(typography.body.size))
+                                    .font_weight(if unread {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(colors.on_neutral)
+                                    .child(sender),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(px(92.0))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(typography.caption.size))
+                                    .text_color(colors.on_subtle)
+                                    .child(date),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(typography.body.size))
+                                    .font_weight(if unread {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(colors.on_neutral)
+                                    .child(subject),
+                            )
+                            .when(message.is_flagged, |row| {
+                                row.child(message_row_badge("Flagged", cx))
+                            })
+                            .when(message.has_attachments, |row| {
+                                row.child(message_row_badge("Attachment", cx))
+                            })
+                            .when(message.snoozed_until.is_some(), |row| {
+                                row.child(message_row_badge("Snoozed", cx))
+                            })
+                            .when(thread_count > 1 && !indented, |row| {
+                                row.child(message_row_count_badge(thread_count, cx))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(typography.caption.size))
+                            .text_color(colors.on_subtle)
+                            .child(preview),
+                    ),
+            ),
+    )
 }
 
 pub(crate) fn open_message_list_row(
