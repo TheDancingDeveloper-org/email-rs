@@ -62,6 +62,13 @@ impl EmailDesktopApp {
                         {
                             break;
                         }
+                        if let Ok(Some(mutation)) =
+                            app.update(&mut async_cx, |app, cx| take_expired_undo(&app.state, cx))
+                        {
+                            let _ = app.update(&mut async_cx, |app, cx| {
+                                commit_message_mutation_and_refresh(&app.state, mutation, cx);
+                            });
+                        }
                     }
                 }
             },
