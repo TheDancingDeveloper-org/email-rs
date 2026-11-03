@@ -140,6 +140,11 @@ pub(crate) enum NativeMessageMutation {
         message_id: String,
         until: String,
     },
+    /// Apply one label to every listed message (drag-drop and "Move to...").
+    AddLabels {
+        message_ids: Vec<String>,
+        label_id: String,
+    },
 }
 
 impl NativeMessageMutation {
@@ -150,6 +155,9 @@ impl NativeMessageMutation {
             | Self::SetRead { message_id, .. }
             | Self::SetFlagged { message_id, .. }
             | Self::Snooze { message_id, .. } => message_id,
+            Self::AddLabels { message_ids, .. } => {
+                message_ids.first().map(String::as_str).unwrap_or_default()
+            }
         }
     }
 
@@ -166,6 +174,7 @@ impl NativeMessageMutation {
                 is_flagged: false, ..
             } => "unflag message",
             Self::Snooze { .. } => "snooze message",
+            Self::AddLabels { .. } => "apply label",
         }
     }
 }
@@ -496,7 +505,9 @@ pub(crate) fn start_message_mutation_and_refresh(
 ) {
     if matches!(
         mutation,
-        NativeMessageMutation::Archive { .. } | NativeMessageMutation::Delete { .. }
+        NativeMessageMutation::Archive { .. }
+            | NativeMessageMutation::Delete { .. }
+            | NativeMessageMutation::AddLabels { .. }
     ) {
         let previous = state_entity.update(app_cx, |state, cx| {
             let previous = replace_pending_undo(
@@ -836,6 +847,17 @@ pub(crate) fn mutate_message_and_refresh(
                         },
                     )
                     .await?;
+            }
+            NativeMessageMutation::AddLabels {
+                message_ids,
+                label_id,
+            } => {
+                for message_id in message_ids {
+                    client
+                        .add_message_label(message_id, label_id)
+                        .await
+                        .with_context(|| format!("add label {label_id} to message {message_id}"))?;
+                }
             }
         }
 

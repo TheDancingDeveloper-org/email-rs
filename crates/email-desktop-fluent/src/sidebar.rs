@@ -6,6 +6,7 @@ pub(crate) struct SidebarPlaceholder {
     pub(crate) state: Entity<NativeAppState>,
     pub(crate) searchbox: Entity<Searchbox>,
     pub(crate) context_menu: Option<Entity<ContextMenu>>,
+    pub(crate) label_drop_focus: BTreeMap<String, FocusHandle>,
 }
 
 impl SidebarPlaceholder {
@@ -35,6 +36,7 @@ impl SidebarPlaceholder {
             state,
             searchbox,
             context_menu: None,
+            label_drop_focus: BTreeMap::new(),
         }
     }
 }
@@ -263,7 +265,12 @@ impl Render for SidebarPlaceholder {
                             }),
                     )
                     .child(section_label("Labels", cx))
-                    .child(label_rows(&self.state, &state, cx)),
+                    .child(label_rows(
+                        &self.state,
+                        &state,
+                        &mut self.label_drop_focus,
+                        cx,
+                    )),
             )
             .child(sidebar_footer(&self.state, &state, cx));
 
@@ -655,29 +662,56 @@ pub(crate) fn smart_folder_rows(
 pub(crate) fn label_rows(
     state_entity: &Entity<NativeAppState>,
     state: &NativeAppState,
+    focus_handles: &mut BTreeMap<String, FocusHandle>,
     cx: &mut Context<SidebarPlaceholder>,
 ) -> gpui::Div {
     if state.labels.is_empty() {
         return empty_sidebar_text("No labels loaded", cx);
     }
 
+    let focus_ring = cx.theme().colors.accent;
+    let keyboard_payload = state
+        .selected_message_ids
+        .first()
+        .map(|id| move_payload_for_row(state, id))
+        .filter(|payload| !payload.message_ids.is_empty());
     let mut rows = div().flex().flex_col().gap(px(1.0));
     for label in &state.labels {
         let label_id = label.id.clone();
         let label_key = label_id.clone();
         let selected = state.selected_label.as_deref() == Some(label.id.as_str());
-        let state_entity = state_entity.clone();
+        let click_state = state_entity.clone();
+        let drop_state = state_entity.clone();
+        let drop_label_id = label_id.clone();
+        let focus = focus_handles
+            .entry(label.id.clone())
+            .or_insert_with(|| cx.focus_handle())
+            .clone();
+        let labels = state.labels.clone();
+        let policy_label_id = label_id.clone();
+        let row = sidebar_label_row(label.name.clone(), selected, label.color.clone(), cx)
+            .cursor_pointer();
         rows = rows.child(
-            sidebar_label_row(label.name.clone(), selected, label.color.clone(), cx)
-                .id(SharedString::from(format!("label-{label_key}")))
-                .cursor_pointer()
-                .on_click(move |_, _, app_cx| {
-                    start_message_collection_load(
-                        &state_entity,
-                        NativeMessageSource::Label(label_id.clone()),
-                        app_cx,
-                    );
+            drop_target(
+                row,
+                SharedString::from(format!("label-{label_key}")),
+                focus,
+                focus_ring,
+                DropPolicy::new(move |payload: &MessageDragPayload| {
+                    label_drop_accepts(payload, &policy_label_id, &labels)
                 }),
+                move |payload, _operation, _, app_cx| {
+                    start_label_drop(&drop_state, payload, &drop_label_id, app_cx)
+                },
+                keyboard_payload.clone(),
+            )
+            .on_click(move |_, _, app_cx| {
+                start_message_collection_load(
+                    &click_state,
+                    NativeMessageSource::Label(label_id.clone()),
+                    app_cx,
+                );
+            }),
         );
     }
     rows
