@@ -130,6 +130,9 @@ mod tests {
                 text_body: text.map(Into::into),
                 ..Default::default()
             }),
+            authentication_results: Default::default(),
+            display_name_spoofing: false,
+            from_reply_to_domain_mismatch: false,
             attachments: vec![],
         }
     }
