@@ -494,6 +494,27 @@ pub(crate) fn start_message_mutation_and_refresh(
     mutation: NativeMessageMutation,
     app_cx: &mut App,
 ) {
+    if matches!(
+        mutation,
+        NativeMessageMutation::Archive { .. } | NativeMessageMutation::Delete { .. }
+    ) {
+        state_entity.update(app_cx, |state, cx| {
+            state.pending_undo = Some(PendingUndo {
+                mutation,
+                expires_at: Instant::now() + Duration::from_secs(5),
+            });
+            cx.notify();
+        });
+        return;
+    }
+    commit_message_mutation_and_refresh(state_entity, mutation, app_cx);
+}
+
+pub(crate) fn commit_message_mutation_and_refresh(
+    state_entity: &Entity<NativeAppState>,
+    mutation: NativeMessageMutation,
+    app_cx: &mut App,
+) {
     let (base_url, request) = state_entity.update(app_cx, |state, cx| {
         let request = begin_sync_complete_refresh(state);
         state.last_error = None;
@@ -526,6 +547,31 @@ pub(crate) fn start_message_mutation_and_refresh(
             }
         })
         .detach();
+}
+
+pub(crate) fn cancel_pending_undo(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.pending_undo = None;
+        cx.notify();
+    });
+}
+
+pub(crate) fn take_expired_undo(
+    state_entity: &Entity<NativeAppState>,
+    app_cx: &mut App,
+) -> Option<NativeMessageMutation> {
+    state_entity.update(app_cx, |state, cx| {
+        let expired = state
+            .pending_undo
+            .as_ref()
+            .filter(|pending| Instant::now() >= pending.expires_at)
+            .map(|pending| pending.mutation.clone());
+        if expired.is_some() {
+            state.pending_undo = None;
+            cx.notify();
+        }
+        expired
+    })
 }
 
 pub(crate) fn start_message_label_mutation(

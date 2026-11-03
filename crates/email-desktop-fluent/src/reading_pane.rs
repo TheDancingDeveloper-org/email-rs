@@ -1263,6 +1263,31 @@ pub(crate) fn reading_placeholder(
                     cx,
                 )),
         )
+        .when_some(state.pending_undo.as_ref(), |pane, pending| {
+            let state_entity = state_entity.clone();
+            let label = pending.mutation.action_label();
+            pane.child(
+                div()
+                    .mx(px(20.0))
+                    .mt(px(8.0))
+                    .p(px(8.0))
+                    .rounded(px(4.0))
+                    .bg(colors.neutral)
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(div().flex_1().child(format!("{label} pending")))
+                    .child(
+                        Button::new("reading-undo-action")
+                            .label("Undo")
+                            .appearance(ButtonAppearance::Subtle)
+                            .size(ButtonSize::Compact)
+                            .on_click(move |_, _, app_cx| {
+                                cancel_pending_undo(&state_entity, app_cx)
+                            }),
+                    ),
+            )
+        })
         .when_some(body_status, |pane, status| {
             pane.child(
                 div()
