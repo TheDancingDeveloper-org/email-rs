@@ -140,6 +140,9 @@ impl MailApi for FakeMail {
                 html_body: Some("<p>Numbers are <b>up</b> this quarter.</p>".into()),
                 ..Default::default()
             }),
+            authentication_results: Default::default(),
+            display_name_spoofing: false,
+            from_reply_to_domain_mismatch: false,
             attachments: vec![],
         })
     }
