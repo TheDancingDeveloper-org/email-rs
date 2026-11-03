@@ -16,7 +16,12 @@ actions!(
         StartForwardCompose,
         OpenAdvancedSearch,
         OpenAccountSetup,
-        OpenSettings
+        OpenSettings,
+        ArchiveSelected,
+        ToggleSelectedStar,
+        ToggleSelectedRead,
+        ToggleShortcutHelp,
+        CyclePaneFocus
     ]
 );
 
@@ -66,7 +71,28 @@ pub(crate) enum NativeKeyAction {
     ApplyDarkTheme,
     IncreaseDensity,
     DecreaseDensity,
+    Reply,
+    Archive,
+    Forward,
+    Compose,
+    Search,
+    Star,
+    MarkRead,
+    Help,
+    CyclePane,
 }
+
+pub(crate) const SHORTCUT_COVERAGE: &[(&str, &str, &str)] = &[
+    ("r", "Reply", "Gmail / Superhuman"),
+    ("a", "Archive", "Gmail / Superhuman"),
+    ("f", "Forward", "Gmail / Superhuman"),
+    ("c", "Compose", "Gmail / Superhuman"),
+    ("/", "Search", "Gmail / Superhuman"),
+    ("s", "Star", "Gmail"),
+    ("l", "Mark read", "Gmail / Superhuman"),
+    ("?", "Shortcut help", "Gmail / Superhuman"),
+    ("f6", "Cycle pane", "Superhuman"),
+];
 
 pub(crate) fn native_key_binding_specs() -> &'static [(&'static str, NativeKeyAction)] {
     &[
@@ -76,6 +102,15 @@ pub(crate) fn native_key_binding_specs() -> &'static [(&'static str, NativeKeyAc
         ("ctrl-shift-d", NativeKeyAction::ApplyDarkTheme),
         ("ctrl-plus", NativeKeyAction::IncreaseDensity),
         ("ctrl-minus", NativeKeyAction::DecreaseDensity),
+        ("r", NativeKeyAction::Reply),
+        ("a", NativeKeyAction::Archive),
+        ("f", NativeKeyAction::Forward),
+        ("c", NativeKeyAction::Compose),
+        ("/", NativeKeyAction::Search),
+        ("s", NativeKeyAction::Star),
+        ("l", NativeKeyAction::MarkRead),
+        ("shift-?", NativeKeyAction::Help),
+        ("f6", NativeKeyAction::CyclePane),
     ]
 }
 
@@ -88,8 +123,34 @@ pub(crate) fn native_key_bindings() -> Vec<KeyBinding> {
             NativeKeyAction::ApplyDarkTheme => KeyBinding::new(keystroke, ApplyDarkTheme, None),
             NativeKeyAction::IncreaseDensity => KeyBinding::new(keystroke, IncreaseDensity, None),
             NativeKeyAction::DecreaseDensity => KeyBinding::new(keystroke, DecreaseDensity, None),
+            NativeKeyAction::Reply => KeyBinding::new(keystroke, StartReplyCompose, None),
+            NativeKeyAction::Archive => KeyBinding::new(keystroke, ArchiveSelected, None),
+            NativeKeyAction::Forward => KeyBinding::new(keystroke, StartForwardCompose, None),
+            NativeKeyAction::Compose => KeyBinding::new(keystroke, StartCompose, None),
+            NativeKeyAction::Search => KeyBinding::new(keystroke, OpenAdvancedSearch, None),
+            NativeKeyAction::Star => KeyBinding::new(keystroke, ToggleSelectedStar, None),
+            NativeKeyAction::MarkRead => KeyBinding::new(keystroke, ToggleSelectedRead, None),
+            NativeKeyAction::Help => KeyBinding::new(keystroke, ToggleShortcutHelp, None),
+            NativeKeyAction::CyclePane => KeyBinding::new(keystroke, CyclePaneFocus, None),
         })
         .collect()
+}
+
+#[allow(dead_code)]
+pub(crate) fn shortcut_conflicts() -> Vec<&'static str> {
+    let mut seen = BTreeSet::new();
+    native_key_binding_specs()
+        .iter()
+        .filter_map(|(key, _)| (!seen.insert(*key)).then_some(*key))
+        .collect()
+}
+
+pub(crate) fn shortcut_help() -> String {
+    SHORTCUT_COVERAGE
+        .iter()
+        .map(|(key, action, products)| format!("{key:>5}  {action:<16} {products}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(unix)]

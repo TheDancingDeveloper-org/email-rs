@@ -348,7 +348,85 @@ impl Render for EmailDesktopApp {
                     cx.notify();
                 }),
             )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &ArchiveSelected, _, cx| {
+                    let id = app.state.read(cx).selected_message.clone();
+                    if let Some(message_id) = id {
+                        start_message_mutation_and_refresh(
+                            &app.state,
+                            NativeMessageMutation::Archive { message_id },
+                            cx,
+                        );
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &ToggleSelectedStar, _, cx| {
+                    let state = app.state.read(cx);
+                    let args = state
+                        .selected_message
+                        .clone()
+                        .zip(state.selected_full_message.as_ref().map(|m| m.is_flagged));
+                    if let Some((message_id, flagged)) = args {
+                        start_message_mutation_and_refresh(
+                            &app.state,
+                            NativeMessageMutation::SetFlagged {
+                                message_id,
+                                is_flagged: !flagged,
+                            },
+                            cx,
+                        );
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &ToggleSelectedRead, _, cx| {
+                    let state = app.state.read(cx);
+                    let args = state
+                        .selected_message
+                        .clone()
+                        .zip(state.selected_full_message.as_ref().map(|m| m.is_read));
+                    if let Some((message_id, read)) = args {
+                        start_message_mutation_and_refresh(
+                            &app.state,
+                            NativeMessageMutation::SetRead {
+                                message_id,
+                                is_read: !read,
+                            },
+                            cx,
+                        );
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &ToggleShortcutHelp, _, cx| {
+                    app.state.update(cx, |state, cx| {
+                        state.show_shortcut_help = !state.show_shortcut_help;
+                        cx.notify();
+                    });
+                }),
+            )
+            .on_action(cx.listener(
+                |_app: &mut EmailDesktopApp, _: &CyclePaneFocus, window, cx| {
+                    window.focus_next(cx);
+                },
+            ))
             .when(!auth_required, |root| root.child(self.workspace.clone()))
+            .when(self.state.read(cx).show_shortcut_help, |root| {
+                root.child(
+                    div()
+                        .absolute()
+                        .top(px(80.))
+                        .right(px(80.))
+                        .w(px(430.))
+                        .p(px(20.))
+                        .bg(cx.theme().colors.surface)
+                        .border_1()
+                        .border_color(cx.theme().colors.stroke_neutral_subtle)
+                        .rounded(px(8.))
+                        .child(div().font_family("monospace").child(shortcut_help())),
+                )
+            })
             .child(self.palette.clone())
             .child(self.account_setup_modal.clone())
             .child(self.advanced_search_modal.clone())
