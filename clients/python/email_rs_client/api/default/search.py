@@ -26,6 +26,7 @@ def _get_kwargs(
     is_flagged: bool | Unset = UNSET,
     date_after: str | Unset = UNSET,
     date_before: str | Unset = UNSET,
+    remote: bool | Unset = UNSET,
 ) -> dict[str, Any]:
 
     params: dict[str, Any] = {}
@@ -57,6 +58,8 @@ def _get_kwargs(
     params["date_after"] = date_after
 
     params["date_before"] = date_before
+
+    params["remote"] = remote
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -121,6 +124,7 @@ def sync_detailed(
     is_flagged: bool | Unset = UNSET,
     date_after: str | Unset = UNSET,
     date_before: str | Unset = UNSET,
+    remote: bool | Unset = UNSET,
 ) -> Response[ErrorResponse | SearchResponse]:
     """
     Args:
@@ -138,6 +142,7 @@ def sync_detailed(
         is_flagged (bool | Unset):
         date_after (str | Unset):
         date_before (str | Unset):
+        remote (bool | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -162,6 +167,7 @@ def sync_detailed(
         is_flagged=is_flagged,
         date_after=date_after,
         date_before=date_before,
+        remote=remote,
     )
 
     response = client.get_httpx_client().request(
@@ -188,6 +194,7 @@ def sync(
     is_flagged: bool | Unset = UNSET,
     date_after: str | Unset = UNSET,
     date_before: str | Unset = UNSET,
+    remote: bool | Unset = UNSET,
 ) -> ErrorResponse | SearchResponse | None:
     """
     Args:
@@ -205,6 +212,7 @@ def sync(
         is_flagged (bool | Unset):
         date_after (str | Unset):
         date_before (str | Unset):
+        remote (bool | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -230,6 +238,7 @@ def sync(
         is_flagged=is_flagged,
         date_after=date_after,
         date_before=date_before,
+        remote=remote,
     ).parsed
 
 
@@ -250,6 +259,7 @@ async def asyncio_detailed(
     is_flagged: bool | Unset = UNSET,
     date_after: str | Unset = UNSET,
     date_before: str | Unset = UNSET,
+    remote: bool | Unset = UNSET,
 ) -> Response[ErrorResponse | SearchResponse]:
     """
     Args:
@@ -267,6 +277,7 @@ async def asyncio_detailed(
         is_flagged (bool | Unset):
         date_after (str | Unset):
         date_before (str | Unset):
+        remote (bool | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -291,6 +302,7 @@ async def asyncio_detailed(
         is_flagged=is_flagged,
         date_after=date_after,
         date_before=date_before,
+        remote=remote,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -315,6 +327,7 @@ async def asyncio(
     is_flagged: bool | Unset = UNSET,
     date_after: str | Unset = UNSET,
     date_before: str | Unset = UNSET,
+    remote: bool | Unset = UNSET,
 ) -> ErrorResponse | SearchResponse | None:
     """
     Args:
@@ -332,6 +345,7 @@ async def asyncio(
         is_flagged (bool | Unset):
         date_after (str | Unset):
         date_before (str | Unset):
+        remote (bool | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -358,5 +372,6 @@ async def asyncio(
             is_flagged=is_flagged,
             date_after=date_after,
             date_before=date_before,
+            remote=remote,
         )
     ).parsed
