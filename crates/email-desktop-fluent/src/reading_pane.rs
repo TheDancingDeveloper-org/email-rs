@@ -1756,19 +1756,39 @@ pub(crate) fn link_safety_warnings(html: &str) -> Vec<String> {
     warnings
 }
 
-fn url_domain(value: &str) -> Option<String> {
+pub(crate) fn url_domain(value: &str) -> Option<String> {
     let value = value.trim();
+    // Bare domains are accepted for visible link text; schemes are optional
+    // there, while path/query/fragment delimiters still terminate the host.
     let authority = value
         .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))?;
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value)
+        // Only the authority may contain userinfo.  An '@' in a path is not
+        // credentials (for example https://evil.test/a@paypal.com).
+        .split(['/', '?', '#'])
+        .next()?;
     let authority = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
-    let host = authority
-        .split(['/', '?', '#', ':'])
-        .next()?
-        .trim_matches('.');
-    (host.contains('.') && !host.is_empty()).then(|| host.to_ascii_lowercase())
+    let (host, is_ipv6) = if let Some(host) = authority.strip_prefix('[') {
+        (host.split(']').next()?.trim(), true)
+    } else {
+        (
+            authority
+                .rsplit_once(':')
+                .map_or(authority, |(host, port)| {
+                    if port.chars().all(|c| c.is_ascii_digit()) {
+                        host
+                    } else {
+                        authority
+                    }
+                }),
+            false,
+        )
+    };
+    let host = host.trim_matches('.');
+    ((is_ipv6 || host.contains('.')) && !host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 fn suspicious_idn_domain(domain: &str) -> bool {
@@ -1852,9 +1872,19 @@ pub(crate) fn normalized_sender_key(email: &str) -> String {
 }
 
 pub(crate) fn sender_images_allowed(state: &NativeAppState, email: &str) -> bool {
-    state
-        .remote_image_allowlist
-        .contains(&normalized_sender_key(email))
+    let authenticated = state.selected_full_message.as_ref().is_some_and(|message| {
+        matches!(
+            message.authentication_results.spf,
+            AuthenticationResultStatus::Pass
+        ) || matches!(
+            message.authentication_results.dkim,
+            AuthenticationResultStatus::Pass
+        )
+    });
+    authenticated
+        && state
+            .remote_image_allowlist
+            .contains(&normalized_sender_key(email))
 }
 
 pub(crate) fn allow_selected_sender_images(

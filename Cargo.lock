@@ -2284,6 +2284,7 @@ dependencies = [
  "fluent-test-utils",
  "gpui",
  "libc",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
