@@ -82,9 +82,19 @@ jobs:
           format: spdx-json
           output-file: image.spdx.json
           artifact-name: image-sbom
-          upload-artifact: true
-          upload-artifact-retention: 1
+          # Upload the named file explicitly below. The action's built-in
+          # upload currently archives it under the artifact name
+          # (image-sbom), so the checksum job otherwise receives the wrong
+          # filename instead of image.spdx.json.
+          upload-artifact: false
           upload-release-assets: false
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-sbom
+          path: image.spdx.json
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Install cosign
         uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
