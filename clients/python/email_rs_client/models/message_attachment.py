@@ -6,6 +6,8 @@ from typing import Any, TypeVar
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
+from ..types import UNSET, Unset
+
 T = TypeVar("T", bound="MessageAttachment")
 
 
@@ -18,6 +20,7 @@ class MessageAttachment:
         id (str):
         message_id (str):
         size_bytes (int):
+        dangerous_or_double_extension (bool | Unset):
     """
 
     content_type: str
@@ -25,6 +28,7 @@ class MessageAttachment:
     id: str
     message_id: str
     size_bytes: int
+    dangerous_or_double_extension: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -38,6 +42,8 @@ class MessageAttachment:
 
         size_bytes = self.size_bytes
 
+        dangerous_or_double_extension = self.dangerous_or_double_extension
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -49,6 +55,8 @@ class MessageAttachment:
                 "sizeBytes": size_bytes,
             }
         )
+        if dangerous_or_double_extension is not UNSET:
+            field_dict["dangerousOrDoubleExtension"] = dangerous_or_double_extension
 
         return field_dict
 
@@ -65,12 +73,15 @@ class MessageAttachment:
 
         size_bytes = d.pop("sizeBytes")
 
+        dangerous_or_double_extension = d.pop("dangerousOrDoubleExtension", UNSET)
+
         message_attachment = cls(
             content_type=content_type,
             filename=filename,
             id=id,
             message_id=message_id,
             size_bytes=size_bytes,
+            dangerous_or_double_extension=dangerous_or_double_extension,
         )
 
         message_attachment.additional_properties = d
