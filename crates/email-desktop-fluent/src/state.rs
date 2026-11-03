@@ -75,6 +75,7 @@ pub(crate) struct NativePreferences {
     pub(crate) theme: ThemeMode,
     pub(crate) density_level: u8,
     pub(crate) layout: NativeLayoutPreferences,
+    pub(crate) remote_image_allowlist: BTreeSet<String>,
 }
 
 impl NativePreferences {
@@ -83,6 +84,7 @@ impl NativePreferences {
             theme: state.theme.clone(),
             density_level: state.density.level,
             layout: state.layout,
+            remote_image_allowlist: state.remote_image_allowlist.clone(),
         }
     }
 
@@ -90,6 +92,7 @@ impl NativePreferences {
         state.theme = self.theme.clone();
         state.density = DensityTokens::new(self.density_level);
         state.layout = self.layout;
+        state.remote_image_allowlist = self.remote_image_allowlist.clone();
     }
 }
 
@@ -99,6 +102,7 @@ impl Default for NativePreferences {
             theme: ThemeMode::Dark,
             density_level: DensityTokens::default().level,
             layout: NativeLayoutPreferences::default(),
+            remote_image_allowlist: BTreeSet::new(),
         }
     }
 }
@@ -224,6 +228,7 @@ pub(crate) struct NativeAppState {
     pub(crate) attachment_error: Option<String>,
     pub(crate) pending_unsafe_attachment: Option<String>,
     pub(crate) show_external_images: bool,
+    pub(crate) remote_image_allowlist: BTreeSet<String>,
     pub(crate) selected_event: Option<String>,
     pub(crate) calendar_week_start: NaiveDate,
     pub(crate) calendar_events: Vec<CalendarEvent>,
@@ -272,6 +277,7 @@ impl Default for NativeAppState {
             attachment_error: None,
             pending_unsafe_attachment: None,
             show_external_images: false,
+            remote_image_allowlist: BTreeSet::new(),
             selected_event: None,
             calendar_week_start: current_calendar_week_start(),
             calendar_events: Vec::new(),

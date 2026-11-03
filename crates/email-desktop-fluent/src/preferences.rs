@@ -86,6 +86,14 @@ pub(crate) fn parse_native_preferences(raw: &str) -> NativePreferences {
                     preferences.layout.message_list_width = width;
                 }
             }
+            "remote_image_allowlist" => {
+                preferences.remote_image_allowlist = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|sender| !sender.is_empty())
+                    .map(str::to_ascii_lowercase)
+                    .collect();
+            }
             _ => {}
         }
     }
@@ -94,11 +102,17 @@ pub(crate) fn parse_native_preferences(raw: &str) -> NativePreferences {
 
 pub(crate) fn serialize_native_preferences(preferences: &NativePreferences) -> String {
     format!(
-        "theme={}\ndensity={}\nemail_sidebar_w={}\nemail_msglist_w={}\n",
+        "theme={}\ndensity={}\nemail_sidebar_w={}\nemail_msglist_w={}\nremote_image_allowlist={}\n",
         preferences.theme.as_str(),
         preferences.density_level.min(8),
         preferences.layout.sidebar_width,
-        preferences.layout.message_list_width
+        preferences.layout.message_list_width,
+        preferences
+            .remote_image_allowlist
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
