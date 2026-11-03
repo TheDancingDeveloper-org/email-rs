@@ -45,6 +45,7 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/messages/{id}/attachments"),
     ("GET", "/messages/{id}/attachments/{attachment_id}"),
     ("POST", "/messages/{id}/archive"),
+    ("POST", "/messages/{id}/move"),
     ("GET", "/messages/{id}/labels"),
     ("POST", "/messages/{id}/labels/{label_id}"),
     ("DELETE", "/messages/{id}/labels/{label_id}"),
@@ -174,6 +175,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(messages::download_attachment),
         )
         .route("/messages/{id}/archive", post(messages::archive_message))
+        .route("/messages/{id}/move", post(messages::move_message))
         .route("/messages/{id}/labels", get(labels::get_message_labels))
         .route(
             "/messages/{id}/labels/{label_id}",

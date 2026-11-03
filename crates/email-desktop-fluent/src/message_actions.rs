@@ -145,6 +145,11 @@ pub(crate) enum NativeMessageMutation {
         message_ids: Vec<String>,
         label_id: String,
     },
+    /// Move every listed message to one folder (drag-drop and "Move to...").
+    MoveToFolder {
+        message_ids: Vec<String>,
+        folder_id: String,
+    },
 }
 
 impl NativeMessageMutation {
@@ -155,7 +160,7 @@ impl NativeMessageMutation {
             | Self::SetRead { message_id, .. }
             | Self::SetFlagged { message_id, .. }
             | Self::Snooze { message_id, .. } => message_id,
-            Self::AddLabels { message_ids, .. } => {
+            Self::AddLabels { message_ids, .. } | Self::MoveToFolder { message_ids, .. } => {
                 message_ids.first().map(String::as_str).unwrap_or_default()
             }
         }
@@ -175,6 +180,7 @@ impl NativeMessageMutation {
             } => "unflag message",
             Self::Snooze { .. } => "snooze message",
             Self::AddLabels { .. } => "apply label",
+            Self::MoveToFolder { .. } => "move message to folder",
         }
     }
 }
@@ -508,6 +514,7 @@ pub(crate) fn start_message_mutation_and_refresh(
         NativeMessageMutation::Archive { .. }
             | NativeMessageMutation::Delete { .. }
             | NativeMessageMutation::AddLabels { .. }
+            | NativeMessageMutation::MoveToFolder { .. }
     ) {
         let previous = state_entity.update(app_cx, |state, cx| {
             let previous = replace_pending_undo(
@@ -857,6 +864,17 @@ pub(crate) fn mutate_message_and_refresh(
                         .add_message_label(message_id, label_id)
                         .await
                         .with_context(|| format!("add label {label_id} to message {message_id}"))?;
+                }
+            }
+            NativeMessageMutation::MoveToFolder {
+                message_ids,
+                folder_id,
+            } => {
+                for message_id in message_ids {
+                    client
+                        .move_message(message_id, folder_id)
+                        .await
+                        .with_context(|| format!("move message {message_id} to {folder_id}"))?;
                 }
             }
         }

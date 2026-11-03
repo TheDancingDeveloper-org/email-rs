@@ -610,6 +610,18 @@ impl MailProvider for GenericImapProvider {
             .select(src_folder)
             .await
             .map_err(|e| AppError::Imap(format!("SELECT failed: {}", e)))?;
+        let capabilities = session
+            .capabilities()
+            .await
+            .map_err(|e| AppError::Imap(format!("CAPABILITY failed: {e}")))?;
+        if move_strategy(capabilities.has_str("MOVE")) == MoveStrategy::UidMove {
+            session
+                .uid_mv(uid.to_string(), dest_folder)
+                .await
+                .map_err(|e| AppError::Imap(format!("UID MOVE failed: {}", e)))?;
+            let _ = session.logout().await;
+            return Ok(());
+        }
         session
             .uid_copy(uid.to_string(), dest_folder)
             .await
@@ -705,6 +717,33 @@ mod tests {
         assert_eq!(special_use_for_name("Sent", &[]), Some("sent".into()));
         assert_eq!(special_use_for_name("Sent Items", &[]), Some("sent".into()));
         assert_eq!(special_use_for_name("Sent Mail", &[]), Some("sent".into()));
+    }
+}
+
+/// How a message moves between folders: RFC 6851 `UID MOVE` when the server
+/// advertises `MOVE`, otherwise `UID COPY` + `\Deleted` + `EXPUNGE`.
+#[derive(Debug, PartialEq, Eq)]
+enum MoveStrategy {
+    UidMove,
+    CopyExpunge,
+}
+
+fn move_strategy(server_has_move: bool) -> MoveStrategy {
+    if server_has_move {
+        MoveStrategy::UidMove
+    } else {
+        MoveStrategy::CopyExpunge
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::{move_strategy, MoveStrategy};
+
+    #[test]
+    fn move_capability_selects_uid_move_else_copy_expunge() {
+        assert_eq!(move_strategy(true), MoveStrategy::UidMove);
+        assert_eq!(move_strategy(false), MoveStrategy::CopyExpunge);
     }
 }
 
