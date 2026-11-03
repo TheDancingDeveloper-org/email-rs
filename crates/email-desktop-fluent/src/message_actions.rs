@@ -498,16 +498,45 @@ pub(crate) fn start_message_mutation_and_refresh(
         mutation,
         NativeMessageMutation::Archive { .. } | NativeMessageMutation::Delete { .. }
     ) {
-        state_entity.update(app_cx, |state, cx| {
-            state.pending_undo = Some(PendingUndo {
-                mutation,
-                expires_at: Instant::now() + Duration::from_secs(5),
-            });
+        let previous = state_entity.update(app_cx, |state, cx| {
+            let previous = replace_pending_undo(
+                &mut state.pending_undo,
+                PendingUndo {
+                    mutation,
+                    expires_at: Instant::now() + Duration::from_secs(5),
+                },
+            );
             cx.notify();
+            previous
         });
+        // There is only one visible undo slot.  Do not silently lose the
+        // mutation that occupied it when a second action arrives.
+        if let Some(previous) = previous {
+            commit_message_mutation_and_refresh(state_entity, previous, app_cx);
+        }
         return;
     }
     commit_message_mutation_and_refresh(state_entity, mutation, app_cx);
+}
+
+pub(crate) fn replace_pending_undo(
+    pending: &mut Option<PendingUndo>,
+    replacement: PendingUndo,
+) -> Option<NativeMessageMutation> {
+    pending.replace(replacement).map(|pending| pending.mutation)
+}
+
+pub(crate) fn take_expired_pending_undo(
+    pending: &mut Option<PendingUndo>,
+    now: Instant,
+) -> Option<NativeMessageMutation> {
+    if pending
+        .as_ref()
+        .is_some_and(|pending| now >= pending.expires_at)
+    {
+        return pending.take().map(|pending| pending.mutation);
+    }
+    None
 }
 
 pub(crate) fn commit_message_mutation_and_refresh(
@@ -561,13 +590,8 @@ pub(crate) fn take_expired_undo(
     app_cx: &mut App,
 ) -> Option<NativeMessageMutation> {
     state_entity.update(app_cx, |state, cx| {
-        let expired = state
-            .pending_undo
-            .as_ref()
-            .filter(|pending| Instant::now() >= pending.expires_at)
-            .map(|pending| pending.mutation.clone());
+        let expired = take_expired_pending_undo(&mut state.pending_undo, Instant::now());
         if expired.is_some() {
-            state.pending_undo = None;
             cx.notify();
         }
         expired

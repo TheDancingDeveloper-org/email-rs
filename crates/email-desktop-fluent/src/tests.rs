@@ -536,8 +536,65 @@ fn remote_images_are_blocked_by_default_and_allowlist_is_case_insensitive() {
     state
         .remote_image_allowlist
         .insert("alice@example.test".to_string());
+    let mut trusted = full_message("trusted", "inbox", true, false);
+    trusted.authentication_results.spf = AuthenticationResultStatus::Pass;
+    state.selected_full_message = Some(trusted);
     assert!(sender_images_allowed(&state, " Alice@EXAMPLE.TEST "));
     assert!(!sender_images_allowed(&state, "bob@example.test"));
+}
+
+#[test]
+fn undo_pending_mutation_expires_and_is_retrieved_once() {
+    let mutation = NativeMessageMutation::Archive {
+        message_id: "one".into(),
+    };
+    let mut pending = Some(PendingUndo {
+        mutation: mutation.clone(),
+        expires_at: Instant::now() - Duration::from_secs(1),
+    });
+    assert_eq!(
+        take_expired_pending_undo(&mut pending, Instant::now()),
+        Some(mutation)
+    );
+    assert!(take_expired_pending_undo(&mut pending, Instant::now()).is_none());
+}
+
+#[test]
+fn undo_before_expiry_keeps_mutation_reversible() {
+    let mutation = NativeMessageMutation::Delete {
+        message_id: "one".into(),
+    };
+    let mut pending = Some(PendingUndo {
+        mutation: mutation.clone(),
+        expires_at: Instant::now() + Duration::from_secs(5),
+    });
+    assert!(take_expired_pending_undo(&mut pending, Instant::now()).is_none());
+    assert_eq!(pending.take().unwrap().mutation, mutation);
+}
+
+#[test]
+fn replacing_undo_pending_mutation_returns_the_first_for_commit() {
+    let first = NativeMessageMutation::Archive {
+        message_id: "one".into(),
+    };
+    let second = NativeMessageMutation::Delete {
+        message_id: "two".into(),
+    };
+    let mut pending = Some(PendingUndo {
+        mutation: first.clone(),
+        expires_at: Instant::now(),
+    });
+    assert_eq!(
+        replace_pending_undo(
+            &mut pending,
+            PendingUndo {
+                mutation: second.clone(),
+                expires_at: Instant::now(),
+            },
+        ),
+        Some(first)
+    );
+    assert_eq!(pending.unwrap().mutation, second);
 }
 
 #[test]
@@ -559,6 +616,46 @@ fn link_safety_warnings_cover_mismatches_and_idn_lookalikes() {
         r#"<a href="https://www.example.com/path">https://example.com/path</a>"#
     )
     .is_empty());
+}
+
+#[test]
+fn url_domain_parses_authority_not_path_or_userinfo() {
+    assert_eq!(
+        url_domain("https://evil.com/a@paypal.com"),
+        Some("evil.com".into())
+    );
+    assert_eq!(
+        url_domain("https://paypal.com@evil.com/login"),
+        Some("evil.com".into())
+    );
+    assert_eq!(
+        url_domain("https://paypal.com:443/login"),
+        Some("paypal.com".into())
+    );
+    assert_eq!(
+        url_domain("https://[2001:db8::1]:443/login"),
+        Some("2001:db8::1".into())
+    );
+    assert_eq!(
+        url_domain("https://xn--pple-43d.example/path"),
+        Some("xn--pple-43d.example".into())
+    );
+    assert_eq!(url_domain("paypal.com"), Some("paypal.com".into()));
+}
+
+#[test]
+fn external_images_are_stripped_from_render_document() {
+    let mut document = RichDocument::from_html_fragment_lossy(
+        r#"<p>hello</p><img src="https://tracker.example/pixel"><img src="cid:logo">"#,
+    );
+    strip_external_images(&mut document);
+    assert!(document.blocks.iter().all(|block| {
+        !matches!(block, RichDocumentBlock::Image { src, .. } if src.starts_with("http://") || src.starts_with("https://"))
+    }));
+    assert!(document
+        .blocks
+        .iter()
+        .any(|block| matches!(block, RichDocumentBlock::Image { src, .. } if src == "cid:logo")));
 }
 
 #[test]
