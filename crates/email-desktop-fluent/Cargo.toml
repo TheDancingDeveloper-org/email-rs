@@ -12,15 +12,15 @@ dotenvy = "0.15"
 email-client = { path = "../email-client" }
 email-server = { path = "../email-server" }
 email-types = { path = "../email-types" }
-fluent-app = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545" }
-fluent-core = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545" }
-fluent-layout = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545" }
-fluent-primitives = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545" }
-gpui = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545" }
+fluent-app = { git = "https://github.com/thedancingdeveloper/fluent-gpui.git", rev = "2b7730635a872df1981ef4f3ceef1427a5776555" }
+fluent-core = { git = "https://github.com/thedancingdeveloper/fluent-gpui.git", rev = "2b7730635a872df1981ef4f3ceef1427a5776555" }
+fluent-layout = { git = "https://github.com/thedancingdeveloper/fluent-gpui.git", rev = "2b7730635a872df1981ef4f3ceef1427a5776555" }
+fluent-primitives = { git = "https://github.com/thedancingdeveloper/fluent-gpui.git", rev = "2b7730635a872df1981ef4f3ceef1427a5776555" }
+gpui = { git = "https://github.com/thedancingdeveloper/fluent-gpui.git", rev = "2b7730635a872df1981ef4f3ceef1427a5776555" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-gpui = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545", features = ["test-support"] }
-fluent-test-utils = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545" }
+gpui = { git = "https://github.com/thedancingdeveloper/fluent-gpui.git", rev = "2b7730635a872df1981ef4f3ceef1427a5776555", features = ["test-support"] }
+fluent-test-utils = { git = "https://github.com/thedancingdeveloper/fluent-gpui.git", rev = "2b7730635a872df1981ef4f3ceef1427a5776555" }

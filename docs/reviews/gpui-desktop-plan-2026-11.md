@@ -71,7 +71,7 @@ link callback cannot be expressed should a narrow fluent-gpui hook be filed.
 
 | Gap | Current state | Owner |
 |---|---|---|
-| Maintained dependency | All GUI dependencies pin `AusAgentSmith-org` `f601e54`; current 3.x is breaking | email-rs G0 |
+| Maintained dependency | G0 moved all GUI dependencies to the maintained `thedancingdeveloper/fluent-gpui` `main` revision; current 3.x remains breaking | email-rs G0 |
 | Tracker/test baseline | Tracker is stale; GUI tests need current test utilities and a11y snapshots | email-rs G1/#2 |
 | Undo safety | Archive/delete/move/send act immediately | #76, #84 |
 | Conversation/list | No stacked reader, quote folding, quick reply or reusable sticky groups | #77; fluent-gpui #96 |
@@ -99,8 +99,11 @@ old fork/revision to one commit from `thedancingdeveloper/fluent-gpui` current
 features.
 
 Exit: `cargo check -p email-desktop-fluent` and focused tests pass; all GUI git
-dependencies use one maintained revision. Record temporary direct-`gpui` or
-pre-tag exceptions for removal after the first 3.x tag.
+dependencies use one maintained revision. G0 landed on `main` revision
+`2b7730635a872df1981ef4f3ceef1427a5776555` because no 3.x tag exists yet.
+The temporary direct-`gpui` entries (including `test-support`) remain only for
+current-main compatibility and must be removed after the first 3.x tag exposes
+the required re-exports. No other dependency revision exception is present.
 
 ### Library prerequisites — fluent-gpui
 

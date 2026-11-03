@@ -125,19 +125,15 @@ pub(crate) fn start_account_setup_oauth(
                     Err(err) => (err.to_string(), false),
                 };
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                modal_entity.update(&mut async_cx, |modal, cx| {
                     modal.set_status(Some(status.clone()), cx);
-                }) {
-                    tracing::warn!("failed to apply native OAuth status: {err}");
-                }
+                });
 
                 if !status.1 {
-                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         state.last_error = Some(status.0);
                         cx.notify();
-                    }) {
-                        tracing::warn!("failed to apply native OAuth error: {err}");
-                    }
+                    });
                 }
             }
         })
@@ -213,7 +209,7 @@ pub(crate) fn start_account_setup_create(
                 let result = task.await;
                 let error_message = result.as_ref().err().map(|err| err.to_string());
 
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_account_create_reload(state, loaded);
@@ -224,19 +220,15 @@ pub(crate) fn start_account_setup_create(
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native account create reload: {err}");
-                }
+                });
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                modal_entity.update(&mut async_cx, |modal, cx| {
                     if let Some(message) = error_message {
                         modal.set_status(Some((message, false)), cx);
                     } else {
                         modal.reset(cx);
                     }
-                }) {
-                    tracing::warn!("failed to apply native account create status: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -279,18 +271,16 @@ pub(crate) fn start_account_setup_refresh(
                     .unwrap_or(false);
 
                 if loaded_has_accounts {
-                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         if let Ok(loaded) = result {
                             apply_account_create_reload(state, loaded);
                             sync_window_title(state, cx);
                             cx.notify();
                         }
-                    }) {
-                        tracing::warn!("failed to apply native account refresh: {err}");
-                    }
+                    });
                 }
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                modal_entity.update(&mut async_cx, |modal, cx| {
                     if loaded_has_accounts {
                         modal.reset(cx);
                     } else if let Some(message) = error_message.clone() {
@@ -301,17 +291,13 @@ pub(crate) fn start_account_setup_refresh(
                             cx,
                         );
                     }
-                }) {
-                    tracing::warn!("failed to apply native account refresh status: {err}");
-                }
+                });
 
                 if let Some(message) = error_message {
-                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         state.last_error = Some(message);
                         cx.notify();
-                    }) {
-                        tracing::warn!("failed to apply native account refresh error: {err}");
-                    }
+                    });
                 }
             }
         })
