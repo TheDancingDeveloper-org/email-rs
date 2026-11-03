@@ -192,6 +192,12 @@ pub(crate) enum NativeSyncUpdate {
     Error(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingUndo {
+    pub(crate) mutation: NativeMessageMutation,
+    pub(crate) expires_at: Instant,
+}
+
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub(crate) struct NativeAppState {
@@ -208,6 +214,7 @@ pub(crate) struct NativeAppState {
     pub(crate) expanded_thread_keys: BTreeSet<String>,
     pub(crate) selected_full_message: Option<FullMessage>,
     pub(crate) quoted_text_expanded: bool,
+    pub(crate) pending_undo: Option<PendingUndo>,
     pub(crate) selected_message_resource: AsyncResource<FullMessage, String>,
     pub(crate) selected_message_labels: Vec<Label>,
     pub(crate) selected_message_labels_resource: AsyncResource<Vec<Label>, String>,
@@ -254,6 +261,7 @@ impl Default for NativeAppState {
             expanded_thread_keys: BTreeSet::new(),
             selected_full_message: None,
             quoted_text_expanded: false,
+            pending_undo: None,
             selected_message_resource: AsyncResource::new(),
             selected_message_labels: Vec::new(),
             selected_message_labels_resource: AsyncResource::new(),
