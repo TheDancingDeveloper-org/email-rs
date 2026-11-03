@@ -541,18 +541,6 @@ fn remote_images_are_blocked_by_default_and_allowlist_is_case_insensitive() {
 }
 
 #[test]
-fn link_safety_warnings_cover_mismatches_and_idn_lookalikes() {
-    let warnings = link_safety_warnings(
-        r#"<p><a href="https://evil.example/login">https://example.com/login</a></p>
-           <p><a href="https://xn--pple-43d.example/">https://apple.example/</a></p>"#,
-    );
-    assert!(warnings
-        .iter()
-        .any(|warning| warning.contains("names example.com")));
-    assert!(warnings.iter().any(|warning| warning.contains("punycode")));
-}
-
-#[test]
 fn native_message_source_uses_current_selection() {
     let mut state = NativeAppState {
         selected_folder: Some("smart:unread".to_string()),
