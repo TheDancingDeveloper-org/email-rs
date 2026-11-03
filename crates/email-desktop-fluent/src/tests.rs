@@ -541,6 +541,43 @@ fn remote_images_are_blocked_by_default_and_allowlist_is_case_insensitive() {
 }
 
 #[test]
+fn link_safety_warnings_cover_mismatches_and_idn_lookalikes() {
+    let warnings = link_safety_warnings(
+        r#"<p><a href="https://evil.example/login">https://example.com/login</a></p>
+           <p><a href="https://xn--pple-43d.example/">https://apple.example/</a></p>
+           <p><a href="https://аpple.example/">https://apple.example/</a></p>"#,
+    );
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("names example.com")));
+    assert!(warnings.iter().any(|warning| warning.contains("punycode")));
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("аpple.example")));
+
+    assert!(link_safety_warnings(
+        r#"<a href="https://www.example.com/path">https://example.com/path</a>"#
+    )
+    .is_empty());
+}
+
+#[test]
+fn sender_trust_status_and_mismatch_warnings_use_server_signals() {
+    let mut state = NativeAppState::default();
+    let mut message = full_message("message", "inbox", true, false);
+    message.authentication_results.spf = AuthenticationResultStatus::Pass;
+    message.authentication_results.dkim = AuthenticationResultStatus::Fail;
+    message.from_reply_to_domain_mismatch = true;
+    state.selected_full_message = Some(message);
+
+    assert_eq!(
+        selected_trust_status(&state).as_deref(),
+        Some("Sender authentication: SPF pass, DKIM failed, DMARC not reported")
+    );
+    assert_eq!(selected_sender_warnings(&state).len(), 1);
+}
+
+#[test]
 fn native_message_source_uses_current_selection() {
     let mut state = NativeAppState {
         selected_folder: Some("smart:unread".to_string()),
