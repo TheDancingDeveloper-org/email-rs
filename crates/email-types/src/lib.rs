@@ -262,6 +262,12 @@ pub enum BulkAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveMessageRequest {
+    pub folder_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct BulkRequest {
     pub ids: Vec<String>,
     pub action: BulkAction,

@@ -12,9 +12,9 @@ use email_types::{
     AuthSession, AuthenticationResultStatus, AuthorizeResponse, BulkRequest, BulkResponse,
     CalendarEvent, Contact, CreateAccount, CreateLabelBody, CreateRuleBody, CreateWebhook,
     DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, Message, MessageAttachment,
-    MessageAuthenticationResults, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
-    SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount,
-    UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
+    MessageAuthenticationResults, MoveMessageRequest, PatchFolder, PatchMessageRequest, RuleDto,
+    SearchResponse, SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse,
+    UpdateAccount, UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 
 use super::integration_tokens::{
@@ -257,6 +257,20 @@ fn doc_delete_message() {}
     responses((status = 200, body = StatusResponse), (status = 404, body = ErrorResponse))
 )]
 fn doc_archive_message() {}
+
+#[utoipa::path(
+    post,
+    path = "/messages/{id}/move",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path)),
+    request_body = MoveMessageRequest,
+    responses(
+        (status = 200, body = StatusResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse)
+    )
+)]
+fn doc_move_message() {}
 
 #[utoipa::path(
     post,
@@ -506,6 +520,7 @@ fn doc_events() {}
         doc_patch_message,
         doc_delete_message,
         doc_archive_message,
+        doc_move_message,
         doc_bulk_messages,
         doc_list_attachments,
         doc_download_attachment,
@@ -583,6 +598,7 @@ fn doc_events() {}
         PatchMessageRequest,
         BulkRequest,
         BulkResponse,
+        MoveMessageRequest,
         SendRequest,
         SendResponse,
         DraftRequest,
