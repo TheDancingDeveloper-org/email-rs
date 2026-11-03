@@ -9,6 +9,7 @@ mod calendar;
 mod calendar_actions;
 mod compose;
 mod compose_view;
+mod conversation;
 mod message_actions;
 mod message_list;
 mod palette;
@@ -46,6 +47,8 @@ use calendar_actions::*;
 use compose::*;
 #[allow(unused_imports)]
 use compose_view::*;
+#[allow(unused_imports)]
+use conversation::*;
 #[allow(unused_imports)]
 use message_actions::*;
 #[allow(unused_imports)]
