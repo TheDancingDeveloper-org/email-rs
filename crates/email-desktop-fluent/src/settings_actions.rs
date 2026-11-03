@@ -111,22 +111,18 @@ pub(crate) fn select_settings_account(
                 let result = task.await;
                 let error_message = result.as_ref().err().map(|err| err.to_string());
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                modal_entity.update(&mut async_cx, |modal, cx| match result {
                     Ok(settings) => modal.apply_account_settings(settings, cx),
                     Err(err) => {
                         modal.fail_account_settings(&requested_account_id, err.to_string(), cx);
                     }
-                }) {
-                    tracing::warn!("failed to apply native account settings load: {err}");
-                }
+                });
 
                 if let Some(message) = error_message {
-                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         state.last_error = Some(message);
                         cx.notify();
-                    }) {
-                        tracing::warn!("failed to apply native account settings error: {err}");
-                    }
+                    });
                 }
             }
         })
@@ -155,20 +151,16 @@ pub(crate) fn select_settings_webhooks(
                 let result = task.await;
                 let error_message = result.as_ref().err().map(|err| err.to_string());
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                modal_entity.update(&mut async_cx, |modal, cx| match result {
                     Ok(webhooks) => modal.apply_webhooks(webhooks, None, false, cx),
                     Err(err) => modal.fail_webhooks(err.to_string(), cx),
-                }) {
-                    tracing::warn!("failed to apply native webhooks load: {err}");
-                }
+                });
 
                 if let Some(message) = error_message {
-                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         state.last_error = Some(message);
                         cx.notify();
-                    }) {
-                        tracing::warn!("failed to apply native webhooks error: {err}");
-                    }
+                    });
                 }
             }
         })
@@ -199,22 +191,18 @@ pub(crate) fn select_settings_rules(
                 let result = task.await;
                 let error_message = result.as_ref().err().map(|err| err.to_string());
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                modal_entity.update(&mut async_cx, |modal, cx| match result {
                     Ok(rules) => modal.apply_rules(&requested_account_id, rules, None, cx),
                     Err(err) => {
                         modal.fail_rules(&requested_account_id, err.to_string(), cx);
                     }
-                }) {
-                    tracing::warn!("failed to apply native rules load: {err}");
-                }
+                });
 
                 if let Some(message) = error_message {
-                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         state.last_error = Some(message);
                         cx.notify();
-                    }) {
-                        tracing::warn!("failed to apply native rules error: {err}");
-                    }
+                    });
                 }
             }
         })
@@ -302,7 +290,7 @@ pub(crate) fn start_settings_save(
                     Err(err) => (err.to_string(), false),
                 };
 
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_loaded_sync_refresh(state, refresh_request, loaded);
@@ -313,20 +301,16 @@ pub(crate) fn start_settings_save(
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native settings save refresh: {err}");
-                }
+                });
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                modal_entity.update(&mut async_cx, |modal, cx| {
                     if modal.active_tab == SettingsTab::Account(requested_account_id.clone()) {
                         modal.set_status(Some(modal_status), cx);
                     } else {
                         modal.saving_account = false;
                         cx.notify();
                     }
-                }) {
-                    tracing::warn!("failed to apply native settings save status: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -380,7 +364,7 @@ pub(crate) fn start_settings_account_delete(
                 let result = task.await;
                 let error_message = result.as_ref().err().map(|err| err.to_string());
 
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_account_delete_reload(state, &requested_account_id, loaded);
@@ -391,19 +375,15 @@ pub(crate) fn start_settings_account_delete(
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native account delete reload: {err}");
-                }
+                });
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                modal_entity.update(&mut async_cx, |modal, cx| {
                     if let Some(message) = error_message {
                         modal.set_status(Some((message, false)), cx);
                     } else {
                         modal.reset(cx);
                     }
-                }) {
-                    tracing::warn!("failed to apply native account delete status: {err}");
-                }
+                });
             }
         })
         .detach();
@@ -567,7 +547,7 @@ pub(crate) fn start_settings_rule_save(
                 let result = task.await;
                 let error_message = result.as_ref().err().map(|err| err.to_string());
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                modal_entity.update(&mut async_cx, |modal, cx| match result {
                     Ok(rules) => {
                         modal.apply_rules(
                             &requested_account_id,
@@ -580,17 +560,13 @@ pub(crate) fn start_settings_rule_save(
                     Err(err) => {
                         modal.fail_rules(&requested_account_id, err.to_string(), cx);
                     }
-                }) {
-                    tracing::warn!("failed to apply native rule save: {err}");
-                }
+                });
 
                 if let Some(message) = error_message {
-                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         state.last_error = Some(message);
                         cx.notify();
-                    }) {
-                        tracing::warn!("failed to apply native rule save error: {err}");
-                    }
+                    });
                 }
             }
         })
@@ -630,7 +606,7 @@ pub(crate) fn start_settings_rule_mutation(
                 let result = task.await;
                 let error_message = result.as_ref().err().map(|err| err.to_string());
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                modal_entity.update(&mut async_cx, |modal, cx| match result {
                     Ok(rules) => modal.apply_rules(
                         &requested_account_id,
                         rules,
@@ -640,17 +616,13 @@ pub(crate) fn start_settings_rule_mutation(
                     Err(err) => {
                         modal.fail_rules(&requested_account_id, err.to_string(), cx);
                     }
-                }) {
-                    tracing::warn!("failed to apply native rule mutation: {err}");
-                }
+                });
 
                 if let Some(message) = error_message {
-                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         state.last_error = Some(message);
                         cx.notify();
-                    }) {
-                        tracing::warn!("failed to apply native rule mutation error: {err}");
-                    }
+                    });
                 }
             }
         })
@@ -771,7 +743,7 @@ pub(crate) fn start_settings_webhook_mutation(
                 let result = task.await;
                 let error_message = result.as_ref().err().map(|err| err.to_string());
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| match result {
+                modal_entity.update(&mut async_cx, |modal, cx| match result {
                     Ok(webhooks) => modal.apply_webhooks(
                         webhooks,
                         Some((success_message.to_string(), true)),
@@ -779,17 +751,13 @@ pub(crate) fn start_settings_webhook_mutation(
                         cx,
                     ),
                     Err(err) => modal.fail_webhooks(err.to_string(), cx),
-                }) {
-                    tracing::warn!("failed to apply native webhook mutation: {err}");
-                }
+                });
 
                 if let Some(message) = error_message {
-                    if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         state.last_error = Some(message);
                         cx.notify();
-                    }) {
-                        tracing::warn!("failed to apply native webhook mutation error: {err}");
-                    }
+                    });
                 }
             }
         })
@@ -830,7 +798,7 @@ pub(crate) fn start_folder_exclusion_toggle(
                     Err(err) => (err.to_string(), false),
                 };
 
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(loaded) => {
                             apply_loaded_sync_refresh(state, refresh_request, loaded);
@@ -841,15 +809,11 @@ pub(crate) fn start_folder_exclusion_toggle(
                     }
                     sync_window_title(state, cx);
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native folder exclusion refresh: {err}");
-                }
+                });
 
-                if let Err(err) = modal_entity.update(&mut async_cx, |modal, cx| {
+                modal_entity.update(&mut async_cx, |modal, cx| {
                     modal.set_status(Some(modal_status), cx);
-                }) {
-                    tracing::warn!("failed to apply native folder exclusion status: {err}");
-                }
+                });
             }
         })
         .detach();

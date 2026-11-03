@@ -149,7 +149,7 @@ pub(crate) fn start_native_auth(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                let _ = modal_entity.update(&mut async_cx, |modal, cx| {
+                modal_entity.update(&mut async_cx, |modal, cx| {
                     modal.busy = false;
                     if let Err(error) = &result {
                         modal.error = Some(error.to_string());
@@ -157,7 +157,7 @@ pub(crate) fn start_native_auth(
                     cx.notify();
                 });
                 if let Ok(loaded) = result {
-                    let _ = state_entity.update(&mut async_cx, |state, cx| {
+                    state_entity.update(&mut async_cx, |state, cx| {
                         state.auth_required = false;
                         apply_initial_account_load(
                             state,

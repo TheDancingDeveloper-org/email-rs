@@ -626,7 +626,7 @@ impl Render for SettingsModal {
             return div();
         }
         if !self.focused_on_open {
-            window.focus(&self.focus_handle);
+            window.focus(&self.focus_handle, cx);
             self.focused_on_open = true;
         }
 
@@ -1001,7 +1001,7 @@ pub(crate) fn start_native_logout(state_entity: &Entity<NativeAppState>, app_cx:
             async move {
                 let _ = task.await;
                 clear_native_auth_token();
-                let _ = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     state.auth_required = true;
                     state.accounts.clear();
                     state.messages.clear();

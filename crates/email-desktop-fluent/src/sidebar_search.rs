@@ -448,7 +448,7 @@ pub(crate) fn start_sidebar_search_suggestions_load(
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                if let Err(err) = state_entity.update(&mut async_cx, |state, cx| {
+                state_entity.update(&mut async_cx, |state, cx| {
                     match result {
                         Ok(suggestions) => {
                             apply_loaded_sidebar_search_suggestions(
@@ -463,9 +463,7 @@ pub(crate) fn start_sidebar_search_suggestions_load(
                         }
                     }
                     cx.notify();
-                }) {
-                    tracing::warn!("failed to apply native sidebar search suggestions: {err}");
-                }
+                });
             }
         })
         .detach();
