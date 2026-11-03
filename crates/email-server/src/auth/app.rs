@@ -326,6 +326,9 @@ fn has_forwarding_headers(headers: &HeaderMap) -> bool {
         "x-forwarded-host",
         "x-forwarded-proto",
         "x-real-ip",
+        "cf-connecting-ip",
+        "true-client-ip",
+        "x-client-ip",
     ]
     .iter()
     .any(|name| headers.contains_key(*name))
@@ -920,6 +923,9 @@ mod tests {
             ("x-forwarded-host", "mail.example.com"),
             ("x-forwarded-proto", "https"),
             ("x-real-ip", "203.0.113.10"),
+            ("cf-connecting-ip", "203.0.113.10"),
+            ("true-client-ip", "203.0.113.10"),
+            ("x-client-ip", "203.0.113.10"),
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(name, value.parse().unwrap());

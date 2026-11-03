@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use axum::{
     extract::{Path, Query, State},
@@ -373,24 +376,47 @@ struct VettedUrl {
     socket: std::net::SocketAddr,
 }
 
-#[derive(Default)]
+const DELIVERY_CLIENT_CACHE_CAPACITY: usize = 256;
+
 struct DeliveryClients {
-    by_destination: std::sync::Mutex<HashMap<(String, std::net::SocketAddr), reqwest::Client>>,
+    by_destination: std::sync::Mutex<DeliveryClientCache>,
+}
+
+#[derive(Default)]
+struct DeliveryClientCache {
+    clients: HashMap<(String, std::net::SocketAddr), reqwest::Client>,
+    lru: VecDeque<(String, std::net::SocketAddr)>,
+}
+
+impl Default for DeliveryClients {
+    fn default() -> Self {
+        Self {
+            by_destination: std::sync::Mutex::new(DeliveryClientCache::default()),
+        }
+    }
 }
 
 impl DeliveryClients {
     fn get(&self, vetted: &VettedUrl) -> std::result::Result<reqwest::Client, reqwest::Error> {
         let key = (vetted.host.clone(), vetted.socket);
-        let mut clients = self
+        let mut cache = self
             .by_destination
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(client) = clients.get(&key) {
-            return Ok(client.clone());
+        if let Some(client) = cache.clients.get(&key).cloned() {
+            cache.lru.retain(|cached| cached != &key);
+            cache.lru.push_back(key);
+            return Ok(client);
         }
 
         let client = delivery_client(vetted)?;
-        clients.insert(key, client.clone());
+        cache.clients.insert(key.clone(), client.clone());
+        cache.lru.push_back(key);
+        if cache.clients.len() > DELIVERY_CLIENT_CACHE_CAPACITY {
+            if let Some(evicted) = cache.lru.pop_front() {
+                cache.clients.remove(&evicted);
+            }
+        }
         Ok(client)
     }
 
@@ -399,6 +425,7 @@ impl DeliveryClients {
         self.by_destination
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clients
             .len()
     }
 }
@@ -1230,6 +1257,19 @@ mod tests {
         clients.get(&vetted).expect("first client builds");
         clients.get(&vetted).expect("cached client is returned");
         assert_eq!(clients.len(), 1);
+    }
+
+    #[test]
+    fn delivery_clients_are_bounded() {
+        let clients = DeliveryClients::default();
+        for index in 0..=DELIVERY_CLIENT_CACHE_CAPACITY {
+            let vetted = VettedUrl {
+                host: format!("hooks-{index}.example.com"),
+                socket: format!("1.1.1.{}:443", index % 255 + 1).parse().unwrap(),
+            };
+            clients.get(&vetted).expect("client builds");
+        }
+        assert_eq!(clients.len(), DELIVERY_CLIENT_CACHE_CAPACITY);
     }
 
     #[test]
