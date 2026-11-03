@@ -487,6 +487,7 @@ fn native_preferences_parse_and_clamp_density() {
                 sidebar_width: MAX_SIDEBAR_WIDTH,
                 message_list_width: MIN_MESSAGE_LIST_WIDTH,
             },
+            remote_image_allowlist: BTreeSet::new(),
         }
     );
 }
@@ -515,6 +516,7 @@ fn native_preferences_round_trip_to_disk() {
             sidebar_width: 333,
             message_list_width: 444,
         },
+        remote_image_allowlist: BTreeSet::from(["alice@example.test".to_string()]),
     };
 
     write_native_preferences(&path, &preferences).expect("write preferences");
@@ -522,6 +524,32 @@ fn native_preferences_round_trip_to_disk() {
     assert_eq!(parse_native_preferences(&raw), preferences);
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn remote_images_are_blocked_by_default_and_allowlist_is_case_insensitive() {
+    let state = NativeAppState::default();
+    assert!(!state.show_external_images);
+    assert!(!sender_images_allowed(&state, "Alice@example.test"));
+
+    let mut state = NativeAppState::default();
+    state
+        .remote_image_allowlist
+        .insert("alice@example.test".to_string());
+    assert!(sender_images_allowed(&state, " Alice@EXAMPLE.TEST "));
+    assert!(!sender_images_allowed(&state, "bob@example.test"));
+}
+
+#[test]
+fn link_safety_warnings_cover_mismatches_and_idn_lookalikes() {
+    let warnings = link_safety_warnings(
+        r#"<p><a href="https://evil.example/login">https://example.com/login</a></p>
+           <p><a href="https://xn--pple-43d.example/">https://apple.example/</a></p>"#,
+    );
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("names example.com")));
+    assert!(warnings.iter().any(|warning| warning.contains("punycode")));
 }
 
 #[test]
