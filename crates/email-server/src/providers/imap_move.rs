@@ -61,6 +61,47 @@ where
     Ok(moved_from(copied, uid))
 }
 
+/// Delete `uid` from `folder` without touching any other `\Deleted` message.
+///
+/// Refuses before changing anything when the server lacks `UIDPLUS`, because a
+/// plain `EXPUNGE` would remove every message flagged `\Deleted` in the
+/// folder. With `copy_to` the message is first copied there (for example to
+/// Trash); a failed copy flags and expunges nothing.
+pub(crate) async fn delete_uid<T>(
+    session: &mut Session<T>,
+    folder: &str,
+    uid: u32,
+    copy_to: Option<&str>,
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let src = quote_mailbox(folder)?;
+    let dest = copy_to.map(quote_mailbox).transpose()?;
+    run_tagged(session, "SELECT", &format!("SELECT {src}")).await?;
+    let capabilities = session
+        .capabilities()
+        .await
+        .map_err(|e| AppError::Imap(format!("CAPABILITY failed: {e}")))?;
+    if !capabilities.has_str("UIDPLUS") {
+        return Err(AppError::Provider(format!(
+            "this server does not support UIDPLUS, so message {uid} cannot be deleted from \
+             {folder} without also expunging other deleted messages; nothing was changed"
+        )));
+    }
+    if let Some(dest) = dest {
+        run_tagged(session, "UID COPY", &format!("UID COPY {uid} {dest}")).await?;
+    }
+    run_tagged(
+        session,
+        "UID STORE \\Deleted",
+        &format!("UID STORE {uid} +FLAGS (\\Deleted)"),
+    )
+    .await?;
+    run_tagged(session, "UID EXPUNGE", &format!("UID EXPUNGE {uid}")).await?;
+    Ok(())
+}
+
 fn moved_from(copied: Option<CopyUid>, uid: u32) -> MovedMessage {
     let dest_uid = copied.as_ref().and_then(|c| {
         c.source
@@ -328,6 +369,65 @@ mod tests {
         assert_eq!(
             commands(&log),
             ["SELECT \"INBOX\"", "CAPABILITY", "UID COPY 7 \"Missing\""]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_uid_expunges_only_that_uid() {
+        let (mut session, log) = session_with("UIDPLUS", CopyReply::Ok).await;
+        delete_uid(&mut session, "INBOX", 7, None).await.unwrap();
+        assert_eq!(
+            commands(&log),
+            [
+                "SELECT \"INBOX\"",
+                "CAPABILITY",
+                "UID STORE 7 +FLAGS (\\Deleted)",
+                "UID EXPUNGE 7",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_uid_with_trash_copies_first_then_expunges_only_that_uid() {
+        let (mut session, log) = session_with("UIDPLUS", CopyReply::Ok).await;
+        delete_uid(&mut session, "INBOX", 7, Some("[Gmail]/Trash"))
+            .await
+            .unwrap();
+        assert_eq!(
+            commands(&log),
+            [
+                "SELECT \"INBOX\"",
+                "CAPABILITY",
+                "UID COPY 7 \"[Gmail]/Trash\"",
+                "UID STORE 7 +FLAGS (\\Deleted)",
+                "UID EXPUNGE 7",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_uid_without_uidplus_is_refused_before_anything_changes() {
+        let (mut session, log) = session_with("", CopyReply::Ok).await;
+        let error = delete_uid(&mut session, "INBOX", 7, Some("[Gmail]/Trash"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("UIDPLUS"), "{error}");
+        assert_eq!(commands(&log), ["SELECT \"INBOX\"", "CAPABILITY"]);
+    }
+
+    #[tokio::test]
+    async fn delete_uid_failed_copy_flags_and_expunges_nothing() {
+        let (mut session, log) = session_with("UIDPLUS", CopyReply::No).await;
+        delete_uid(&mut session, "INBOX", 7, Some("[Gmail]/Trash"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            commands(&log),
+            [
+                "SELECT \"INBOX\"",
+                "CAPABILITY",
+                "UID COPY 7 \"[Gmail]/Trash\""
+            ]
         );
     }
 
