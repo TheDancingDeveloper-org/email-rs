@@ -10,7 +10,7 @@ use rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 use uuid::Uuid;
 
-use super::{Folder, IdleEvent, MailProvider, Message, MessageBody};
+use super::{Folder, IdleEvent, MailProvider, Message, MessageBody, MovedMessage};
 use crate::error::{AppError, Result};
 use tracing::info;
 
@@ -604,40 +604,16 @@ impl MailProvider for GenericImapProvider {
         Ok(())
     }
 
-    async fn move_message(&self, src_folder: &str, uid: u32, dest_folder: &str) -> Result<()> {
+    async fn move_message(
+        &self,
+        src_folder: &str,
+        uid: u32,
+        dest_folder: &str,
+    ) -> Result<MovedMessage> {
         let mut session = self.connect().await?;
-        session
-            .select(src_folder)
-            .await
-            .map_err(|e| AppError::Imap(format!("SELECT failed: {}", e)))?;
-        let capabilities = session
-            .capabilities()
-            .await
-            .map_err(|e| AppError::Imap(format!("CAPABILITY failed: {e}")))?;
-        if move_strategy(capabilities.has_str("MOVE")) == MoveStrategy::UidMove {
-            session
-                .uid_mv(uid.to_string(), dest_folder)
-                .await
-                .map_err(|e| AppError::Imap(format!("UID MOVE failed: {}", e)))?;
-            let _ = session.logout().await;
-            return Ok(());
-        }
-        session
-            .uid_copy(uid.to_string(), dest_folder)
-            .await
-            .map_err(|e| AppError::Imap(format!("UID COPY failed: {}", e)))?;
-        let store_stream = session
-            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
-            .await
-            .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {}", e)))?;
-        super::drain_imap_stream(store_stream, "UID STORE \\Deleted").await?;
-        let expunged = session
-            .expunge()
-            .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?;
-        super::drain_imap_stream(expunged, "EXPUNGE").await?;
+        let moved = super::imap_move::move_uid(&mut session, src_folder, uid, dest_folder).await;
         let _ = session.logout().await;
-        Ok(())
+        moved
     }
 
     async fn set_flagged(&self, folder: &str, uid: u32, flagged: bool) -> Result<()> {
@@ -717,33 +693,6 @@ mod tests {
         assert_eq!(special_use_for_name("Sent", &[]), Some("sent".into()));
         assert_eq!(special_use_for_name("Sent Items", &[]), Some("sent".into()));
         assert_eq!(special_use_for_name("Sent Mail", &[]), Some("sent".into()));
-    }
-}
-
-/// How a message moves between folders: RFC 6851 `UID MOVE` when the server
-/// advertises `MOVE`, otherwise `UID COPY` + `\Deleted` + `EXPUNGE`.
-#[derive(Debug, PartialEq, Eq)]
-enum MoveStrategy {
-    UidMove,
-    CopyExpunge,
-}
-
-fn move_strategy(server_has_move: bool) -> MoveStrategy {
-    if server_has_move {
-        MoveStrategy::UidMove
-    } else {
-        MoveStrategy::CopyExpunge
-    }
-}
-
-#[cfg(test)]
-mod move_tests {
-    use super::{move_strategy, MoveStrategy};
-
-    #[test]
-    fn move_capability_selects_uid_move_else_copy_expunge() {
-        assert_eq!(move_strategy(true), MoveStrategy::UidMove);
-        assert_eq!(move_strategy(false), MoveStrategy::CopyExpunge);
     }
 }
 

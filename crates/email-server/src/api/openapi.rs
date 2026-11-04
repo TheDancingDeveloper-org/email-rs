@@ -12,9 +12,10 @@ use email_types::{
     AuthSession, AuthenticationResultStatus, AuthorizeResponse, BulkRequest, BulkResponse,
     CalendarEvent, Contact, CreateAccount, CreateLabelBody, CreateRuleBody, CreateWebhook,
     DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, Message, MessageAttachment,
-    MessageAuthenticationResults, MoveMessageRequest, PatchFolder, PatchMessageRequest, RuleDto,
-    SearchResponse, SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse,
-    UpdateAccount, UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
+    MessageAuthenticationResults, MoveMessageRequest, MoveMessageResponse, PatchFolder,
+    PatchMessageRequest, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
+    StatusResponse, SuggestResponse, UpdateAccount, UpdateLabelBody, UpdateRuleBody, UpdateWebhook,
+    Webhook,
 };
 
 use super::integration_tokens::{
@@ -265,7 +266,7 @@ fn doc_archive_message() {}
     params(("id" = String, Path)),
     request_body = MoveMessageRequest,
     responses(
-        (status = 200, body = StatusResponse),
+        (status = 200, body = MoveMessageResponse),
         (status = 400, body = ErrorResponse),
         (status = 404, body = ErrorResponse)
     )
@@ -599,6 +600,7 @@ fn doc_events() {}
         BulkRequest,
         BulkResponse,
         MoveMessageRequest,
+        MoveMessageResponse,
         SendRequest,
         SendResponse,
         DraftRequest,

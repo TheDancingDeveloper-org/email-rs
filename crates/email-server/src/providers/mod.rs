@@ -183,8 +183,15 @@ pub trait MailProvider: Send + Sync {
     async fn mark_unseen(&self, folder: &str, uid: u32) -> Result<()>;
     /// Move a message to the trash folder (permanent delete on providers without trash).
     async fn delete_message(&self, folder: &str, uid: u32) -> Result<()>;
-    /// Move a message to a destination folder by IMAP MOVE (or COPY+STORE \Deleted+EXPUNGE).
-    async fn move_message(&self, src_folder: &str, uid: u32, dest_folder: &str) -> Result<()>;
+    /// Move a message to a destination folder by IMAP MOVE, or by COPY, STORE
+    /// \Deleted and UID EXPUNGE when the server has UIDPLUS. Returns where the
+    /// server put it, when the server said.
+    async fn move_message(
+        &self,
+        src_folder: &str,
+        uid: u32,
+        dest_folder: &str,
+    ) -> Result<MovedMessage>;
     /// Toggle the \Flagged flag.
     async fn set_flagged(&self, folder: &str, uid: u32, flagged: bool) -> Result<()>;
     /// Append a provider-synchronized RFC/MIME draft to the given mailbox.
@@ -251,6 +258,15 @@ pub mod factory;
 pub mod generic_imap;
 pub mod gmail;
 pub mod google_calendar;
+pub(crate) mod imap_move;
+
+/// Where the server placed a moved message, from the `COPYUID` response code.
+/// Both fields are `None` when the server did not report it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MovedMessage {
+    pub uid: Option<u32>,
+    pub uid_validity: Option<u32>,
+}
 
 /// Longest provider error text carried into an [`AppError`]. async-imap's
 /// parse errors embed the whole unparsed read buffer, up to 512 MiB.

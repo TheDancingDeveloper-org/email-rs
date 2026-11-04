@@ -267,6 +267,17 @@ pub struct MoveMessageRequest {
     pub folder_id: String,
 }
 
+/// Result of moving a message. `message_id` is the message's id in the
+/// destination folder, which the move to put it back needs; it is absent when
+/// the mail server did not say where the message went.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveMessageResponse {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct BulkRequest {
     pub ids: Vec<String>,

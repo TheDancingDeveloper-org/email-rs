@@ -14,7 +14,7 @@ use base64::Engine;
 use email_types::{
     AuthenticationResultStatus, BulkAction, BulkRequest, BulkResponse, BulkResult,
     Message as MessageRow, MessageAttachment, MessageAuthenticationResults, MoveMessageRequest,
-    PatchMessageRequest,
+    MoveMessageResponse, PatchMessageRequest,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -68,7 +68,7 @@ pub async fn bulk_messages(
 use crate::api::webhooks::fire_webhooks;
 use crate::error::{AppError, Result};
 use crate::providers::factory::provider_for_message;
-use crate::providers::{MailProvider, ProviderAttachment};
+use crate::providers::{MailProvider, MovedMessage, ProviderAttachment};
 use crate::state::AppState;
 
 async fn message_folder_id(pool: &sqlx::SqlitePool, message_id: &str) -> Result<Option<String>> {
@@ -133,9 +133,10 @@ async fn delete_remote(state: &AppState, message_id: &str) -> Result<()> {
     .fetch_optional(&state.pool)
     .await?;
     match trash {
-        Some(destination) if destination != source => {
-            provider.move_message(&source, uid, &destination).await
-        }
+        Some(destination) if destination != source => provider
+            .move_message(&source, uid, &destination)
+            .await
+            .map(|_| ()),
         _ => provider.delete_message(&source, uid).await,
     }
 }
@@ -328,7 +329,7 @@ pub async fn move_message(
     State(state): State<Arc<AppState>>,
     Path(message_id): Path<String>,
     Json(body): Json<MoveMessageRequest>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<MoveMessageResponse>> {
     ensure_message_exists(&state.pool, &message_id).await?;
     let event = message_event_context(&state.pool, &message_id).await?;
     let source_folder_id = message_folder_id(&state.pool, &message_id).await?;
@@ -351,13 +352,15 @@ pub async fn move_message(
     }
 
     let (source, uid, provider) = load_provider(&state, &message_id).await?;
-    provider.move_message(&source, uid, &destination).await?;
-    // The destination UID is chosen by the server; the next sync creates the
-    // destination occurrence, as for archive.
-    sqlx::query("DELETE FROM messages WHERE id = ?")
-        .bind(&message_id)
-        .execute(&state.pool)
-        .await?;
+    let moved = provider.move_message(&source, uid, &destination).await?;
+    // The server chose the destination UID. Record the destination occurrence
+    // under a new id so the caller can move it back; the next sync upserts
+    // onto the same row.
+    let new_message_id =
+        record_moved_message(&state.pool, &message_id, &body.folder_id, moved).await?;
+    if new_message_id.is_some() {
+        refresh_folder_counts(&state.pool, &body.folder_id).await?;
+    }
     if let Some(source_folder_id) = source_folder_id {
         refresh_folder_counts(&state.pool, &source_folder_id).await?;
     }
@@ -368,7 +371,66 @@ pub async fn move_message(
         fire_webhooks(&state.pool, &account_id, "message.moved", data).await;
     }
 
-    Ok(Json(serde_json::json!({ "status": "moved" })))
+    Ok(Json(MoveMessageResponse {
+        status: "moved".to_string(),
+        message_id: new_message_id,
+    }))
+}
+
+/// Replace the source occurrence with the destination occurrence the server
+/// reported, copying its cached metadata and labels. Without a reported UID the
+/// source row is only removed and the next sync discovers the destination.
+async fn record_moved_message(
+    pool: &sqlx::SqlitePool,
+    source_id: &str,
+    destination_folder_id: &str,
+    moved: MovedMessage,
+) -> Result<Option<String>> {
+    let mut tx = pool.begin().await?;
+    let mut new_id = None;
+    if let (Some(uid), Some(uid_validity)) = (moved.uid, moved.uid_validity) {
+        sqlx::query(
+            r#"INSERT INTO messages
+                   (id, logical_id, account_id, folder_id, uid, uid_validity, message_id, thread_id,
+                    subject, from_name, from_email, to_json, cc_json, date,
+                    is_read, is_flagged, is_draft, has_attachments, preview, synced_at)
+               SELECT ?, logical_id, account_id, ?, ?, ?, message_id, thread_id,
+                      subject, from_name, from_email, to_json, cc_json, date,
+                      is_read, is_flagged, is_draft, has_attachments, preview, synced_at
+               FROM messages WHERE id = ?
+               ON CONFLICT(folder_id, uid_validity, uid) DO NOTHING"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(destination_folder_id)
+        .bind(uid as i64)
+        .bind(uid_validity as i64)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+        let id: String = sqlx::query_scalar(
+            "SELECT id FROM messages WHERE folder_id = ? AND uid_validity = ? AND uid = ?",
+        )
+        .bind(destination_folder_id)
+        .bind(uid_validity as i64)
+        .bind(uid as i64)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"INSERT OR IGNORE INTO message_labels (id, message_id, label_id)
+               SELECT lower(hex(randomblob(16))), ?, label_id FROM message_labels WHERE message_id = ?"#,
+        )
+        .bind(&id)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+        new_id = Some(id);
+    }
+    sqlx::query("DELETE FROM messages WHERE id = ?")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(new_id)
 }
 
 pub async fn list_attachments(
@@ -2113,6 +2175,60 @@ mod tests {
                 .unwrap();
         assert_eq!(remaining, 0);
         assert_eq!(folder_counts(&state.pool, "fld-inbox").await, (0, 0));
+
+        // The destination occurrence exists under the id the API returned.
+        let new_id = body["messageId"].as_str().expect("messageId").to_string();
+        assert_ne!(new_id, "move-msg");
+        let (folder, subject): (String, Option<String>) =
+            sqlx::query_as("SELECT folder_id, subject FROM messages WHERE id = ?")
+                .bind(&new_id)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(folder, "fld-projects");
+        assert_eq!(subject.as_deref(), Some("Subject of move-msg"));
+        assert_eq!(folder_counts(&state.pool, "fld-projects").await.1, 1);
+    }
+
+    #[tokio::test]
+    async fn move_then_move_back_with_the_returned_id_round_trips() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld-inbox", "acc1", Some("inbox")).await;
+        seed_folder(&state.pool, "fld-projects", "acc1", None).await;
+        seed_message(&state.pool, "rt-msg", "acc1", "fld-inbox").await;
+
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/rt-msg/move",
+            Some(serde_json::json!({"folderId": "fld-projects"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let moved_id = body["messageId"].as_str().unwrap().to_string();
+
+        let (status, back) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            &format!("/messages/{moved_id}/move"),
+            Some(serde_json::json!({"folderId": "fld-inbox"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{back}");
+        let restored_id = back["messageId"].as_str().unwrap();
+        let folder: String = sqlx::query_scalar("SELECT folder_id FROM messages WHERE id = ?")
+            .bind(restored_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(folder, "fld-inbox");
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(folder_counts(&state.pool, "fld-projects").await.1, 0);
     }
 
     #[tokio::test]

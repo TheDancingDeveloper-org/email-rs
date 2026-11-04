@@ -62,6 +62,13 @@ impl EmailDesktopApp {
                         {
                             break;
                         }
+                        let _ = app.update(&mut async_cx, |app, cx| {
+                            app.state.update(cx, |state, cx| {
+                                if expire_move_notice(&mut state.move_notice, Instant::now()) {
+                                    cx.notify();
+                                }
+                            });
+                        });
                         if let Ok(Some(mutation)) =
                             app.update(&mut async_cx, |app, cx| take_expired_undo(&app.state, cx))
                         {

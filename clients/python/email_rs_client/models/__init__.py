@@ -45,6 +45,7 @@ from .message_authentication_results import MessageAuthenticationResults
 from .message_body import MessageBody
 from .message_suggestion import MessageSuggestion
 from .move_message_request import MoveMessageRequest
+from .move_message_response import MoveMessageResponse
 from .outgoing_attachment import OutgoingAttachment
 from .patch_folder import PatchFolder
 from .patch_message_request import PatchMessageRequest
@@ -111,6 +112,7 @@ __all__ = (
     "MessageBody",
     "MessageSuggestion",
     "MoveMessageRequest",
+    "MoveMessageResponse",
     "OutgoingAttachment",
     "PatchFolder",
     "PatchMessageRequest",

@@ -118,6 +118,75 @@ pub(crate) struct LoadedSyncRefresh {
     pub(crate) folders_by_account: BTreeMap<String, Vec<Folder>>,
     pub(crate) labels: Vec<Label>,
     pub(crate) messages: Option<LoadedMessageCollection>,
+    /// What a folder move did, message by message; `None` for other actions.
+    pub(crate) move_summary: Option<MoveSummary>,
+}
+
+/// A message that was moved, as the server now knows it: its id in the
+/// destination folder and the folder the move left.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MovedRef {
+    pub(crate) message_id: String,
+    pub(crate) original_folder_id: String,
+}
+
+/// The per-message outcome of a folder move. A failure does not stop the
+/// messages after it: each is tried, and the ones that moved can be moved back.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MoveSummary {
+    /// Moved, and the server said where, so each can be moved back.
+    pub(crate) moved: Vec<MovedRef>,
+    /// Moved, but the server did not say where, so these cannot be moved back.
+    pub(crate) moved_untracked: usize,
+    /// (message id, error) for each message that did not move.
+    pub(crate) failed: Vec<(String, String)>,
+    /// This summary reports an undo, which is not itself undoable.
+    pub(crate) is_undo: bool,
+}
+
+impl MoveSummary {
+    pub(crate) fn moved_count(&self) -> usize {
+        self.moved.len() + self.moved_untracked
+    }
+
+    pub(crate) fn can_undo(&self) -> bool {
+        !self.is_undo && !self.moved.is_empty()
+    }
+
+    pub(crate) fn text(&self) -> String {
+        let moved = self.moved_count();
+        let failed = self.failed.len();
+        let total = moved + failed;
+        let noun = |n: usize| if n == 1 { "message" } else { "messages" };
+        let verb = if self.is_undo { "Moved back" } else { "Moved" };
+        let mut text = if failed == 0 {
+            format!("{verb} {moved} {}.", noun(moved))
+        } else if moved == 0 {
+            format!("Could not move {failed} {}", noun(failed))
+        } else {
+            format!("{verb} {moved} of {total} messages; {failed} failed")
+        };
+        if let Some((_, error)) = self.failed.first() {
+            text.push_str(&format!(": {error}"));
+            if failed > 1 {
+                text.push_str(&format!(" (and {} more)", failed - 1));
+            }
+        }
+        if self.moved_untracked > 0 && !self.is_undo {
+            text.push_str(&format!(
+                " Undo is unavailable for {} that the server did not locate.",
+                self.moved_untracked
+            ));
+        }
+        text
+    }
+}
+
+/// The last move's outcome, shown until dismissed or expired.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MoveNotice {
+    pub(crate) summary: MoveSummary,
+    pub(crate) expires_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,6 +218,12 @@ pub(crate) enum NativeMessageMutation {
     MoveToFolder {
         message_ids: Vec<String>,
         folder_id: String,
+        /// Each message's folder before the move: id -> folder id.
+        source_folders: BTreeMap<String, String>,
+    },
+    /// Move messages back after a completed move (the undo of `MoveToFolder`).
+    UndoMove {
+        moves: Vec<MovedRef>,
     },
 }
 
@@ -163,6 +238,10 @@ impl NativeMessageMutation {
             Self::AddLabels { message_ids, .. } | Self::MoveToFolder { message_ids, .. } => {
                 message_ids.first().map(String::as_str).unwrap_or_default()
             }
+            Self::UndoMove { moves } => moves
+                .first()
+                .map(|moved| moved.message_id.as_str())
+                .unwrap_or_default(),
         }
     }
 
@@ -181,6 +260,7 @@ impl NativeMessageMutation {
             Self::Snooze { .. } => "snooze message",
             Self::AddLabels { .. } => "apply label",
             Self::MoveToFolder { .. } => "move message to folder",
+            Self::UndoMove { .. } => "undo move",
         }
     }
 }
@@ -596,6 +676,45 @@ pub(crate) fn commit_message_mutation_and_refresh(
         .detach();
 }
 
+/// How long the outcome of a move, and its undo, stay on screen.
+pub(crate) const MOVE_NOTICE_LIFETIME: Duration = Duration::from_secs(30);
+
+/// Move the messages of the last completed move back where they came from.
+pub(crate) fn start_undo_completed_move(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let moves = state_entity.update(app_cx, |state, cx| {
+        let notice = state.move_notice.take();
+        cx.notify();
+        notice
+            .filter(|notice| notice.summary.can_undo())
+            .map(|notice| notice.summary.moved)
+    });
+    if let Some(moves) = moves {
+        commit_message_mutation_and_refresh(
+            state_entity,
+            NativeMessageMutation::UndoMove { moves },
+            app_cx,
+        );
+    }
+}
+
+pub(crate) fn dismiss_move_notice(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    state_entity.update(app_cx, |state, cx| {
+        state.move_notice = None;
+        cx.notify();
+    });
+}
+
+pub(crate) fn expire_move_notice(notice: &mut Option<MoveNotice>, now: Instant) -> bool {
+    if notice
+        .as_ref()
+        .is_some_and(|notice| now >= notice.expires_at)
+    {
+        *notice = None;
+        return true;
+    }
+    false
+}
+
 pub(crate) fn cancel_pending_undo(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
     state_entity.update(app_cx, |state, cx| {
         state.pending_undo = None;
@@ -762,6 +881,7 @@ pub(crate) fn load_sync_complete_refresh(
             folders_by_account: tree.folders_by_account,
             labels: tree.labels,
             messages,
+            move_summary: None,
         })
     })
 }
@@ -795,6 +915,7 @@ pub(crate) fn mark_folder_read_and_refresh(
             folders_by_account: tree.folders_by_account,
             labels: tree.labels,
             messages,
+            move_summary: None,
         })
     })
 }
@@ -810,6 +931,7 @@ pub(crate) fn mutate_message_and_refresh(
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
         let action_label = mutation.action_label();
+        let mut move_summary = None;
         match &mutation {
             NativeMessageMutation::Archive { message_id } => {
                 client.archive_message(message_id).await?;
@@ -869,13 +991,32 @@ pub(crate) fn mutate_message_and_refresh(
             NativeMessageMutation::MoveToFolder {
                 message_ids,
                 folder_id,
+                source_folders,
             } => {
-                for message_id in message_ids {
-                    client
-                        .move_message(message_id, folder_id)
-                        .await
-                        .with_context(|| format!("move message {message_id} to {folder_id}"))?;
-                }
+                let items = message_ids
+                    .iter()
+                    .map(|message_id| {
+                        (
+                            message_id.clone(),
+                            folder_id.clone(),
+                            source_folders.get(message_id).cloned().unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                move_summary = Some(move_each(&client, items, false).await);
+            }
+            NativeMessageMutation::UndoMove { moves } => {
+                let items = moves
+                    .iter()
+                    .map(|moved| {
+                        (
+                            moved.message_id.clone(),
+                            moved.original_folder_id.clone(),
+                            String::new(),
+                        )
+                    })
+                    .collect();
+                move_summary = Some(move_each(&client, items, true).await);
             }
         }
 
@@ -901,8 +1042,35 @@ pub(crate) fn mutate_message_and_refresh(
             folders_by_account: tree.folders_by_account,
             labels: tree.labels,
             messages,
+            move_summary,
         })
     })
+}
+
+/// Move each `(message id, target folder, original folder)`, recording every
+/// outcome rather than stopping at the first failure.
+pub(crate) async fn move_each(
+    client: &EmailClient,
+    items: Vec<(String, String, String)>,
+    is_undo: bool,
+) -> MoveSummary {
+    let mut summary = MoveSummary {
+        is_undo,
+        ..MoveSummary::default()
+    };
+    for (message_id, target_folder, original_folder) in items {
+        match client.move_message(&message_id, &target_folder).await {
+            Ok(response) => match response.message_id {
+                Some(new_id) => summary.moved.push(MovedRef {
+                    message_id: new_id,
+                    original_folder_id: original_folder,
+                }),
+                None => summary.moved_untracked += 1,
+            },
+            Err(err) => summary.failed.push((message_id, format!("{err:#}"))),
+        }
+    }
+    summary
 }
 
 pub(crate) struct BulkRefreshOutcome {
@@ -958,6 +1126,7 @@ pub(crate) fn bulk_message_action_and_refresh(
                 folders_by_account: tree.folders_by_account,
                 labels: tree.labels,
                 messages,
+                move_summary: None,
             },
             warning,
         })
@@ -1015,8 +1184,16 @@ pub(crate) fn mutate_message_label_and_reload(
 pub(crate) fn apply_loaded_sync_refresh(
     state: &mut NativeAppState,
     request: NativeSyncRefreshRequest,
-    loaded: LoadedSyncRefresh,
+    mut loaded: LoadedSyncRefresh,
 ) -> bool {
+    // The move already happened on the server, so its outcome (and the ids
+    // needed to undo it) is kept even when the refresh itself is stale.
+    if let Some(summary) = loaded.move_summary.take() {
+        state.move_notice = Some(MoveNotice {
+            summary,
+            expires_at: Instant::now() + MOVE_NOTICE_LIFETIME,
+        });
+    }
     if !state
         .accounts_resource
         .resolve(request.accounts_request, loaded.accounts.clone())
