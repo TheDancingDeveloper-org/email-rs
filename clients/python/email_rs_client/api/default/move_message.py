@@ -8,7 +8,7 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.error_response import ErrorResponse
 from ...models.move_message_request import MoveMessageRequest
-from ...models.status_response import StatusResponse
+from ...models.move_message_response import MoveMessageResponse
 from ...types import Response
 
 
@@ -36,9 +36,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | StatusResponse | None:
+) -> ErrorResponse | MoveMessageResponse | None:
     if response.status_code == 200:
-        response_200 = StatusResponse.from_dict(response.json())
+        response_200 = MoveMessageResponse.from_dict(response.json())
 
         return response_200
 
@@ -70,7 +70,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | StatusResponse]:
+) -> Response[ErrorResponse | MoveMessageResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -84,7 +84,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient,
     body: MoveMessageRequest,
-) -> Response[ErrorResponse | StatusResponse]:
+) -> Response[ErrorResponse | MoveMessageResponse]:
     """
     Args:
         id (str):
@@ -95,7 +95,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | StatusResponse]
+        Response[ErrorResponse | MoveMessageResponse]
     """
 
     kwargs = _get_kwargs(
@@ -115,7 +115,7 @@ def sync(
     *,
     client: AuthenticatedClient,
     body: MoveMessageRequest,
-) -> ErrorResponse | StatusResponse | None:
+) -> ErrorResponse | MoveMessageResponse | None:
     """
     Args:
         id (str):
@@ -126,7 +126,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | StatusResponse
+        ErrorResponse | MoveMessageResponse
     """
 
     return sync_detailed(
@@ -141,7 +141,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
     body: MoveMessageRequest,
-) -> Response[ErrorResponse | StatusResponse]:
+) -> Response[ErrorResponse | MoveMessageResponse]:
     """
     Args:
         id (str):
@@ -152,7 +152,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | StatusResponse]
+        Response[ErrorResponse | MoveMessageResponse]
     """
 
     kwargs = _get_kwargs(
@@ -170,7 +170,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient,
     body: MoveMessageRequest,
-) -> ErrorResponse | StatusResponse | None:
+) -> ErrorResponse | MoveMessageResponse | None:
     """
     Args:
         id (str):
@@ -181,7 +181,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | StatusResponse
+        ErrorResponse | MoveMessageResponse
     """
 
     return (

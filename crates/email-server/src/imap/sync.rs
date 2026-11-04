@@ -1056,7 +1056,7 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::providers::{Folder, Message, MessageBody};
+    use crate::providers::{Folder, Message, MessageBody, MovedMessage};
 
     #[tokio::test]
     async fn cancelled_sync_releases_account_lock() {
@@ -1172,8 +1172,8 @@ mod tests {
         async fn delete_message(&self, _: &str, _: u32) -> Result<()> {
             Ok(())
         }
-        async fn move_message(&self, _: &str, _: u32, _: &str) -> Result<()> {
-            Ok(())
+        async fn move_message(&self, _: &str, _: u32, _: &str) -> Result<MovedMessage> {
+            Ok(MovedMessage::default())
         }
         async fn set_flagged(&self, _: &str, _: u32, _: bool) -> Result<()> {
             Ok(())
@@ -1511,8 +1511,8 @@ mod tests {
         async fn delete_message(&self, _: &str, _: u32) -> Result<()> {
             Ok(())
         }
-        async fn move_message(&self, _: &str, _: u32, _: &str) -> Result<()> {
-            Ok(())
+        async fn move_message(&self, _: &str, _: u32, _: &str) -> Result<MovedMessage> {
+            Ok(MovedMessage::default())
         }
         async fn set_flagged(&self, _: &str, _: u32, _: bool) -> Result<()> {
             Ok(())

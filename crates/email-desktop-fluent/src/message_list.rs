@@ -207,6 +207,56 @@ impl Render for MessageListPlaceholder {
                             }),
                     ),
             )
+            .when_some(state.move_notice.as_ref(), |list, notice| {
+                let can_undo = notice.summary.can_undo();
+                list.child(
+                    div()
+                        .mx(px(12.0))
+                        .mt(px(8.0))
+                        .p(px(8.0))
+                        .rounded(px(4.0))
+                        .bg(colors.neutral)
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(typography.caption.size))
+                                .text_color(if notice.summary.failed.is_empty() {
+                                    colors.on_neutral
+                                } else {
+                                    colors.status_error
+                                })
+                                .child(notice.summary.text()),
+                        )
+                        .when(can_undo, |row| {
+                            row.child(
+                                Button::new("move-notice-undo")
+                                    .label("Undo")
+                                    .appearance(ButtonAppearance::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .on_click({
+                                        let state_entity = self.state.clone();
+                                        move |_, _, app_cx| {
+                                            start_undo_completed_move(&state_entity, app_cx)
+                                        }
+                                    }),
+                            )
+                        })
+                        .child(
+                            Button::new("move-notice-dismiss")
+                                .label("Dismiss")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click({
+                                    let state_entity = self.state.clone();
+                                    move |_, _, app_cx| dismiss_move_notice(&state_entity, app_cx)
+                                }),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex_1()

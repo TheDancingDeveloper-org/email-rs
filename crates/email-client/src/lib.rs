@@ -4,9 +4,9 @@ use email_types::{
     AuthCredentials, AuthIdentity, AuthSession, AuthorizeResponse, BulkRequest, BulkResponse,
     CalendarEvent, ConditionField, ConditionGroup, Contact, CreateAccount, CreateLabelBody,
     CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, MatchMode,
-    Message, MessageAttachment, MoveMessageRequest, PatchFolder, PatchMessageRequest, RuleDto,
-    SearchResponse, SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse,
-    SyncEvent, UpdateAccount, UpdateLabelBody, UpdateWebhook,
+    Message, MessageAttachment, MoveMessageRequest, MoveMessageResponse, PatchFolder,
+    PatchMessageRequest, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
+    StatusResponse, SuggestResponse, SyncEvent, UpdateAccount, UpdateLabelBody, UpdateWebhook,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Serialize};
@@ -380,7 +380,11 @@ impl EmailClient {
             .await
     }
 
-    pub async fn move_message(&self, message_id: &str, folder_id: &str) -> Result<StatusResponse> {
+    pub async fn move_message(
+        &self,
+        message_id: &str,
+        folder_id: &str,
+    ) -> Result<MoveMessageResponse> {
         self.json(
             Method::POST,
             &format!("messages/{message_id}/move"),
@@ -827,7 +831,7 @@ mod tests {
                     break;
                 }
             }
-            let body = "{\"status\":\"moved\"}";
+            let body = "{\"status\":\"moved\",\"messageId\":\"m2\"}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -839,6 +843,7 @@ mod tests {
         let client = EmailClient::new(&base).unwrap();
         let status = client.move_message("m1", "f9").await.unwrap();
         assert_eq!(status.status, "moved");
+        assert_eq!(status.message_id.as_deref(), Some("m2"));
         let request = server.join().unwrap();
         assert!(
             request.starts_with("POST /api/v1/messages/m1/move "),

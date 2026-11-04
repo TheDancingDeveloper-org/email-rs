@@ -1847,6 +1847,7 @@ fn sync_refresh_preserves_selected_message_when_still_present() {
             selected_full_message: Some(full_message("selected", "inbox", true, false)),
             selected_message_labels: vec![label("important")],
         }),
+        move_summary: None,
     };
 
     assert!(apply_loaded_sync_refresh(&mut state, request, loaded));
@@ -1880,6 +1881,7 @@ fn stale_sync_refresh_is_ignored() {
             selected_full_message: Some(full_message("new", "inbox", true, false)),
             selected_message_labels: Vec::new(),
         }),
+        move_summary: None,
     };
 
     assert!(!apply_loaded_sync_refresh(&mut state, stale, loaded));
@@ -2673,4 +2675,208 @@ fn rule_counts_text_pluralizes_counts() {
     });
     rule.actions.clear();
     assert_eq!(rule_counts_text(&rule), "2 conditions, 0 actions");
+}
+
+/// A one-thread HTTP stub for `POST /api/v1/messages/{id}/move`. Each request
+/// is answered by `respond(path, body)`; `(status, json)` is sent back.
+/// Returns the base URL and the `(path, body)` of every request, in order.
+fn move_stub(
+    requests: usize,
+    respond: impl Fn(&str, &str) -> (u16, String) + Send + 'static,
+) -> (String, std::thread::JoinHandle<Vec<(String, String)>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for _ in 0..requests {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let body = loop {
+                let n = stream.read(&mut chunk).unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    if body.contains('}') || n == 0 {
+                        let _ = head;
+                        break body.to_string();
+                    }
+                }
+                if n == 0 {
+                    break String::new();
+                }
+            };
+            let text = String::from_utf8_lossy(&buf).to_string();
+            let path = text
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let (status, json) = respond(&path, &body);
+            let reason = if status == 200 { "OK" } else { "Error" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                json.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            seen.push((path, body));
+        }
+        seen
+    });
+    (base, handle)
+}
+
+fn run_async<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
+#[test]
+fn multi_move_reports_each_message_and_keeps_going_after_a_failure() {
+    let (base, server) = move_stub(3, |path, _| match path {
+        "/api/v1/messages/a/move" => (200, r#"{"status":"moved","messageId":"a2"}"#.into()),
+        "/api/v1/messages/b/move" => (502, r#"{"error":"provider said no"}"#.into()),
+        _ => (200, r#"{"status":"moved","messageId":"c2"}"#.into()),
+    });
+    let client = EmailClient::new(&base).unwrap();
+    let items = ["a", "b", "c"]
+        .map(|id| (id.to_string(), "projects".to_string(), "inbox".to_string()))
+        .to_vec();
+
+    let summary = run_async(move_each(&client, items, false));
+
+    // The failure on `b` did not stop `c`.
+    let seen = server.join().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(
+        summary.moved,
+        vec![
+            MovedRef {
+                message_id: "a2".to_string(),
+                original_folder_id: "inbox".to_string()
+            },
+            MovedRef {
+                message_id: "c2".to_string(),
+                original_folder_id: "inbox".to_string()
+            },
+        ]
+    );
+    assert_eq!(summary.failed.len(), 1);
+    assert_eq!(summary.failed[0].0, "b");
+    assert!(summary.can_undo());
+    let text = summary.text();
+    assert!(
+        text.starts_with("Moved 2 of 3 messages; 1 failed"),
+        "{text}"
+    );
+}
+
+#[test]
+fn undo_moves_each_message_back_by_its_new_id() {
+    let (base, server) = move_stub(2, |_, _| {
+        (200, r#"{"status":"moved","messageId":"back"}"#.into())
+    });
+    let client = EmailClient::new(&base).unwrap();
+    let summary = MoveSummary {
+        moved: vec![
+            MovedRef {
+                message_id: "a2".to_string(),
+                original_folder_id: "inbox".to_string(),
+            },
+            MovedRef {
+                message_id: "c2".to_string(),
+                original_folder_id: "archive".to_string(),
+            },
+        ],
+        ..MoveSummary::default()
+    };
+    let items = summary
+        .moved
+        .iter()
+        .map(|m| {
+            (
+                m.message_id.clone(),
+                m.original_folder_id.clone(),
+                String::new(),
+            )
+        })
+        .collect();
+
+    let undone = run_async(move_each(&client, items, true));
+
+    let seen = server.join().unwrap();
+    assert_eq!(seen[0].0, "/api/v1/messages/a2/move");
+    assert!(seen[0].1.contains(r#""folderId":"inbox""#), "{:?}", seen[0]);
+    assert_eq!(seen[1].0, "/api/v1/messages/c2/move");
+    assert!(
+        seen[1].1.contains(r#""folderId":"archive""#),
+        "{:?}",
+        seen[1]
+    );
+    assert_eq!(undone.moved_count(), 2);
+    assert!(undone.failed.is_empty());
+    assert!(!undone.can_undo(), "an undo is not itself undoable");
+}
+
+#[test]
+fn move_summary_text_covers_all_outcomes() {
+    let moved = |n: usize| {
+        (0..n)
+            .map(|i| MovedRef {
+                message_id: format!("m{i}"),
+                original_folder_id: "inbox".to_string(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let all = MoveSummary {
+        moved: moved(1),
+        ..MoveSummary::default()
+    };
+    assert_eq!(all.text(), "Moved 1 message.");
+    let none = MoveSummary {
+        failed: vec![("a".into(), "boom".into()), ("b".into(), "bang".into())],
+        ..MoveSummary::default()
+    };
+    assert_eq!(none.text(), "Could not move 2 messages: boom (and 1 more)");
+    assert!(!none.can_undo());
+    let untracked = MoveSummary {
+        moved_untracked: 2,
+        ..MoveSummary::default()
+    };
+    assert!(untracked.text().contains("Undo is unavailable for 2"));
+    assert!(!untracked.can_undo());
+}
+
+#[test]
+fn move_outcome_is_kept_even_when_the_refresh_is_stale() {
+    let mut state = NativeAppState::default();
+    let stale = begin_sync_complete_refresh(&mut state);
+    begin_sync_complete_refresh(&mut state);
+    let loaded = LoadedSyncRefresh {
+        accounts: Vec::new(),
+        folders_by_account: BTreeMap::new(),
+        labels: Vec::new(),
+        messages: None,
+        move_summary: Some(MoveSummary {
+            moved: vec![MovedRef {
+                message_id: "a2".to_string(),
+                original_folder_id: "inbox".to_string(),
+            }],
+            ..MoveSummary::default()
+        }),
+    };
+    assert!(!apply_loaded_sync_refresh(&mut state, stale, loaded));
+    assert!(state.move_notice.as_ref().unwrap().summary.can_undo());
+
+    let mut notice = state.move_notice.clone();
+    assert!(!expire_move_notice(&mut notice, Instant::now()));
+    assert!(expire_move_notice(
+        &mut notice,
+        Instant::now() + MOVE_NOTICE_LIFETIME
+    ));
+    assert!(notice.is_none());
 }

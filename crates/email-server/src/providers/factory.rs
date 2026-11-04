@@ -305,8 +305,13 @@ impl MailProvider for TestMailProvider {
         self.mutation()
     }
 
-    async fn move_message(&self, _src: &str, _uid: u32, _dest: &str) -> Result<()> {
-        self.mutation()
+    async fn move_message(&self, _src: &str, uid: u32, _dest: &str) -> Result<super::MovedMessage> {
+        self.mutation()?;
+        // Stand-in for the server's COPYUID: a distinct, predictable UID.
+        Ok(super::MovedMessage {
+            uid: Some(uid + 1000),
+            uid_validity: Some(7),
+        })
     }
 
     async fn set_flagged(&self, _folder: &str, _uid: u32, _flagged: bool) -> Result<()> {

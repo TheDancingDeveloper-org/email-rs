@@ -102,6 +102,7 @@ pub(crate) fn start_folder_drop(
     folder_id: &str,
     app_cx: &mut App,
 ) -> bool {
+    let mut source_folders = BTreeMap::new();
     let accepted = state_entity.update(app_cx, |state, cx| {
         let locations = message_location_index(state);
         let Some(folder) = state
@@ -115,6 +116,11 @@ pub(crate) fn start_folder_drop(
         if !folder_drop_accepts(payload, folder, &locations) {
             return false;
         }
+        source_folders = payload
+            .message_ids
+            .iter()
+            .filter_map(|id| Some((id.clone(), locations.get(id)?.1.clone())))
+            .collect();
         state.selected_message_ids.clear();
         cx.notify();
         true
@@ -127,6 +133,7 @@ pub(crate) fn start_folder_drop(
         NativeMessageMutation::MoveToFolder {
             message_ids: payload.message_ids.clone(),
             folder_id: folder_id.to_string(),
+            source_folders,
         },
         app_cx,
     );
@@ -475,6 +482,10 @@ mod tests {
                 Some(NativeMessageMutation::MoveToFolder {
                     message_ids: vec!["m1".to_string(), "m3".to_string()],
                     folder_id: "projects".to_string(),
+                    source_folders: BTreeMap::from([
+                        ("m1".to_string(), "inbox".to_string()),
+                        ("m3".to_string(), "inbox".to_string()),
+                    ]),
                 })
             );
         });
@@ -511,6 +522,7 @@ mod tests {
                 Some(NativeMessageMutation::MoveToFolder {
                     message_ids: vec!["m2".to_string()],
                     folder_id: "projects".to_string(),
+                    source_folders: BTreeMap::from([("m2".to_string(), "inbox".to_string())]),
                 })
             );
         });

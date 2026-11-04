@@ -1153,6 +1153,7 @@ pub(crate) async fn load_sync_refresh_with_client(
         folders_by_account: tree.folders_by_account,
         labels: tree.labels,
         messages,
+        move_summary: None,
     })
 }
 
