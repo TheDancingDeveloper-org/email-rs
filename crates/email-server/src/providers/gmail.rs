@@ -689,27 +689,11 @@ impl MailProvider for GmailProvider {
 
     async fn delete_message(&self, folder: &str, uid: u32) -> Result<()> {
         let mut session = self.connect().await?;
-        session
-            .select(folder)
-            .await
-            .map_err(|e| AppError::Imap(format!("SELECT failed: {}", e)))?;
-        // Gmail: COPY to Trash, then \Deleted + EXPUNGE from source.
-        session
-            .uid_copy(uid.to_string(), "[Gmail]/Trash")
-            .await
-            .map_err(|e| AppError::Imap(format!("UID COPY to Trash failed: {}", e)))?;
-        let store_stream = session
-            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
-            .await
-            .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {}", e)))?;
-        super::drain_imap_stream(store_stream, "UID STORE \\Deleted").await?;
-        let expunged = session
-            .expunge()
-            .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?;
-        super::drain_imap_stream(expunged, "EXPUNGE").await?;
+        // Gmail: COPY to Trash, then \Deleted + UID EXPUNGE from source.
+        let deleted =
+            super::imap_move::delete_uid(&mut session, folder, uid, Some("[Gmail]/Trash")).await;
         let _ = session.logout().await;
-        Ok(())
+        deleted
     }
 
     async fn move_message(
@@ -793,22 +777,9 @@ impl MailProvider for GmailProvider {
 
     async fn delete_draft(&self, folder: &str, uid: u32) -> Result<()> {
         let mut session = self.connect().await?;
-        session
-            .select(folder)
-            .await
-            .map_err(|e| AppError::Imap(format!("SELECT failed: {e}")))?;
-        let stream = session
-            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
-            .await
-            .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {e}")))?;
-        super::drain_imap_stream(stream, "UID STORE \\Deleted").await?;
-        let expunged = session
-            .expunge()
-            .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))?;
-        super::drain_imap_stream(expunged, "EXPUNGE").await?;
+        let deleted = super::imap_move::delete_uid(&mut session, folder, uid, None).await;
         let _ = session.logout().await;
-        Ok(())
+        deleted
     }
 }
 

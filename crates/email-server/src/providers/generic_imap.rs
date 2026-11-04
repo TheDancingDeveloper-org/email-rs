@@ -586,22 +586,9 @@ impl MailProvider for GenericImapProvider {
 
     async fn delete_message(&self, folder: &str, uid: u32) -> Result<()> {
         let mut session = self.connect().await?;
-        session
-            .select(folder)
-            .await
-            .map_err(|e| AppError::Imap(format!("SELECT failed: {}", e)))?;
-        let store_stream = session
-            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
-            .await
-            .map_err(|e| AppError::Imap(format!("UID STORE \\Deleted failed: {}", e)))?;
-        super::drain_imap_stream(store_stream, "UID STORE \\Deleted").await?;
-        let expunged = session
-            .expunge()
-            .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {}", e)))?;
-        super::drain_imap_stream(expunged, "EXPUNGE").await?;
+        let deleted = super::imap_move::delete_uid(&mut session, folder, uid, None).await;
         let _ = session.logout().await;
-        Ok(())
+        deleted
     }
 
     async fn move_message(
