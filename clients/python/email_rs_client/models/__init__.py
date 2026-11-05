@@ -19,10 +19,12 @@ from .bulk_result import BulkResult
 from .calendar_event import CalendarEvent
 from .calendar_search_result import CalendarSearchResult
 from .calendar_suggestion import CalendarSuggestion
+from .cancel_outbox_response import CancelOutboxResponse
 from .capabilities_response import CapabilitiesResponse
 from .condition_input import ConditionInput
 from .contact import Contact
 from .create_account import CreateAccount
+from .create_identity import CreateIdentity
 from .create_integration_token import CreateIntegrationToken
 from .create_label_body import CreateLabelBody
 from .create_rule_body import CreateRuleBody
@@ -35,6 +37,7 @@ from .error_response import ErrorResponse
 from .event_link import EventLink
 from .folder import Folder
 from .full_message import FullMessage
+from .identity import Identity
 from .index_admin_response import IndexAdminResponse
 from .integration_event import IntegrationEvent
 from .integration_token import IntegrationToken
@@ -46,6 +49,7 @@ from .message_body import MessageBody
 from .message_suggestion import MessageSuggestion
 from .move_message_request import MoveMessageRequest
 from .move_message_response import MoveMessageResponse
+from .outbox_item import OutboxItem
 from .outgoing_attachment import OutgoingAttachment
 from .patch_folder import PatchFolder
 from .patch_message_request import PatchMessageRequest
@@ -86,11 +90,13 @@ __all__ = (
     "CalendarEvent",
     "CalendarSearchResult",
     "CalendarSuggestion",
+    "CancelOutboxResponse",
     "CapabilitiesResponse",
     "ConditionInput",
     "Contact",
     "CreateAccount",
     "CreatedIntegrationToken",
+    "CreateIdentity",
     "CreateIntegrationToken",
     "CreateLabelBody",
     "CreateRuleBody",
@@ -102,6 +108,7 @@ __all__ = (
     "EventLink",
     "Folder",
     "FullMessage",
+    "Identity",
     "IndexAdminResponse",
     "IntegrationEvent",
     "IntegrationToken",
@@ -113,6 +120,7 @@ __all__ = (
     "MessageSuggestion",
     "MoveMessageRequest",
     "MoveMessageResponse",
+    "OutboxItem",
     "OutgoingAttachment",
     "PatchFolder",
     "PatchMessageRequest",

@@ -26,6 +26,8 @@ class SendRequest:
         to (list[str]):
         attachments (list[OutgoingAttachment] | Unset):
         html_body (None | str | Unset):
+        identity_id (None | str | Unset): Send From this identity (`GET /accounts/{id}/identities`). Omitted or
+            `"default"` sends From the account's own address.
         in_reply_to (None | str | Unset):
         send_at (None | str | Unset):
         send_delay_seconds (int | None | Unset):
@@ -39,6 +41,7 @@ class SendRequest:
     to: list[str]
     attachments: list[OutgoingAttachment] | Unset = UNSET
     html_body: None | str | Unset = UNSET
+    identity_id: None | str | Unset = UNSET
     in_reply_to: None | str | Unset = UNSET
     send_at: None | str | Unset = UNSET
     send_delay_seconds: int | None | Unset = UNSET
@@ -68,6 +71,12 @@ class SendRequest:
             html_body = UNSET
         else:
             html_body = self.html_body
+
+        identity_id: None | str | Unset
+        if isinstance(self.identity_id, Unset):
+            identity_id = UNSET
+        else:
+            identity_id = self.identity_id
 
         in_reply_to: None | str | Unset
         if isinstance(self.in_reply_to, Unset):
@@ -108,6 +117,8 @@ class SendRequest:
             field_dict["attachments"] = attachments
         if html_body is not UNSET:
             field_dict["htmlBody"] = html_body
+        if identity_id is not UNSET:
+            field_dict["identityId"] = identity_id
         if in_reply_to is not UNSET:
             field_dict["inReplyTo"] = in_reply_to
         if send_at is not UNSET:
@@ -151,6 +162,15 @@ class SendRequest:
             return cast(None | str | Unset, data)
 
         html_body = _parse_html_body(d.pop("htmlBody", UNSET))
+
+        def _parse_identity_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        identity_id = _parse_identity_id(d.pop("identityId", UNSET))
 
         def _parse_in_reply_to(data: object) -> None | str | Unset:
             if data is None:
@@ -196,6 +216,7 @@ class SendRequest:
             to=to,
             attachments=attachments,
             html_body=html_body,
+            identity_id=identity_id,
             in_reply_to=in_reply_to,
             send_at=send_at,
             send_delay_seconds=send_delay_seconds,
