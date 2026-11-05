@@ -123,6 +123,9 @@ pub(crate) struct ComposeState {
     pub(crate) quoted_from: Option<String>,
     pub(crate) signature: Option<String>,
     pub(crate) signature_loading: bool,
+    pub(crate) identities: Vec<Identity>,
+    /// Chosen From identity; `None` sends From the account's default.
+    pub(crate) identity_id: Option<String>,
     pub(crate) show_cc: bool,
     pub(crate) show_bcc: bool,
     pub(crate) recipient_suggestions_query: Option<String>,

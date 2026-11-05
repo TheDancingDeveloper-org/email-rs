@@ -30,7 +30,14 @@ pub(crate) fn start_new_compose(state_entity: &Entity<NativeAppState>, app_cx: &
     });
 
     if let Some((base_url, account_id, revision)) = load {
-        start_compose_signature_load(state_entity, base_url, account_id, revision, app_cx);
+        start_compose_signature_load(
+            state_entity,
+            base_url.clone(),
+            account_id.clone(),
+            revision,
+            app_cx,
+        );
+        start_compose_identities_load(state_entity, base_url, account_id, revision, app_cx);
     }
 }
 
@@ -80,7 +87,14 @@ pub(crate) fn start_reply_draft(state_entity: &Entity<NativeAppState>, app_cx: &
     });
 
     if let Some((base_url, account_id, revision)) = load {
-        start_compose_signature_load(state_entity, base_url, account_id, revision, app_cx);
+        start_compose_signature_load(
+            state_entity,
+            base_url.clone(),
+            account_id.clone(),
+            revision,
+            app_cx,
+        );
+        start_compose_identities_load(state_entity, base_url, account_id, revision, app_cx);
     }
 }
 
@@ -124,7 +138,14 @@ pub(crate) fn start_forward_draft(state_entity: &Entity<NativeAppState>, app_cx:
     });
 
     if let Some((base_url, account_id, revision)) = load {
-        start_compose_signature_load(state_entity, base_url, account_id, revision, app_cx);
+        start_compose_signature_load(
+            state_entity,
+            base_url.clone(),
+            account_id.clone(),
+            revision,
+            app_cx,
+        );
+        start_compose_identities_load(state_entity, base_url, account_id, revision, app_cx);
     }
 }
 
@@ -167,6 +188,118 @@ pub(crate) fn start_compose_signature_load(
             }
         })
         .detach();
+}
+
+/// The identity to send From: `None` (the account default) unless the user
+/// picked another identity that is still offered.
+pub(crate) fn selected_send_identity(compose: &ComposeState) -> Option<String> {
+    let id = compose.identity_id.as_deref()?;
+    if id == email_types::DEFAULT_IDENTITY_ID {
+        return None;
+    }
+    compose
+        .identities
+        .iter()
+        .any(|identity| identity.id == id)
+        .then(|| id.to_string())
+}
+
+pub(crate) fn set_compose_identity(
+    state_entity: &Entity<NativeAppState>,
+    identity_id: String,
+    app_cx: &mut App,
+) {
+    state_entity.update(app_cx, |state, cx| {
+        select_compose_identity(&mut state.compose, &identity_id);
+        cx.notify();
+    });
+}
+
+pub(crate) fn select_compose_identity(compose: &mut ComposeState, identity_id: &str) -> bool {
+    if !compose
+        .identities
+        .iter()
+        .any(|identity| identity.id == identity_id)
+    {
+        return false;
+    }
+    compose.identity_id = Some(identity_id.to_string());
+    true
+}
+
+/// Applies a finished identity load; stale results (another compose, or a
+/// different account) are ignored.
+pub(crate) fn apply_loaded_identities(
+    state: &mut NativeAppState,
+    revision: u64,
+    account_id: &str,
+    identities: Vec<Identity>,
+) -> bool {
+    if state.compose.revision != revision
+        || !state.compose.open
+        || state.compose.account_id.as_deref() != Some(account_id)
+    {
+        return false;
+    }
+    if state
+        .compose
+        .identity_id
+        .as_deref()
+        .is_some_and(|id| !identities.iter().any(|identity| identity.id == id))
+    {
+        state.compose.identity_id = None;
+    }
+    state.compose.identities = identities;
+    true
+}
+
+pub(crate) fn start_compose_identities_load(
+    state_entity: &Entity<NativeAppState>,
+    base_url: String,
+    account_id: String,
+    revision: u64,
+    app_cx: &mut App,
+) {
+    let task_account = account_id.clone();
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { load_account_identities(base_url, task_account) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                match task.await {
+                    Ok(identities) => {
+                        state_entity.update(&mut async_cx, |state, cx| {
+                            if apply_loaded_identities(state, revision, &account_id, identities) {
+                                cx.notify();
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!("failed to load native compose identities: {err:#}");
+                    }
+                }
+            }
+        })
+        .detach();
+}
+
+pub(crate) fn load_account_identities(
+    base_url: String,
+    account_id: String,
+) -> Result<Vec<Identity>> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .list_identities(&account_id)
+            .await
+            .with_context(|| format!("list identities for {account_id}"))
+    })
 }
 
 pub(crate) fn load_account_signature(
@@ -720,7 +853,7 @@ pub(crate) fn build_compose_request(
         attachments: Vec::new(),
         send_at: None,
         send_delay_seconds: None,
-        identity_id: None,
+        identity_id: selected_send_identity(&state.compose),
     })
 }
 
@@ -954,5 +1087,122 @@ mod tests {
         assert_eq!(reply_subject("  RE: Hello".into()), "  RE: Hello");
         assert_eq!(forward_subject("Hello".into()), "Fwd: Hello");
         assert_eq!(forward_subject("fwd: Hello".into()), "fwd: Hello");
+    }
+
+    fn identity(id: &str, email: &str, is_default: bool) -> Identity {
+        Identity {
+            id: id.to_string(),
+            account_id: "a1".to_string(),
+            name: if is_default {
+                "Me".into()
+            } else {
+                String::new()
+            },
+            email: email.to_string(),
+            is_default,
+        }
+    }
+
+    fn open_compose(identities: Vec<Identity>) -> NativeAppState {
+        let mut state = NativeAppState::default();
+        state.compose = ComposeState {
+            open: true,
+            mode: Some("compose".into()),
+            account_id: Some("a1".into()),
+            revision: 3,
+            identities,
+            ..ComposeState::default()
+        };
+        state
+    }
+
+    fn built(state: &NativeAppState) -> SendRequest {
+        build_compose_request(
+            state,
+            vec!["x@example.com".into()],
+            vec![],
+            vec![],
+            "Hi".into(),
+            "Body".into(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn send_carries_the_picked_identity_only() {
+        let mut state = open_compose(vec![
+            identity("default", "me@example.com", true),
+            identity("i1", "alias@example.com", false),
+        ]);
+        assert_eq!(built(&state).identity_id, None);
+
+        assert!(select_compose_identity(&mut state.compose, "i1"));
+        assert_eq!(built(&state).identity_id.as_deref(), Some("i1"));
+
+        // The default identity is sent as "omitted", as the server expects.
+        assert!(select_compose_identity(&mut state.compose, "default"));
+        assert_eq!(built(&state).identity_id, None);
+    }
+
+    #[test]
+    fn unknown_identity_cannot_be_selected_or_sent() {
+        let mut state = open_compose(vec![identity("default", "me@example.com", true)]);
+        assert!(!select_compose_identity(&mut state.compose, "ghost"));
+        state.compose.identity_id = Some("ghost".into());
+        assert_eq!(built(&state).identity_id, None);
+    }
+
+    #[test]
+    fn loaded_identities_apply_only_to_the_same_open_compose() {
+        let list = vec![identity("default", "me@example.com", true)];
+        let mut state = open_compose(vec![]);
+        assert!(!apply_loaded_identities(&mut state, 2, "a1", list.clone()));
+        assert!(!apply_loaded_identities(
+            &mut state,
+            3,
+            "other",
+            list.clone()
+        ));
+        assert!(state.compose.identities.is_empty());
+        assert!(apply_loaded_identities(&mut state, 3, "a1", list.clone()));
+        assert_eq!(state.compose.identities, list);
+
+        state.compose.open = false;
+        assert!(!apply_loaded_identities(&mut state, 3, "a1", vec![]));
+    }
+
+    #[test]
+    fn a_vanished_identity_selection_falls_back_to_default() {
+        let mut state = open_compose(vec![identity("i1", "alias@example.com", false)]);
+        state.compose.identity_id = Some("i1".into());
+        assert!(apply_loaded_identities(
+            &mut state,
+            3,
+            "a1",
+            vec![identity("default", "me@example.com", true)]
+        ));
+        assert_eq!(state.compose.identity_id, None);
+    }
+
+    #[test]
+    fn picker_shows_default_until_another_is_chosen() {
+        let mut state = open_compose(vec![
+            identity("i1", "alias@example.com", false),
+            identity("default", "me@example.com", true),
+        ]);
+        assert_eq!(
+            effective_identity_id(&state.compose).as_deref(),
+            Some("default")
+        );
+        select_compose_identity(&mut state.compose, "i1");
+        assert_eq!(effective_identity_id(&state.compose).as_deref(), Some("i1"));
+        assert_eq!(
+            identity_label(&state.compose.identities[1]),
+            "Me <me@example.com>"
+        );
+        assert_eq!(
+            identity_label(&state.compose.identities[0]),
+            "alias@example.com"
+        );
     }
 }
