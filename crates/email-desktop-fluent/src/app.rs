@@ -64,7 +64,10 @@ impl EmailDesktopApp {
                         }
                         let _ = app.update(&mut async_cx, |app, cx| {
                             app.state.update(cx, |state, cx| {
-                                if expire_move_notice(&mut state.move_notice, Instant::now()) {
+                                let now = Instant::now();
+                                let moved = expire_move_notice(&mut state.move_notice, now);
+                                let sent = expire_pending_send(&mut state.pending_send, now);
+                                if moved || sent {
                                     cx.notify();
                                 }
                             });

@@ -446,11 +446,15 @@ pub(crate) fn start_quick_reply_send(
             async move {
                 let result = task.await;
                 let sent = result.is_ok();
+                let response = result.as_ref().ok().cloned();
                 let error = result.err().map(|err| err.to_string());
 
                 state_entity.update(&mut async_cx, |state, cx| {
                     state.compose.sending = false;
                     if sent {
+                        state.pending_send = response.as_ref().and_then(|response| {
+                            pending_send_from_response(response, Utc::now(), Instant::now())
+                        });
                         state.compose.open = false;
                         state.compose.error = None;
                         state.compose.notice = Some("Reply sent".to_string());
@@ -521,12 +525,16 @@ pub(crate) fn start_compose_send(
             async move {
                 let result = task.await;
                 let sent = result.is_ok();
+                let response = result.as_ref().ok().cloned();
                 let error = result.err().map(|err| err.to_string());
 
                 state_entity.update(&mut async_cx, |state, cx| {
                     state.compose.sending = false;
                     if sent {
                         reset_compose_state(state, Some("Message sent".to_string()));
+                        state.pending_send = response.as_ref().and_then(|response| {
+                            pending_send_from_response(response, Utc::now(), Instant::now())
+                        });
                         state.last_error = None;
                     } else if let Some(error) = error.clone() {
                         state.compose.error = Some(error.clone());
@@ -584,18 +592,17 @@ pub(crate) fn reset_compose_state(state: &mut NativeAppState, notice: Option<Str
     };
 }
 
-pub(crate) fn send_quick_reply(base_url: String, request: SendRequest) -> Result<()> {
+pub(crate) fn send_quick_reply(base_url: String, request: SendRequest) -> Result<SendResponse> {
     send_message_request(base_url, request)
 }
 
-pub(crate) fn send_message_request(base_url: String, request: SendRequest) -> Result<()> {
+pub(crate) fn send_message_request(base_url: String, request: SendRequest) -> Result<SendResponse> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     rt.block_on(async move {
         let client = EmailClient::new(&base_url)?;
-        client.send_message(&request).await?;
-        Ok(())
+        Ok(client.send_message(&request).await?)
     })
 }
 
