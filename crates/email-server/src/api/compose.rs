@@ -95,8 +95,11 @@ pub(crate) async fn build_outbound(
         }
     };
 
+    let from =
+        crate::api::identities::resolve_from(&state.pool, &account.id, req.identity_id.as_deref())
+            .await?;
     let msg = OutboundMessage {
-        from: account.email,
+        from,
         message_id: Some(uuid::Uuid::new_v4().to_string()),
         to: req.to.clone(),
         cc: req.cc.clone(),
