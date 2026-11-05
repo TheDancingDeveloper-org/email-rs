@@ -18,6 +18,7 @@ mod palette;
 mod preferences;
 mod prelude;
 mod reading_pane;
+mod send_undo;
 mod settings;
 mod settings_actions;
 mod sidebar;
@@ -67,6 +68,8 @@ use preferences::*;
 use prelude::*;
 #[allow(unused_imports)]
 use reading_pane::*;
+#[allow(unused_imports)]
+use send_undo::*;
 #[allow(unused_imports)]
 use settings::*;
 #[allow(unused_imports)]
