@@ -3,11 +3,11 @@ use email_types::{
     Account, AccountSettings, ActionInput, AddLinkBody, AddLinkResponse, AuthClientKind,
     AuthCredentials, AuthIdentity, AuthSession, AuthorizeResponse, BulkRequest, BulkResponse,
     CalendarEvent, CancelOutboxResponse, ConditionField, ConditionGroup, Contact, CreateAccount,
-    CreateLabelBody, CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage,
-    Label, MatchMode, Message, MessageAttachment, MoveMessageRequest, MoveMessageResponse,
-    OutboxItem, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse, SendRequest,
-    SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, SyncEvent, UpdateAccount,
-    UpdateLabelBody, UpdateWebhook,
+    CreateIdentity, CreateLabelBody, CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder,
+    FullMessage, Identity, Label, MatchMode, Message, MessageAttachment, MoveMessageRequest,
+    MoveMessageResponse, OutboxItem, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
+    SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, SyncEvent,
+    UpdateAccount, UpdateLabelBody, UpdateWebhook,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Serialize};
@@ -398,6 +398,37 @@ impl EmailClient {
 
     pub async fn bulk_messages(&self, body: &BulkRequest) -> Result<BulkResponse> {
         self.json(Method::POST, "messages/bulk", body).await
+    }
+
+    /// Lists the identities an account can send From; the first is the
+    /// default (its `id` is `"default"`). Pass a listed id as
+    /// `SendRequest::identity_id`.
+    pub async fn list_identities(&self, account_id: &str) -> Result<Vec<Identity>> {
+        self.request(Method::GET, &format!("accounts/{account_id}/identities"))
+            .await
+    }
+
+    pub async fn create_identity(
+        &self,
+        account_id: &str,
+        body: &CreateIdentity,
+    ) -> Result<Identity> {
+        self.json(
+            Method::POST,
+            &format!("accounts/{account_id}/identities"),
+            body,
+        )
+        .await
+    }
+
+    pub async fn delete_identity(&self, account_id: &str, identity_id: &str) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                Method::DELETE,
+                &format!("accounts/{account_id}/identities/{identity_id}"),
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn send_message(&self, body: &SendRequest) -> Result<SendResponse> {
@@ -866,6 +897,72 @@ mod tests {
             "{}",
             requests[1]
         );
+    }
+
+    #[tokio::test]
+    async fn identities_use_the_account_routes_and_send_carries_identity_id() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for body in [
+                "[{\"id\":\"default\",\"accountId\":\"a1\",\"name\":\"Me\",\"email\":\"me@example.com\",\"isDefault\":true}]",
+                "{\"id\":\"i1\",\"accountId\":\"a1\",\"name\":\"Sales\",\"email\":\"sales@example.com\",\"isDefault\":false}",
+                "{\"status\":\"deleted\"}",
+                "{\"status\":\"queued\"}",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        let client = EmailClient::new(&base).unwrap();
+        let listed = client.list_identities("a1").await.unwrap();
+        assert!(listed[0].is_default);
+        let created = client
+            .create_identity(
+                "a1",
+                &CreateIdentity {
+                    name: "Sales".into(),
+                    email: "sales@example.com".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.id, "i1");
+        client.delete_identity("a1", "i1").await.unwrap();
+        client
+            .send_message(&SendRequest {
+                account_id: "a1".into(),
+                to: vec!["to@example.com".into()],
+                cc: vec![],
+                bcc: vec![],
+                subject: "hi".into(),
+                text_body: Some("body".into()),
+                html_body: None,
+                in_reply_to: None,
+                attachments: vec![],
+                send_at: None,
+                send_delay_seconds: None,
+                identity_id: Some("i1".into()),
+            })
+            .await
+            .unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("GET /api/v1/accounts/a1/identities "));
+        assert!(requests[1].starts_with("POST /api/v1/accounts/a1/identities "));
+        assert!(requests[1].contains("\"name\":\"Sales\""));
+        assert!(requests[2].starts_with("DELETE /api/v1/accounts/a1/identities/i1 "));
+        assert!(requests[3].starts_with("POST /api/v1/messages "));
+        assert!(requests[3].contains("\"identityId\":\"i1\""));
     }
 
     #[tokio::test]

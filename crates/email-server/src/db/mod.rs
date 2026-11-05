@@ -458,6 +458,11 @@ fn migrations() -> Vec<Migration> {
             name: "search_attachment_names",
             apply: in_transaction!(run_search_attachment_names_migration),
         },
+        Migration {
+            version: 26,
+            name: "identities",
+            apply: in_transaction!(run_identities_migration),
+        },
     ]
 }
 
@@ -665,6 +670,29 @@ async fn run_outbox_migration(conn: &mut SqliteConnection) -> anyhow::Result<()>
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(status, next_attempt_at)")
         .execute(&mut *conn)
         .await?;
+
+    Ok(())
+}
+
+/// Send-as aliases. The account's own address is its default identity and is
+/// read from `accounts`, so only aliases are stored here.
+async fn run_identities_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS identities (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            name TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"#,
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_identities_account_email ON identities(account_id, lower(email))",
+    )
+    .execute(&mut *conn)
+    .await?;
 
     Ok(())
 }

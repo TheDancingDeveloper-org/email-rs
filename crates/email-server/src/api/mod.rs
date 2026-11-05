@@ -15,6 +15,7 @@ pub mod calendar;
 pub mod compose;
 pub mod events;
 pub mod folders;
+pub mod identities;
 pub mod integration_tokens;
 pub mod labels;
 pub mod messages;
@@ -33,6 +34,9 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("PATCH", "/accounts/{id}"),
     ("DELETE", "/accounts/{id}"),
     ("GET", "/accounts/{id}/settings"),
+    ("GET", "/accounts/{id}/identities"),
+    ("POST", "/accounts/{id}/identities"),
+    ("DELETE", "/accounts/{id}/identities/{identity_id}"),
     ("GET", "/accounts/{id}/folders"),
     ("PATCH", "/folders/{id}"),
     ("POST", "/folders/{id}/mark-read"),
@@ -153,6 +157,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/accounts/{id}/settings",
             get(accounts::get_account_settings),
+        )
+        .route(
+            "/accounts/{id}/identities",
+            get(identities::list_identities).post(identities::create_identity),
+        )
+        .route(
+            "/accounts/{id}/identities/{identity_id}",
+            axum::routing::delete(identities::delete_identity),
         )
         .route("/accounts/{id}/folders", get(folders::list_folders))
         .route("/folders/{id}", patch(folders::patch_folder))

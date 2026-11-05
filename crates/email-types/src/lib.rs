@@ -120,6 +120,29 @@ pub struct AccountSettings {
     pub signature: Option<String>,
 }
 
+/// Id of the identity every account has: its own address and display name.
+pub const DEFAULT_IDENTITY_ID: &str = "default";
+
+/// An address a message can be sent From. Each account has a default identity
+/// plus any aliases added to it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[cfg_attr(feature = "server", derive(sqlx::FromRow))]
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    pub id: String,
+    pub account_id: String,
+    pub name: String,
+    pub email: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateIdentity {
+    pub name: String,
+    pub email: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
 #[serde(rename_all = "camelCase")]
@@ -328,6 +351,10 @@ pub struct SendRequest {
     pub send_at: Option<String>,
     #[serde(default)]
     pub send_delay_seconds: Option<u64>,
+    /// Send From this identity (`GET /accounts/{id}/identities`). Omitted or
+    /// `"default"` sends From the account's own address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]

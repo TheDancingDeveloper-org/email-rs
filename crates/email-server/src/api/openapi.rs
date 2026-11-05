@@ -10,12 +10,12 @@ use utoipa::{Modify, OpenApi, ToSchema};
 use email_types::{
     Account, AccountSettings, AddLinkBody, AddLinkResponse, AuthCredentials, AuthIdentity,
     AuthSession, AuthenticationResultStatus, AuthorizeResponse, BulkRequest, BulkResponse,
-    CalendarEvent, CancelOutboxResponse, Contact, CreateAccount, CreateLabelBody, CreateRuleBody,
-    CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, Message,
-    MessageAttachment, MessageAuthenticationResults, MoveMessageRequest, MoveMessageResponse,
-    OutboxItem, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse, SendRequest,
-    SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount, UpdateLabelBody,
-    UpdateRuleBody, UpdateWebhook, Webhook,
+    CalendarEvent, CancelOutboxResponse, Contact, CreateAccount, CreateIdentity, CreateLabelBody,
+    CreateRuleBody, CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage,
+    Identity, Label, Message, MessageAttachment, MessageAuthenticationResults, MoveMessageRequest,
+    MoveMessageResponse, OutboxItem, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
+    SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount,
+    UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 
 use super::integration_tokens::{
@@ -169,6 +169,34 @@ fn doc_delete_account() {}
     responses((status = 200, body = AccountSettings), (status = 404, body = ErrorResponse))
 )]
 fn doc_account_settings() {}
+
+#[utoipa::path(
+    get,
+    path = "/accounts/{id}/identities",
+    security(("bearerAuth" = ["mail.accounts.read"])),
+    params(("id" = String, Path)),
+    responses((status = 200, body = [Identity]), (status = 404, body = ErrorResponse))
+)]
+fn doc_list_identities() {}
+
+#[utoipa::path(
+    post,
+    path = "/accounts/{id}/identities",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path)),
+    request_body = CreateIdentity,
+    responses((status = 200, body = Identity), (status = 404, body = ErrorResponse), (status = 409, body = ErrorResponse))
+)]
+fn doc_create_identity() {}
+
+#[utoipa::path(
+    delete,
+    path = "/accounts/{id}/identities/{identity_id}",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path), ("identity_id" = String, Path)),
+    responses((status = 200, body = StatusResponse), (status = 404, body = ErrorResponse))
+)]
+fn doc_delete_identity() {}
 
 #[utoipa::path(
     get,
@@ -526,6 +554,9 @@ fn doc_events() {}
         doc_list_attachments,
         doc_download_attachment,
         doc_send_message,
+        doc_list_identities,
+        doc_create_identity,
+        doc_delete_identity,
         doc_list_outbox,
         doc_cancel_outbox,
         doc_create_draft,
@@ -589,6 +620,8 @@ fn doc_events() {}
         CreateAccount,
         UpdateAccount,
         AccountSettings,
+        Identity,
+        CreateIdentity,
         Folder,
         PatchFolder,
         Message,
