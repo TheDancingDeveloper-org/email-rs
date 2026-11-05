@@ -131,6 +131,9 @@ pub(crate) fn compose_placeholder(
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
+                .when(compose.identities.len() > 1, |fields| {
+                    fields.child(compose_identity_row(state_entity, compose, cx))
+                })
                 .child(
                     div()
                         .flex()
@@ -262,6 +265,65 @@ pub(crate) fn compose_placeholder(
                     )
                 }),
         )
+}
+
+/// Display text for an identity: `Name <email>`, or just the address.
+pub(crate) fn identity_label(identity: &Identity) -> String {
+    let name = identity.name.trim();
+    if name.is_empty() {
+        identity.email.clone()
+    } else {
+        format!("{name} <{}>", identity.email)
+    }
+}
+
+/// The identity the From row shows as chosen.
+pub(crate) fn effective_identity_id(compose: &ComposeState) -> Option<String> {
+    selected_send_identity(compose).or_else(|| {
+        compose
+            .identities
+            .iter()
+            .find(|identity| identity.is_default)
+            .or_else(|| compose.identities.first())
+            .map(|identity| identity.id.clone())
+    })
+}
+
+pub(crate) fn compose_identity_row(
+    state_entity: &Entity<NativeAppState>,
+    compose: &ComposeState,
+    cx: &mut Context<ReadingPanePlaceholder>,
+) -> gpui::Div {
+    let current = effective_identity_id(compose);
+    let mut choices = div().flex_1().min_w_0().flex().flex_wrap().gap(px(6.0));
+    for identity in &compose.identities {
+        let selected = current.as_deref() == Some(identity.id.as_str());
+        let id = identity.id.clone();
+        choices = choices.child(
+            Button::new(SharedString::from(format!(
+                "compose-identity-{}",
+                identity.id
+            )))
+            .label(identity_label(identity))
+            .appearance(if selected {
+                ButtonAppearance::Accent
+            } else {
+                ButtonAppearance::Subtle
+            })
+            .size(ButtonSize::Compact)
+            .disabled(compose.sending)
+            .on_click({
+                let state_entity = state_entity.clone();
+                move |_, _, app_cx| set_compose_identity(&state_entity, id.clone(), app_cx)
+            }),
+        );
+    }
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(compose_field_label("From", cx))
+        .child(choices)
 }
 
 pub(crate) fn compose_mode_label(mode: &str) -> &'static str {
