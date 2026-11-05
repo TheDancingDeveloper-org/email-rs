@@ -7,6 +7,17 @@ pub(crate) enum AttachmentAction {
     Download,
 }
 
+/// Largest image the in-app lightbox will download and decode.
+pub(crate) const MAX_PREVIEW_BYTES: i64 = 20 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AttachmentPreview {
+    pub(crate) message_id: String,
+    pub(crate) attachment_id: String,
+    pub(crate) path: PathBuf,
+    pub(crate) filename: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SavedAttachment {
     pub(crate) path: PathBuf,
@@ -46,6 +57,86 @@ pub(crate) fn start_attachment_open(
         AttachmentAction::Open,
         app_cx,
     );
+}
+
+/// Raster formats the lightbox can decode. SVG is excluded on purpose: it can
+/// reference external resources, so it stays on the confirm-and-open path.
+pub(crate) fn attachment_is_previewable(attachment: &MessageAttachment) -> bool {
+    matches!(
+        attachment.content_type.to_ascii_lowercase().as_str(),
+        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp"
+    ) && (0..=MAX_PREVIEW_BYTES).contains(&attachment.size_bytes)
+}
+
+pub(crate) fn start_attachment_preview(
+    state_entity: &Entity<NativeAppState>,
+    message_id: &str,
+    attachment: MessageAttachment,
+    app_cx: &mut App,
+) {
+    if !attachment_is_previewable(&attachment) {
+        return;
+    }
+    let message_id = message_id.to_string();
+    let Some(base_url) = state_entity.update(app_cx, |state, cx| {
+        if state.attachment_busy || state.selected_message.as_deref() != Some(message_id.as_str()) {
+            return None;
+        }
+        state.attachment_busy = true;
+        state.attachment_notice = Some(format!("Loading preview of {}...", attachment.filename));
+        state.attachment_error = None;
+        cx.notify();
+        Some(state.api_base_url.clone())
+    }) else {
+        return;
+    };
+
+    let task_message_id = message_id.clone();
+    let task_attachment = attachment.clone();
+    let task = app_cx.background_executor().spawn(async move {
+        let directory = attachment_open_dir(&task_message_id, &task_attachment.id);
+        save_attachment_to_dir(base_url, &task_message_id, &task_attachment, directory)
+    });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                state_entity.update(&mut async_cx, |state, cx| {
+                    if state.selected_message.as_deref() != Some(message_id.as_str()) {
+                        return;
+                    }
+                    state.attachment_busy = false;
+                    match result {
+                        Ok(saved) => {
+                            state.attachment_notice = None;
+                            state.attachment_preview = Some(AttachmentPreview {
+                                message_id: message_id.clone(),
+                                attachment_id: attachment.id.clone(),
+                                path: saved.path,
+                                filename: saved.filename,
+                            });
+                        }
+                        Err(err) => {
+                            state.attachment_notice = None;
+                            state.attachment_error =
+                                Some(format!("Attachment preview failed: {err}"));
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+}
+
+/// The preview to show for the open message, if any.
+pub(crate) fn preview_for_message<'a>(
+    preview: Option<&'a AttachmentPreview>,
+    message_id: &str,
+) -> Option<&'a AttachmentPreview> {
+    preview.filter(|preview| preview.message_id == message_id)
 }
 
 pub(crate) fn attachment_requires_confirmation(attachment: &MessageAttachment) -> bool {
@@ -288,5 +379,53 @@ pub(crate) fn attachment_size_label(size_bytes: i64) -> String {
         format!("{:.1} KB", bytes / 1024.0)
     } else {
         format!("{:.1} MB", bytes / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    fn attachment(content_type: &str, size_bytes: i64) -> MessageAttachment {
+        MessageAttachment {
+            id: "a1".into(),
+            filename: "pic".into(),
+            content_type: content_type.into(),
+            size_bytes,
+            message_id: "m1".into(),
+            dangerous_or_double_extension: false,
+        }
+    }
+
+    #[test]
+    fn previews_only_raster_images_within_the_size_cap() {
+        assert!(attachment_is_previewable(&attachment("image/PNG", 10)));
+        assert!(attachment_is_previewable(&attachment(
+            "image/jpeg",
+            MAX_PREVIEW_BYTES
+        )));
+        assert!(!attachment_is_previewable(&attachment(
+            "image/jpeg",
+            MAX_PREVIEW_BYTES + 1
+        )));
+        assert!(!attachment_is_previewable(&attachment("image/svg+xml", 10)));
+        assert!(!attachment_is_previewable(&attachment(
+            "application/pdf",
+            10
+        )));
+        assert!(!attachment_is_previewable(&attachment("image/png", -1)));
+    }
+
+    #[test]
+    fn preview_is_scoped_to_its_message() {
+        let preview = AttachmentPreview {
+            message_id: "m1".into(),
+            attachment_id: "a1".into(),
+            path: PathBuf::from("/tmp/x.png"),
+            filename: "x.png".into(),
+        };
+        assert!(preview_for_message(Some(&preview), "m1").is_some());
+        assert!(preview_for_message(Some(&preview), "m2").is_none());
+        assert!(preview_for_message(None, "m1").is_none());
     }
 }

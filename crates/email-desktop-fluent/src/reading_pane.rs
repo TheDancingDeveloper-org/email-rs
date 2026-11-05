@@ -602,6 +602,60 @@ pub(crate) fn reading_attachment_section(
         }
     }
 
+    let preview = preview_for_message(
+        state_entity.read(cx).attachment_preview.as_ref(),
+        message_id,
+    )
+    .cloned();
+    if let Some(preview) = preview {
+        let close_state = state_entity.clone();
+        section = section.child(
+            div()
+                .id("reading-attachment-lightbox")
+                .p(px(8.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(colors.stroke_neutral_subtle)
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(typography.body.size))
+                                .text_color(colors.on_neutral)
+                                .child(preview.filename.clone()),
+                        )
+                        .child(
+                            Button::new("reading-attachment-lightbox-close")
+                                .label("Close")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(move |_, _, app_cx| {
+                                    close_state.update(app_cx, |state, cx| {
+                                        state.attachment_preview = None;
+                                        cx.notify();
+                                    });
+                                }),
+                        ),
+                )
+                .child(
+                    gpui::img(preview.path.clone())
+                        .max_w_full()
+                        .max_h(px(480.0))
+                        .object_fit(gpui::ObjectFit::Contain),
+                ),
+        );
+    }
+
     if let Some((message, is_error)) = status {
         section = section.child(
             div()
@@ -635,6 +689,9 @@ pub(crate) fn reading_attachment_row(
     );
     let open_attachment = attachment.clone();
     let download_attachment = attachment.clone();
+    let preview_attachment = attachment.clone();
+    let preview_message_id = message_id.to_string();
+    let previewable = attachment_is_previewable(attachment);
     let open_message_id = message_id.to_string();
     let download_message_id = message_id.to_string();
 
@@ -682,6 +739,30 @@ pub(crate) fn reading_attachment_row(
                         .child(meta),
                 ),
         )
+        .when(previewable, |row| {
+            row.child(
+                Button::new(SharedString::from(format!(
+                    "reading-attachment-preview-{}",
+                    preview_attachment.id
+                )))
+                .label("Preview")
+                .appearance(ButtonAppearance::Neutral)
+                .size(ButtonSize::Compact)
+                .disabled(busy)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    let preview_attachment = preview_attachment.clone();
+                    move |_, _, app_cx| {
+                        start_attachment_preview(
+                            &state_entity,
+                            &preview_message_id,
+                            preview_attachment.clone(),
+                            app_cx,
+                        );
+                    }
+                }),
+            )
+        })
         .child(
             Button::new(SharedString::from(format!(
                 "reading-attachment-open-{}",
