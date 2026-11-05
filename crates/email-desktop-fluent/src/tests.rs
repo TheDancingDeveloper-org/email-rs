@@ -488,6 +488,7 @@ fn native_preferences_parse_and_clamp_density() {
                 message_list_width: MIN_MESSAGE_LIST_WIDTH,
             },
             remote_image_allowlist: BTreeSet::new(),
+            undo_window_secs: DEFAULT_UNDO_WINDOW_SECS,
         }
     );
 }
@@ -517,6 +518,7 @@ fn native_preferences_round_trip_to_disk() {
             message_list_width: 444,
         },
         remote_image_allowlist: BTreeSet::from(["alice@example.test".to_string()]),
+        undo_window_secs: 12,
     };
 
     write_native_preferences(&path, &preferences).expect("write preferences");
@@ -2943,4 +2945,45 @@ fn move_outcome_is_kept_even_when_the_refresh_is_stale() {
         Instant::now() + MOVE_NOTICE_LIFETIME
     ));
     assert!(notice.is_none());
+}
+
+#[test]
+fn undo_window_preference_is_clamped_on_parse_and_save() {
+    assert_eq!(
+        parse_native_preferences("undo_window_secs=0\n").undo_window_secs,
+        MIN_UNDO_WINDOW_SECS
+    );
+    assert_eq!(
+        parse_native_preferences("undo_window_secs=200\n").undo_window_secs,
+        MAX_UNDO_WINDOW_SECS
+    );
+    assert_eq!(
+        parse_native_preferences("undo_window_secs=abc\n").undo_window_secs,
+        DEFAULT_UNDO_WINDOW_SECS
+    );
+    let out_of_range = NativePreferences {
+        undo_window_secs: 250,
+        ..NativePreferences::default()
+    };
+    assert!(serialize_native_preferences(&out_of_range).contains("undo_window_secs=30\n"));
+}
+
+#[test]
+fn send_request_carries_the_configured_undo_window() {
+    let mut state = NativeAppState {
+        undo_window_secs: 17,
+        accounts: vec![account("acct")],
+        ..NativeAppState::default()
+    };
+    state.compose.account_id = Some("acct".to_string());
+    let request = build_compose_request(
+        &state,
+        vec!["bob@example.test".to_string()],
+        Vec::new(),
+        Vec::new(),
+        "Hi".to_string(),
+        "Body".to_string(),
+    )
+    .expect("request");
+    assert_eq!(request.send_delay_seconds, Some(17));
 }

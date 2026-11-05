@@ -94,6 +94,11 @@ pub(crate) fn parse_native_preferences(raw: &str) -> NativePreferences {
                     .map(str::to_ascii_lowercase)
                     .collect();
             }
+            "undo_window_secs" => {
+                if let Ok(secs) = value.trim().parse::<u8>() {
+                    preferences.undo_window_secs = clamp_undo_window(secs);
+                }
+            }
             _ => {}
         }
     }
@@ -102,7 +107,7 @@ pub(crate) fn parse_native_preferences(raw: &str) -> NativePreferences {
 
 pub(crate) fn serialize_native_preferences(preferences: &NativePreferences) -> String {
     format!(
-        "theme={}\ndensity={}\nemail_sidebar_w={}\nemail_msglist_w={}\nremote_image_allowlist={}\n",
+        "theme={}\ndensity={}\nemail_sidebar_w={}\nemail_msglist_w={}\nremote_image_allowlist={}\nundo_window_secs={}\n",
         preferences.theme.as_str(),
         preferences.density_level.min(8),
         preferences.layout.sidebar_width,
@@ -112,8 +117,41 @@ pub(crate) fn serialize_native_preferences(preferences: &NativePreferences) -> S
             .iter()
             .cloned()
             .collect::<Vec<_>>()
-            .join(",")
+            .join(","),
+        clamp_undo_window(preferences.undo_window_secs)
     )
+}
+
+pub(crate) const DEFAULT_UNDO_WINDOW_SECS: u8 = 5;
+pub(crate) const MIN_UNDO_WINDOW_SECS: u8 = 1;
+pub(crate) const MAX_UNDO_WINDOW_SECS: u8 = 30;
+
+pub(crate) fn clamp_undo_window(secs: u8) -> u8 {
+    secs.clamp(MIN_UNDO_WINDOW_SECS, MAX_UNDO_WINDOW_SECS)
+}
+
+/// Step the undo window by `delta` seconds, persist it and return the result.
+pub(crate) fn adjust_undo_window(
+    state_entity: &Entity<NativeAppState>,
+    delta: i8,
+    app_cx: &mut App,
+) {
+    let preferences = state_entity.update(app_cx, |state, cx| {
+        let next = clamp_undo_window(
+            (state.undo_window_secs as i16 + delta as i16).clamp(0, u8::MAX as i16) as u8,
+        );
+        if next == state.undo_window_secs {
+            return None;
+        }
+        state.undo_window_secs = next;
+        cx.notify();
+        Some(NativePreferences::from_state(state))
+    });
+    if let Some(preferences) = preferences {
+        if let Err(err) = save_native_preferences(&preferences) {
+            tracing::warn!("failed to save undo window: {err:#}");
+        }
+    }
 }
 
 pub(crate) fn parse_layout_width(value: &str, min: u16, max: u16) -> Option<u16> {

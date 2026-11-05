@@ -601,7 +601,8 @@ pub(crate) fn start_message_mutation_and_refresh(
                 &mut state.pending_undo,
                 PendingUndo {
                     mutation,
-                    expires_at: Instant::now() + Duration::from_secs(5),
+                    expires_at: Instant::now()
+                        + Duration::from_secs(clamp_undo_window(state.undo_window_secs).into()),
                 },
             );
             cx.notify();
