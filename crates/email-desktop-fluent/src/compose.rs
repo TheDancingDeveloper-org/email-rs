@@ -536,7 +536,7 @@ pub(crate) fn start_snooze_with_value(
 pub(crate) fn start_quick_reply_send(
     state_entity: &Entity<NativeAppState>,
     recipient_input: Entity<TokenInput>,
-    quick_reply_input: Entity<TextInput>,
+    quick_reply_input: Entity<Textarea>,
     app_cx: &mut App,
 ) {
     let recipients = recipient_input
@@ -610,6 +610,48 @@ pub(crate) fn start_quick_reply_send(
             }
         })
         .detach();
+}
+
+/// Moves a half-written inline reply into the full composer, keeping its
+/// text and any recipients typed in the inline To field.
+pub(crate) fn expand_inline_reply(
+    state_entity: &Entity<NativeAppState>,
+    recipient_input: Entity<TokenInput>,
+    quick_reply_input: Entity<Textarea>,
+    app_cx: &mut App,
+) {
+    let to = token_input_values(&recipient_input, app_cx);
+    let body = quick_reply_input.read(app_cx).text().to_string();
+    start_reply_draft(state_entity, app_cx);
+    let carried = state_entity.update(app_cx, |state, cx| {
+        let carried = carry_inline_reply(&mut state.compose, to, body);
+        cx.notify();
+        carried
+    });
+    if carried {
+        quick_reply_input.update(app_cx, |input, cx| input.set_value("", cx));
+        recipient_input.update(app_cx, |input, cx| {
+            input.set_tokens(Vec::<TokenInputToken>::new(), cx);
+        });
+    }
+}
+
+/// Copies inline-reply text and recipients into a freshly opened reply
+/// composer. Does nothing when no composer opened.
+pub(crate) fn carry_inline_reply(
+    compose: &mut ComposeState,
+    to: Vec<String>,
+    body: String,
+) -> bool {
+    if !compose.open {
+        return false;
+    }
+    let to = normalize_recipients(to);
+    if !to.is_empty() {
+        compose.to = to;
+    }
+    compose.body = body;
+    true
 }
 
 pub(crate) fn start_compose_send(
@@ -744,12 +786,18 @@ pub(crate) fn build_quick_reply_request(
     recipients: Vec<String>,
     body: String,
 ) -> std::result::Result<SendRequest, String> {
-    let body = body.trim().to_string();
+    let mut body = body.trim().to_string();
     if body.is_empty() {
         return Err("Write a message before sending.".to_string());
     }
 
     let mode = state.compose.mode.as_deref().unwrap_or("reply");
+    if mode == "reply" {
+        if let Some(quote) = selected_quote_text(state) {
+            body.push_str("\n\n");
+            body.push_str(&build_quoted_block(&quote, Some(&selected_sender(state))));
+        }
+    }
     let mut to = normalize_recipients(recipients);
     if to.is_empty() && mode != "forward" {
         if let Some(email) = selected_from_email(state) {
@@ -1104,16 +1152,17 @@ mod tests {
     }
 
     fn open_compose(identities: Vec<Identity>) -> NativeAppState {
-        let mut state = NativeAppState::default();
-        state.compose = ComposeState {
-            open: true,
-            mode: Some("compose".into()),
-            account_id: Some("a1".into()),
-            revision: 3,
-            identities,
-            ..ComposeState::default()
-        };
-        state
+        NativeAppState {
+            compose: ComposeState {
+                open: true,
+                mode: Some("compose".into()),
+                account_id: Some("a1".into()),
+                revision: 3,
+                identities,
+                ..ComposeState::default()
+            },
+            ..NativeAppState::default()
+        }
     }
 
     fn built(state: &NativeAppState) -> SendRequest {

@@ -6,7 +6,7 @@ pub(crate) struct ReadingPanePlaceholder {
     pub(crate) state: Entity<NativeAppState>,
     pub(crate) context_menu: Option<Entity<ContextMenu>>,
     pub(crate) recipient_input: Entity<TokenInput>,
-    pub(crate) quick_reply_input: Entity<TextInput>,
+    pub(crate) quick_reply_input: Entity<Textarea>,
     pub(crate) compose_to_input: Entity<TokenInput>,
     pub(crate) compose_cc_input: Entity<TokenInput>,
     pub(crate) compose_bcc_input: Entity<TokenInput>,
@@ -36,7 +36,7 @@ impl ReadingPanePlaceholder {
                     }
                 })
         });
-        let quick_reply_input = cx.new(|_| TextInput::new().placeholder("Write a quick reply"));
+        let quick_reply_input = cx.new(|_| Textarea::new().placeholder("Write a reply...").rows(3));
         let compose_to_input = cx.new({
             let state = state.clone();
             let suggestions = compose_suggestions.clone();
@@ -1017,7 +1017,7 @@ pub(crate) fn reading_placeholder(
     state_entity: &Entity<NativeAppState>,
     state: &NativeAppState,
     recipient_input: Entity<TokenInput>,
-    quick_reply_input: Entity<TextInput>,
+    quick_reply_input: Entity<Textarea>,
     snooze_picker: Entity<DateTimePicker>,
     cx: &mut Context<ReadingPanePlaceholder>,
 ) -> gpui::Div {
@@ -1642,6 +1642,26 @@ pub(crate) fn reading_placeholder(
                                     let quick_reply_input = quick_reply_input.clone();
                                     move |_, _, app_cx| {
                                         start_quick_reply_send(
+                                            &state_entity,
+                                            recipient_input.clone(),
+                                            quick_reply_input.clone(),
+                                            app_cx,
+                                        );
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("reading-quick-reply-expand")
+                                .label("Open in composer")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .disabled(state.compose.sending)
+                                .on_click({
+                                    let state_entity = state_entity.clone();
+                                    let recipient_input = recipient_input.clone();
+                                    let quick_reply_input = quick_reply_input.clone();
+                                    move |_, _, app_cx| {
+                                        expand_inline_reply(
                                             &state_entity,
                                             recipient_input.clone(),
                                             quick_reply_input.clone(),

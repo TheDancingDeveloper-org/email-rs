@@ -2041,6 +2041,70 @@ fn quick_reply_request_defaults_to_selected_sender() {
 }
 
 #[test]
+fn inline_reply_quotes_the_original_message() {
+    let mut state = NativeAppState::default();
+    let mut full = full_message("message", "inbox", true, false);
+    full.subject = Some("Status".to_string());
+    full.from_name = Some("Ada Lovelace".to_string());
+    full.from_email = Some("ada@example.test".to_string());
+    full.body = Some(MessageBody {
+        html_body: None,
+        text_body: Some("Line one\nLine two".to_string()),
+        ..Default::default()
+    });
+    state.selected_message = Some("message".to_string());
+    state.selected_full_message = Some(full);
+
+    let request = build_quick_reply_request(&state, Vec::new(), "Thanks".to_string()).unwrap();
+
+    assert_eq!(
+        request.text_body.as_deref(),
+        Some("Thanks\n\nAda Lovelace wrote:\n> Line one\n> Line two")
+    );
+}
+
+#[test]
+fn inline_reply_carries_text_and_recipients_into_the_composer() {
+    let mut compose = ComposeState {
+        open: true,
+        mode: Some("reply".to_string()),
+        to: vec!["ada@example.test".to_string()],
+        ..ComposeState::default()
+    };
+    assert!(carry_inline_reply(
+        &mut compose,
+        vec![
+            " bob@example.test ".to_string(),
+            "BOB@example.test".to_string()
+        ],
+        "Draft so far".to_string(),
+    ));
+    assert_eq!(compose.to, vec!["bob@example.test"]);
+    assert_eq!(compose.body, "Draft so far");
+
+    // No typed recipients: keep the reply seed's recipient.
+    let mut compose = ComposeState {
+        open: true,
+        to: vec!["ada@example.test".to_string()],
+        ..ComposeState::default()
+    };
+    carry_inline_reply(&mut compose, Vec::new(), "x".to_string());
+    assert_eq!(compose.to, vec!["ada@example.test"]);
+}
+
+#[test]
+fn inline_reply_is_not_carried_when_no_composer_opened() {
+    let mut compose = ComposeState::default();
+    assert!(!carry_inline_reply(
+        &mut compose,
+        vec!["bob@example.test".to_string()],
+        "text".to_string()
+    ));
+    assert!(compose.body.is_empty());
+    assert!(compose.to.is_empty());
+}
+
+#[test]
 fn forward_request_uses_explicit_recipient_and_omits_in_reply_to() {
     let mut state = NativeAppState::default();
     let mut full = full_message("message", "inbox", true, false);
