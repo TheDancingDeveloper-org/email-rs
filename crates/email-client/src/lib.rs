@@ -2,11 +2,12 @@ use chrono::{DateTime, Utc};
 use email_types::{
     Account, AccountSettings, ActionInput, AddLinkBody, AddLinkResponse, AuthClientKind,
     AuthCredentials, AuthIdentity, AuthSession, AuthorizeResponse, BulkRequest, BulkResponse,
-    CalendarEvent, ConditionField, ConditionGroup, Contact, CreateAccount, CreateLabelBody,
-    CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, MatchMode,
-    Message, MessageAttachment, MoveMessageRequest, MoveMessageResponse, PatchFolder,
-    PatchMessageRequest, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
-    StatusResponse, SuggestResponse, SyncEvent, UpdateAccount, UpdateLabelBody, UpdateWebhook,
+    CalendarEvent, CancelOutboxResponse, ConditionField, ConditionGroup, Contact, CreateAccount,
+    CreateLabelBody, CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage,
+    Label, MatchMode, Message, MessageAttachment, MoveMessageRequest, MoveMessageResponse,
+    OutboxItem, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse, SendRequest,
+    SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, SyncEvent, UpdateAccount,
+    UpdateLabelBody, UpdateWebhook,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Serialize};
@@ -401,6 +402,17 @@ impl EmailClient {
 
     pub async fn send_message(&self, body: &SendRequest) -> Result<SendResponse> {
         self.json(Method::POST, "messages", body).await
+    }
+
+    /// Lists queued sends, newest scheduled first.
+    pub async fn list_outbox(&self) -> Result<Vec<OutboxItem>> {
+        self.request(Method::GET, "outbox").await
+    }
+
+    /// Cancels a queued send before its undo window closes; the server
+    /// answers 409 once it has been sent or the window has passed.
+    pub async fn cancel_outbox(&self, id: &str) -> Result<CancelOutboxResponse> {
+        self.request(Method::DELETE, &format!("outbox/{id}")).await
     }
 
     pub async fn create_draft(&self, body: &DraftRequest) -> Result<DraftResponse> {
@@ -812,6 +824,48 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn outbox_list_and_cancel_use_the_outbox_routes() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for body in [
+                "[{\"id\":\"o1\",\"status\":\"pending\",\"scheduledAt\":\"s\",\"cancelUntil\":\"c\",\"attempts\":0,\"lastError\":null}]",
+                "{\"id\":\"o1\",\"status\":\"cancelled\"}",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        let client = EmailClient::new(&base).unwrap();
+        let items = client.list_outbox().await.unwrap();
+        assert_eq!(items[0].id, "o1");
+        assert_eq!(items[0].last_error, None);
+        let cancelled = client.cancel_outbox("o1").await.unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0].starts_with("GET /api/v1/outbox "),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[1].starts_with("DELETE /api/v1/outbox/o1 "),
+            "{}",
+            requests[1]
+        );
     }
 
     #[tokio::test]
