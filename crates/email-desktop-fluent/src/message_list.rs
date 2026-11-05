@@ -207,6 +207,53 @@ impl Render for MessageListPlaceholder {
                             }),
                     ),
             )
+            .when_some(state.pending_send.as_ref(), |list, send| {
+                let cancelling = send.cancelling;
+                list.child(
+                    div()
+                        .mx(px(12.0))
+                        .mt(px(8.0))
+                        .p(px(8.0))
+                        .rounded(px(4.0))
+                        .bg(colors.neutral)
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(typography.caption.size))
+                                .text_color(colors.on_neutral)
+                                .child(if cancelling {
+                                    "Cancelling send..."
+                                } else {
+                                    "Message sent"
+                                }),
+                        )
+                        .child(
+                            Button::new("send-undo")
+                                .label("Undo")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .disabled(cancelling)
+                                .on_click({
+                                    let state_entity = self.state.clone();
+                                    move |_, _, app_cx| start_cancel_send(&state_entity, app_cx)
+                                }),
+                        )
+                        .child(
+                            Button::new("send-undo-dismiss")
+                                .label("Dismiss")
+                                .appearance(ButtonAppearance::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click({
+                                    let state_entity = self.state.clone();
+                                    move |_, _, app_cx| dismiss_pending_send(&state_entity, app_cx)
+                                }),
+                        ),
+                )
+            })
             .when_some(state.move_notice.as_ref(), |list, notice| {
                 let can_undo = notice.summary.can_undo();
                 list.child(

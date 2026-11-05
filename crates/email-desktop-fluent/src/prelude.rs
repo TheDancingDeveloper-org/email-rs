@@ -22,8 +22,8 @@ pub(crate) use email_types::{
     CalendarEvent, CalendarSearchResult, CalendarSuggestion, Condition, ConditionField,
     ConditionGroup, ConditionInput, ConditionOperator, Contact, CreateAccount, CreateWebhook,
     EventLink, Folder, FullMessage, Label, MatchMode, Message, MessageAttachment, MessageBody,
-    MessageSuggestion, PatchFolder, PatchMessageRequest, RuleDto, SendRequest, SnoozeRequest,
-    SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
+    MessageSuggestion, PatchFolder, PatchMessageRequest, RuleDto, SendRequest, SendResponse,
+    SnoozeRequest, SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 pub(crate) use fluent_app::{FluentApp, TitleBar, WindowTitle};
 pub(crate) use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
