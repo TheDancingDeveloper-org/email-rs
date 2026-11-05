@@ -842,7 +842,7 @@ pub(crate) fn build_quick_reply_request(
         in_reply_to,
         attachments: Vec::new(),
         send_at: None,
-        send_delay_seconds: None,
+        send_delay_seconds: Some(clamp_undo_window(state.undo_window_secs).into()),
         identity_id: None,
     })
 }
@@ -900,7 +900,7 @@ pub(crate) fn build_compose_request(
         in_reply_to,
         attachments: Vec::new(),
         send_at: None,
-        send_delay_seconds: None,
+        send_delay_seconds: Some(clamp_undo_window(state.undo_window_secs).into()),
         identity_id: selected_send_identity(&state.compose),
     })
 }

@@ -976,6 +976,39 @@ pub(crate) fn settings_general_body(
                         .on_click(|_, _, app_cx| app_cx.dispatch_action(&IncreaseDensity)),
                 ),
         )
+        .child(settings_section_title("Sending and undo", cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Undo window", cx))
+                .child(
+                    IconButton::new("settings-undo-down", "icons/chevron_down.svg")
+                        .size(ButtonSize::Compact)
+                        .disabled(state.undo_window_secs <= MIN_UNDO_WINDOW_SECS)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| adjust_undo_window(&state_entity, -1, app_cx)
+                        }),
+                )
+                .child(
+                    div()
+                        .w(px(96.0))
+                        .text_size(px(typography.body.size))
+                        .text_color(colors.on_neutral)
+                        .child(format!("{} seconds", state.undo_window_secs)),
+                )
+                .child(
+                    IconButton::new("settings-undo-up", "icons/chevron_up.svg")
+                        .size(ButtonSize::Compact)
+                        .disabled(state.undo_window_secs >= MAX_UNDO_WINDOW_SECS)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| adjust_undo_window(&state_entity, 1, app_cx)
+                        }),
+                ),
+        )
         .child(settings_section_title("Session", cx))
         .child(
             Button::new("settings-logout")
