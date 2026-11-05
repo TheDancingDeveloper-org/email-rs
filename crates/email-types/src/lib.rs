@@ -340,7 +340,34 @@ pub struct OutgoingAttachment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SendResponse {
+    pub status: String,
+    /// Outbox id; pass it to `DELETE /outbox/{id}` to cancel before `cancel_until`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_until: Option<String>,
+}
+
+/// A queued send, as listed by `GET /outbox`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboxItem {
+    pub id: String,
+    /// `pending`, `sending`, `sent` or `cancelled`.
+    pub status: String,
+    pub scheduled_at: String,
+    pub cancel_until: String,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct CancelOutboxResponse {
+    pub id: String,
     pub status: String,
 }
 
