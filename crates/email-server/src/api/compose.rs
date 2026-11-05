@@ -18,10 +18,7 @@ pub async fn send_message(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SendRequest>,
 ) -> Result<Json<SendResponse>> {
-    crate::api::outbox::enqueue(&state, req).await?;
-    Ok(Json(SendResponse {
-        status: "queued".to_string(),
-    }))
+    Ok(Json(crate::api::outbox::enqueue(&state, req).await?))
 }
 
 pub(crate) async fn build_outbound(

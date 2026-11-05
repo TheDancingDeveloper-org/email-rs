@@ -10,12 +10,12 @@ use utoipa::{Modify, OpenApi, ToSchema};
 use email_types::{
     Account, AccountSettings, AddLinkBody, AddLinkResponse, AuthCredentials, AuthIdentity,
     AuthSession, AuthenticationResultStatus, AuthorizeResponse, BulkRequest, BulkResponse,
-    CalendarEvent, Contact, CreateAccount, CreateLabelBody, CreateRuleBody, CreateWebhook,
-    DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, Message, MessageAttachment,
-    MessageAuthenticationResults, MoveMessageRequest, MoveMessageResponse, PatchFolder,
-    PatchMessageRequest, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
-    StatusResponse, SuggestResponse, UpdateAccount, UpdateLabelBody, UpdateRuleBody, UpdateWebhook,
-    Webhook,
+    CalendarEvent, CancelOutboxResponse, Contact, CreateAccount, CreateLabelBody, CreateRuleBody,
+    CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Label, Message,
+    MessageAttachment, MessageAuthenticationResults, MoveMessageRequest, MoveMessageResponse,
+    OutboxItem, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse, SendRequest,
+    SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount, UpdateLabelBody,
+    UpdateRuleBody, UpdateWebhook, Webhook,
 };
 
 use super::integration_tokens::{
@@ -313,7 +313,7 @@ fn doc_send_message() {}
     get,
     path = "/outbox",
     security(("bearerAuth" = ["mail.send"])),
-    responses((status = 200, body = [serde_json::Value]), (status = 401, body = ErrorResponse))
+    responses((status = 200, body = [OutboxItem]), (status = 401, body = ErrorResponse))
 )]
 fn doc_list_outbox() {}
 
@@ -322,7 +322,7 @@ fn doc_list_outbox() {}
     path = "/outbox/{id}",
     security(("bearerAuth" = ["mail.send"])),
     params(("id" = String, Path)),
-    responses((status = 200, body = serde_json::Value), (status = 409, body = ErrorResponse))
+    responses((status = 200, body = CancelOutboxResponse), (status = 409, body = ErrorResponse))
 )]
 fn doc_cancel_outbox() {}
 
@@ -603,6 +603,8 @@ fn doc_events() {}
         MoveMessageResponse,
         SendRequest,
         SendResponse,
+        OutboxItem,
+        CancelOutboxResponse,
         DraftRequest,
         DraftResponse,
         AuthorizeResponse

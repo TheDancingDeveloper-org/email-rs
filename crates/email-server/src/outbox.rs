@@ -82,16 +82,3 @@ async fn process_due(pool: &SqlitePool) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use chrono::{Duration, TimeZone, Utc};
-    #[test]
-    fn fake_clock_honours_delay_and_cancel_window() {
-        let clock = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let scheduled = clock + Duration::seconds(10);
-        assert!(scheduled > clock);
-        assert!(clock + Duration::seconds(10) >= scheduled);
-        assert!(clock + Duration::seconds(9) < scheduled);
-    }
-}
