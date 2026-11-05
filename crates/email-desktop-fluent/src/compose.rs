@@ -655,6 +655,7 @@ pub(crate) fn build_quick_reply_request(
         attachments: Vec::new(),
         send_at: None,
         send_delay_seconds: None,
+        identity_id: None,
     })
 }
 
@@ -712,6 +713,7 @@ pub(crate) fn build_compose_request(
         attachments: Vec::new(),
         send_at: None,
         send_delay_seconds: None,
+        identity_id: None,
     })
 }
 

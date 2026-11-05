@@ -45,6 +45,11 @@ pub(crate) async fn enqueue_at(
     if scheduled < now {
         return Err(AppError::Validation("sendAt cannot be in the past".into()));
     }
+    // Refuse an unknown identity now rather than failing the queued send later.
+    if req.identity_id.is_some() {
+        crate::api::identities::resolve_from(pool, &req.account_id, req.identity_id.as_deref())
+            .await?;
+    }
     let id = Uuid::new_v4().to_string();
     let payload = serde_json::to_string(&req).map_err(|e| AppError::Internal(e.into()))?;
     let scheduled_at = scheduled.to_rfc3339();
@@ -121,6 +126,7 @@ mod tests {
             attachments: vec![],
             send_at,
             send_delay_seconds: delay,
+            identity_id: None,
         }
     }
 
@@ -154,6 +160,52 @@ mod tests {
             .unwrap();
         assert_eq!(cancelled.status, "cancelled");
         assert_eq!(status(&pool, &id).await, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn enqueue_refuses_an_unknown_identity_and_keeps_a_valid_one() {
+        let pool = pool().await;
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('a1', 'Me', 'me@example.com', 'imap', 'basic')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let alias = crate::api::identities::create(
+            &pool,
+            "a1",
+            email_types::CreateIdentity {
+                name: "Sales".into(),
+                email: "sales@example.com".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut bad = request(Some(10), None);
+        bad.identity_id = Some("nope".into());
+        assert!(matches!(
+            enqueue_at(&pool, bad, Utc::now()).await,
+            Err(AppError::Validation(_))
+        ));
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 0);
+
+        let mut good = request(Some(10), None);
+        good.identity_id = Some(alias.id.clone());
+        let id = enqueue_at(&pool, good, Utc::now())
+            .await
+            .unwrap()
+            .id
+            .unwrap();
+        let payload: String = sqlx::query_scalar("SELECT payload FROM outbox WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let stored: SendRequest = serde_json::from_str(&payload).unwrap();
+        assert_eq!(stored.identity_id, Some(alias.id));
     }
 
     #[tokio::test]
