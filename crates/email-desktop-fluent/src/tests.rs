@@ -25,6 +25,7 @@ fn folder(id: &str, unread_count: i64) -> Folder {
         total_count: unread_count.max(0),
         synced_at: None,
         is_excluded: false,
+        is_subscribed: true,
     }
 }
 

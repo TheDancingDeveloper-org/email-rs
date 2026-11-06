@@ -26,6 +26,7 @@ from .capabilities_response import CapabilitiesResponse
 from .condition_input import ConditionInput
 from .contact import Contact
 from .create_account import CreateAccount
+from .create_folder import CreateFolder
 from .create_identity import CreateIdentity
 from .create_integration_token import CreateIntegrationToken
 from .create_label_body import CreateLabelBody
@@ -61,6 +62,7 @@ from .outbox_item import OutboxItem
 from .outgoing_attachment import OutgoingAttachment
 from .patch_folder import PatchFolder
 from .patch_message_request import PatchMessageRequest
+from .rename_folder import RenameFolder
 from .rsvp_request import RsvpRequest
 from .rule_action_dto import RuleActionDto
 from .rule_condition_dto import RuleConditionDto
@@ -108,6 +110,7 @@ __all__ = (
     "Contact",
     "CreateAccount",
     "CreatedIntegrationToken",
+    "CreateFolder",
     "CreateIdentity",
     "CreateIntegrationToken",
     "CreateLabelBody",
@@ -142,6 +145,7 @@ __all__ = (
     "OutgoingAttachment",
     "PatchFolder",
     "PatchMessageRequest",
+    "RenameFolder",
     "RsvpRequest",
     "RuleActionDto",
     "RuleConditionDto",

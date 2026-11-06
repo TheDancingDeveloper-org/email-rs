@@ -229,6 +229,11 @@ struct TestMailProvider {
     fail: bool,
 }
 
+/// Folder operations the `test` provider has been asked to perform, in order.
+#[cfg(test)]
+pub(crate) static TEST_FOLDER_CALLS: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[cfg(test)]
 impl TestMailProvider {
     fn mutation(&self) -> Result<()> {
@@ -247,6 +252,38 @@ impl TestMailProvider {
 impl MailProvider for TestMailProvider {
     fn provider_id(&self) -> &str {
         "gmail"
+    }
+
+    async fn create_folder(&self, path: &str) -> Result<()> {
+        TEST_FOLDER_CALLS
+            .lock()
+            .unwrap()
+            .push(format!("create {path}"));
+        self.mutation()
+    }
+
+    async fn rename_folder(&self, from: &str, to: &str) -> Result<()> {
+        TEST_FOLDER_CALLS
+            .lock()
+            .unwrap()
+            .push(format!("rename {from} {to}"));
+        self.mutation()
+    }
+
+    async fn delete_folder(&self, path: &str) -> Result<()> {
+        TEST_FOLDER_CALLS
+            .lock()
+            .unwrap()
+            .push(format!("delete {path}"));
+        self.mutation()
+    }
+
+    async fn set_folder_subscribed(&self, path: &str, subscribed: bool) -> Result<()> {
+        TEST_FOLDER_CALLS
+            .lock()
+            .unwrap()
+            .push(format!("subscribed {subscribed} {path}"));
+        self.mutation()
     }
 
     async fn authenticate(&mut self) -> Result<()> {
