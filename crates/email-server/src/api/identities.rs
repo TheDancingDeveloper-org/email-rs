@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use email_types::{CreateIdentity, Identity, DEFAULT_IDENTITY_ID};
+use email_types::{CreateIdentity, Identity, UpdateIdentity, DEFAULT_IDENTITY_ID};
 use lettre::{message::Mailbox, Address};
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -51,12 +51,52 @@ pub async fn delete_identity(
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
 
+pub async fn update_identity(
+    State(state): State<Arc<AppState>>,
+    Path((account_id, identity_id)): Path<(String, String)>,
+    Json(body): Json<UpdateIdentity>,
+) -> Result<Json<Identity>> {
+    if identity_id == DEFAULT_IDENTITY_ID {
+        return Err(AppError::Validation(
+            "the default identity cannot be updated here".into(),
+        ));
+    }
+    let current = sqlx::query_as::<_, Identity>(
+        "SELECT id, account_id, name, email, 0 AS is_default, signature, signature_html, signature_placement FROM identities WHERE id = ? AND account_id = ?",
+    )
+    .bind(&identity_id).bind(&account_id).fetch_optional(&state.pool).await?
+    .ok_or_else(|| AppError::NotFound(format!("identity {identity_id} not found")))?;
+    let name = body.name.unwrap_or(current.name);
+    let email = body.email.unwrap_or(current.email);
+    let signature = body.signature.unwrap_or(current.signature);
+    let signature_html = body.signature_html.unwrap_or(current.signature_html);
+    let placement = body
+        .signature_placement
+        .unwrap_or(current.signature_placement);
+    validate_signature_placement(&placement)?;
+    email
+        .parse::<Address>()
+        .map_err(|_| AppError::Validation("identity email is not a valid address".into()))?;
+    sqlx::query("UPDATE identities SET name = ?, email = ?, signature = ?, signature_html = ?, signature_placement = ? WHERE id = ? AND account_id = ?")
+        .bind(&name).bind(&email).bind(&signature).bind(&signature_html).bind(&placement).bind(&identity_id).bind(&account_id).execute(&state.pool).await?;
+    Ok(Json(Identity {
+        id: identity_id,
+        account_id,
+        name,
+        email,
+        is_default: false,
+        signature,
+        signature_html,
+        signature_placement: placement,
+    }))
+}
+
 /// The account's own identity first, then its aliases in the order added.
 pub(crate) async fn list(pool: &SqlitePool, account_id: &str) -> Result<Vec<Identity>> {
     let mut identities = vec![default_identity(pool, account_id).await?];
     identities.extend(
         sqlx::query_as::<_, Identity>(
-            "SELECT id, account_id, name, email, 0 AS is_default FROM identities WHERE account_id = ? ORDER BY created_at, rowid",
+            "SELECT id, account_id, name, email, 0 AS is_default, signature, signature_html, signature_placement FROM identities WHERE account_id = ? ORDER BY created_at, rowid",
         )
         .bind(account_id)
         .fetch_all(pool)
@@ -67,7 +107,7 @@ pub(crate) async fn list(pool: &SqlitePool, account_id: &str) -> Result<Vec<Iden
 
 async fn default_identity(pool: &SqlitePool, account_id: &str) -> Result<Identity> {
     sqlx::query_as::<_, Identity>(
-        "SELECT ? AS id, id AS account_id, name, email, 1 AS is_default FROM accounts WHERE id = ?",
+        "SELECT ? AS id, id AS account_id, name, email, 1 AS is_default, signature, NULL AS signature_html, 'below' AS signature_placement FROM accounts WHERE id = ?",
     )
     .bind(DEFAULT_IDENTITY_ID)
     .bind(account_id)
@@ -87,6 +127,7 @@ pub(crate) async fn create(
         return Err(AppError::Validation("identity name is not valid".into()));
     }
     let email = body.email.trim().to_string();
+    validate_signature_placement(&body.signature_placement)?;
     email
         .parse::<Address>()
         .map_err(|_| AppError::Validation("identity email is not a valid address".into()))?;
@@ -105,11 +146,9 @@ pub(crate) async fn create(
         ));
     }
     let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO identities (id, account_id, name, email) VALUES (?, ?, ?, ?)")
-        .bind(&id)
-        .bind(account_id)
-        .bind(&name)
-        .bind(&email)
+    sqlx::query("INSERT INTO identities (id, account_id, name, email, signature, signature_html, signature_placement) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(&id).bind(account_id).bind(&name).bind(&email)
+        .bind(&body.signature).bind(&body.signature_html).bind(&body.signature_placement)
         .execute(pool)
         .await?;
     Ok(Identity {
@@ -118,6 +157,9 @@ pub(crate) async fn create(
         name,
         email,
         is_default: false,
+        signature: body.signature,
+        signature_html: body.signature_html,
+        signature_placement: body.signature_placement,
     })
 }
 
@@ -132,7 +174,7 @@ pub(crate) async fn resolve_from(
     let identity = match identity_id {
         None | Some(DEFAULT_IDENTITY_ID) => default_identity(pool, account_id).await?,
         Some(id) => sqlx::query_as::<_, Identity>(
-            "SELECT id, account_id, name, email, 0 AS is_default FROM identities WHERE id = ? AND account_id = ?",
+            "SELECT id, account_id, name, email, 0 AS is_default, signature, signature_html, signature_placement FROM identities WHERE id = ? AND account_id = ?",
         )
         .bind(id)
         .bind(account_id)
@@ -146,6 +188,16 @@ pub(crate) async fn resolve_from(
         .map_err(|_| AppError::Validation("identity email is not a valid address".into()))?;
     let name = identity.name.trim();
     Ok(Mailbox::new((!name.is_empty()).then(|| name.to_string()), address).to_string())
+}
+
+fn validate_signature_placement(value: &str) -> Result<()> {
+    if matches!(value, "above" | "below") {
+        Ok(())
+    } else {
+        Err(AppError::Validation(
+            "signaturePlacement must be 'above' or 'below'".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +221,9 @@ mod tests {
         CreateIdentity {
             name: name.into(),
             email: email.into(),
+            signature: None,
+            signature_html: None,
+            signature_placement: "below".into(),
         }
     }
 

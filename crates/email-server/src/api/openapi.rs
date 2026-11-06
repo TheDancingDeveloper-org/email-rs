@@ -15,7 +15,7 @@ use email_types::{
     Identity, Label, Message, MessageAttachment, MessageAuthenticationResults, MoveMessageRequest,
     MoveMessageResponse, OutboxItem, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
     SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount,
-    UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
+    UpdateIdentity, UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 
 use super::discovery::{DiscoveryRequest, DiscoveryResponse};
@@ -222,6 +222,16 @@ fn doc_create_identity() {}
     responses((status = 200, body = StatusResponse), (status = 404, body = ErrorResponse))
 )]
 fn doc_delete_identity() {}
+
+#[utoipa::path(
+    patch,
+    path = "/accounts/{id}/identities/{identity_id}",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path), ("identity_id" = String, Path)),
+    request_body = UpdateIdentity,
+    responses((status = 200, body = Identity), (status = 404, body = ErrorResponse))
+)]
+fn doc_update_identity() {}
 
 #[utoipa::path(
     get,
@@ -614,6 +624,7 @@ fn doc_events() {}
         doc_list_identities,
         doc_create_identity,
         doc_delete_identity,
+        doc_update_identity,
         doc_list_outbox,
         doc_cancel_outbox,
         doc_create_draft,
@@ -684,6 +695,7 @@ fn doc_events() {}
         AccountSettings,
         Identity,
         CreateIdentity,
+        UpdateIdentity,
         Folder,
         PatchFolder,
         Message,

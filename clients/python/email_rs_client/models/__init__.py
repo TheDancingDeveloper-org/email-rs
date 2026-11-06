@@ -72,6 +72,7 @@ from .snooze_request import SnoozeRequest
 from .status_response import StatusResponse
 from .suggest_response import SuggestResponse
 from .update_account import UpdateAccount
+from .update_identity import UpdateIdentity
 from .update_label_body import UpdateLabelBody
 from .update_rule_body import UpdateRuleBody
 from .update_webhook import UpdateWebhook
@@ -152,6 +153,7 @@ __all__ = (
     "StatusResponse",
     "SuggestResponse",
     "UpdateAccount",
+    "UpdateIdentity",
     "UpdateLabelBody",
     "UpdateRuleBody",
     "UpdateWebhook",
