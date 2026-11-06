@@ -262,6 +262,7 @@ pub(crate) enum ReadingPaneKeyAction {
     ToggleRead,
     ClearSelection,
     CopyBody,
+    Undo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,6 +293,7 @@ pub(crate) fn reading_pane_key_action(
         "3" if shift => Some(ReadingPaneKeyAction::Delete),
         "delete" | "backspace" => Some(ReadingPaneKeyAction::Delete),
         "u" => Some(ReadingPaneKeyAction::ToggleRead),
+        "z" => Some(ReadingPaneKeyAction::Undo),
         _ => None,
     }
 }
@@ -307,7 +309,14 @@ pub(crate) fn handle_reading_pane_key(
         return false;
     };
 
+    if action == ReadingPaneKeyAction::Undo {
+        return undo_latest_action(state_entity, app_cx);
+    }
+
     if action == ReadingPaneKeyAction::ClearSelection {
+        if cancel_pending_undo_on_escape(state_entity, app_cx) {
+            return true;
+        }
         clear_reading_selection(state_entity, app_cx);
         return true;
     }
@@ -374,8 +383,8 @@ pub(crate) fn handle_reading_pane_key(
             app_cx,
         ),
         ReadingPaneKeyAction::ClearSelection => {}
-        // CopyBody is fully handled above before we fetch message_id.
-        ReadingPaneKeyAction::CopyBody => {}
+        // CopyBody and Undo are fully handled above before we fetch message_id.
+        ReadingPaneKeyAction::CopyBody | ReadingPaneKeyAction::Undo => {}
     }
     true
 }
