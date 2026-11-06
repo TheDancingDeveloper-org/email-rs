@@ -138,8 +138,14 @@ impl Render for SidebarPlaceholder {
                         DropPolicy::new(move |payload: &MessageDragPayload| {
                             folder_drop_accepts(payload, &policy_folder, &policy_locations)
                         }),
-                        move |payload, _operation, _, app_cx| {
-                            start_folder_drop(&drop_state, payload, &drop_folder_id, app_cx)
+                        move |payload, operation, _, app_cx| {
+                            start_folder_drop_operation(
+                                &drop_state,
+                                payload,
+                                &drop_folder_id,
+                                operation,
+                                app_cx,
+                            )
                         },
                         keyboard_payload.clone(),
                     )

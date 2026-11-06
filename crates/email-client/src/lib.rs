@@ -396,6 +396,21 @@ impl EmailClient {
         .await
     }
 
+    pub async fn copy_message(
+        &self,
+        message_id: &str,
+        folder_id: &str,
+    ) -> Result<MoveMessageResponse> {
+        self.json(
+            Method::POST,
+            &format!("messages/{message_id}/copy"),
+            &MoveMessageRequest {
+                folder_id: folder_id.to_string(),
+            },
+        )
+        .await
+    }
+
     pub async fn bulk_messages(&self, body: &BulkRequest) -> Result<BulkResponse> {
         self.json(Method::POST, "messages/bulk", body).await
     }
@@ -984,6 +999,44 @@ mod tests {
         assert!(requests[2].starts_with("DELETE /api/v1/accounts/a1/identities/i1 "));
         assert!(requests[3].starts_with("POST /api/v1/messages "));
         assert!(requests[3].contains("\"identityId\":\"i1\""));
+    }
+
+    #[tokio::test]
+    async fn copy_message_posts_folder_id_to_the_copy_route() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut chunk).unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if text.contains("\"folderId\"") || n == 0 {
+                    break;
+                }
+            }
+            let body = "{\"status\":\"copied\",\"messageId\":\"m2\"}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8_lossy(&buf).to_string()
+        });
+
+        let client = EmailClient::new(&base).unwrap();
+        let status = client.copy_message("m1", "f9").await.unwrap();
+        assert_eq!(status.status, "copied");
+        assert_eq!(status.message_id.as_deref(), Some("m2"));
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("POST /api/v1/messages/m1/copy "),
+            "{request}"
+        );
+        assert!(request.contains("{\"folderId\":\"f9\"}"), "{request}");
     }
 
     #[tokio::test]
