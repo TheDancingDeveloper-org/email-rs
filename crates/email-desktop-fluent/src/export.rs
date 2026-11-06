@@ -100,7 +100,7 @@ pub(crate) fn write_eml(message: &FullMessage, path: &Path) -> Result<()> {
 pub(crate) fn save_eml(message: &FullMessage) -> Result<Option<PathBuf>> {
     let Some(path) = rfd::FileDialog::new()
         .set_title("Save message")
-        .set_file_name(format!("{}.eml", safe_file_stem(&message.id)))
+        .set_file_name(default_eml_name(message))
         .add_filter("Email message", &["eml"])
         .save_file()
     else {
@@ -108,6 +108,40 @@ pub(crate) fn save_eml(message: &FullMessage) -> Result<Option<PathBuf>> {
     };
     write_eml(message, &path)?;
     Ok(Some(path))
+}
+
+/// Default save-dialog filename: the sanitised subject (falling back to the
+/// message id) plus `.eml`.
+pub(crate) fn default_eml_name(message: &FullMessage) -> String {
+    let subject = message.subject.as_deref().map(str::trim).unwrap_or("");
+    let stem = if subject.chars().any(|c| c.is_alphanumeric()) {
+        subject_file_stem(subject)
+    } else {
+        safe_file_stem(&message.id)
+    };
+    format!("{stem}.eml")
+}
+
+/// Keep letters and digits (Unicode included); collapse every other run of
+/// characters, path separators and controls among them, into a single `_`.
+fn subject_file_stem(subject: &str) -> String {
+    let mut stem = String::new();
+    let mut pending_sep = false;
+    for c in subject.chars() {
+        if c.is_alphanumeric() || matches!(c, '-' | '_') {
+            if pending_sep && !stem.is_empty() {
+                stem.push('_');
+            }
+            pending_sep = false;
+            stem.push(c);
+        } else {
+            pending_sep = true;
+        }
+        if stem.chars().count() >= 80 {
+            break;
+        }
+    }
+    stem
 }
 
 fn safe_file_stem(id: &str) -> String {
@@ -335,6 +369,31 @@ mod tests {
         assert!(safe_file_stem(&message.id)
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')));
+    }
+
+    #[test]
+    fn default_eml_name_sanitises_subject() {
+        let named = |subject: Option<&str>| FullMessage {
+            subject: subject.map(Into::into),
+            ..test_message()
+        };
+        assert_eq!(
+            default_eml_name(&named(Some("Re: Q3 report / draft?"))),
+            "Re_Q3_report_draft.eml"
+        );
+        assert_eq!(
+            default_eml_name(&named(Some("../../etc/passwd\r\n\0"))),
+            "etc_passwd.eml"
+        );
+        assert_eq!(
+            default_eml_name(&named(Some("Café ☕ menü"))),
+            "Café_menü.eml"
+        );
+        let long = default_eml_name(&named(Some(&"a".repeat(300))));
+        assert_eq!(long.len(), 80 + ".eml".len());
+        // No usable subject: fall back to the message id.
+        assert_eq!(default_eml_name(&named(None)), "message.eml");
+        assert_eq!(default_eml_name(&named(Some("  ?!  "))), "message.eml");
     }
 
     fn test_message() -> FullMessage {
