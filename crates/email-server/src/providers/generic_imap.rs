@@ -14,6 +14,13 @@ use super::{Folder, IdleEvent, MailProvider, Message, MessageBody, MovedMessage}
 use crate::error::{AppError, Result};
 use tracing::info;
 
+/// Extra trust anchors for tests that run the provider against the in-process
+/// mock IMAP server (`imap::mock_server`). Compiled out of non-test builds.
+#[cfg(test)]
+pub(crate) static TEST_EXTRA_ROOTS: std::sync::Mutex<
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+> = std::sync::Mutex::new(Vec::new());
+
 #[derive(Clone)]
 pub struct GenericImapProvider {
     pub account_id: String,
@@ -55,6 +62,10 @@ impl GenericImapProvider {
 
         let mut root_store = RootCertStore::empty();
         root_store.roots = webpki_roots::TLS_SERVER_ROOTS.to_vec();
+        #[cfg(test)]
+        for cert in TEST_EXTRA_ROOTS.lock().unwrap().iter() {
+            let _ = root_store.add(cert.clone());
+        }
         let tls_config = ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
