@@ -478,6 +478,11 @@ fn migrations() -> Vec<Migration> {
             name: "identity_signatures",
             apply: in_transaction!(run_identity_signatures_migration),
         },
+        Migration {
+            version: 30,
+            name: "folder_delimiters",
+            apply: in_transaction!(run_folder_delimiters_migration),
+        },
     ]
 }
 
@@ -499,6 +504,13 @@ async fn run_identity_signatures_migration(conn: &mut SqliteConnection) -> anyho
     )
     .execute(&mut *conn)
     .await?;
+    Ok(())
+}
+
+async fn run_folder_delimiters_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query("ALTER TABLE folders ADD COLUMN delimiter TEXT")
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 

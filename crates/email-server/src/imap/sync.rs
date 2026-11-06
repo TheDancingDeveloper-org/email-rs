@@ -458,17 +458,19 @@ impl ImapSyncEngine {
         for folder in &folders {
             let folder_id = Uuid::new_v4().to_string();
             sqlx::query(
-                r#"INSERT INTO folders (id, account_id, name, full_path, special_use)
-                   VALUES (?, ?, ?, ?, ?)
+                r#"INSERT INTO folders (id, account_id, name, full_path, special_use, delimiter)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(account_id, full_path) DO UPDATE SET
                        name        = excluded.name,
-                       special_use = excluded.special_use"#,
+                       special_use = excluded.special_use,
+                       delimiter   = excluded.delimiter"#,
             )
             .bind(&folder_id)
             .bind(account_id)
             .bind(&folder.name)
             .bind(&folder.full_path)
             .bind(&folder.special_use)
+            .bind(&folder.delimiter)
             .execute(&mut *tx)
             .await?;
         }
@@ -1637,6 +1639,7 @@ mod tests {
                     name: format!("Label {i}"),
                     full_path: format!("Label {i}"),
                     special_use: None,
+                    delimiter: None,
                     unread_count: 0,
                     total_count: 0,
                 })
