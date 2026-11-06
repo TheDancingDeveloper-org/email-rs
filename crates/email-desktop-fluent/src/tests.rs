@@ -2592,6 +2592,7 @@ fn account_delete_reload_preserves_native_state_and_resets_deleted_compose() {
             open: true,
             account_id: Some("deleted".to_string()),
             revision: 4,
+            session_generation: 6,
             ..ComposeState::default()
         },
         modals: ModalStates {
@@ -2634,6 +2635,7 @@ fn account_delete_reload_preserves_native_state_and_resets_deleted_compose() {
     assert!(state.sync.connected);
     assert!(!state.compose.open);
     assert_eq!(state.compose.revision, 5);
+    assert_eq!(state.compose.session_generation, 7);
     assert!(state.last_error.is_none());
 }
 
