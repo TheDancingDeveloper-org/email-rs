@@ -172,7 +172,9 @@ docker run -d \
   email-rs
 ```
 
-Keep `EMAIL_RS_CREDENTIAL_KEY` stable and back it up securely. It encrypts
+Replace the `...` placeholders with your own values. Generate
+`EMAIL_RS_CREDENTIAL_KEY` once with `openssl rand -base64 32`; never reuse an
+example key. Keep it stable and back it up securely. It encrypts
 provider credentials and must be preserved when replacing or restoring the
 production database.
 
