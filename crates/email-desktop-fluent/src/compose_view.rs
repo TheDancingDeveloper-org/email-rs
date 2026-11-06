@@ -271,6 +271,24 @@ pub(crate) fn compose_placeholder(
                         }),
                 )
                 .child(
+                    Button::new("compose-attach")
+                        .label("Attach")
+                        .appearance(ButtonAppearance::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(compose.sending)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| add_compose_attachment(&state_entity, app_cx)
+                        }),
+                )
+                .when(!compose.attachments.is_empty(), |footer| {
+                    footer.child(
+                        div()
+                            .text_size(px(typography.caption.size))
+                            .child(format!("{} attachment(s)", compose.attachments.len())),
+                    )
+                })
+                .child(
                     Button::new("compose-discard")
                         .label("Discard")
                         .appearance(ButtonAppearance::Subtle)
