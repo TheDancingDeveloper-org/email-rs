@@ -1,8 +1,6 @@
--- Unique index to allow upsert by provider_event_id during Google Calendar sync.
--- The same provider id may also be used by a locally stored invitation in the
--- default calendar, so the calendar is part of the ownership key.
+-- Unique index to allow upsert by provider_event_id during Google Calendar sync
 CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_events_provider
-ON calendar_events(account_id, calendar_id, provider_event_id)
+ON calendar_events(account_id, provider_event_id)
 WHERE provider_event_id IS NOT NULL;
 
 -- Email <-> calendar event links

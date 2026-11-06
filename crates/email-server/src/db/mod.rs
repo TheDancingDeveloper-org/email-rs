@@ -483,6 +483,11 @@ fn migrations() -> Vec<Migration> {
             name: "folder_delimiters",
             apply: in_transaction!(run_folder_delimiters_migration),
         },
+        Migration {
+            version: 31,
+            name: "calendar_provider_scope",
+            apply: in_transaction!(run_calendar_provider_scope_migration),
+        },
     ]
 }
 
@@ -501,6 +506,22 @@ async fn run_identity_signatures_migration(conn: &mut SqliteConnection) -> anyho
         .await?;
     sqlx::query(
         "ALTER TABLE identities ADD COLUMN signature_placement TEXT NOT NULL DEFAULT 'below'",
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Scope the provider-id uniqueness to a calendar, so a locally stored
+/// invitation and a provider-synced event may share an id in different calendars.
+async fn run_calendar_provider_scope_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query("DROP INDEX IF EXISTS idx_calendar_events_provider")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_calendar_events_provider
+         ON calendar_events(account_id, calendar_id, provider_event_id)
+         WHERE provider_event_id IS NOT NULL",
     )
     .execute(&mut *conn)
     .await?;
@@ -1645,6 +1666,53 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn calendar_provider_scope_migration_rebuilds_the_unique_index() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        run_migrations(&pool).await.unwrap();
+
+        // Put the database back at version 30: the index without calendar_id.
+        sqlx::query("DROP INDEX idx_calendar_events_provider")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_calendar_events_provider ON calendar_events(account_id, provider_event_id) WHERE provider_event_id IS NOT NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM schema_migrations WHERE version = 31")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('a', 'A', 'a@example.test', 'imap', 'password')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO calendar_events (id, account_id, calendar_id, provider_event_id, title, start_at, end_at) VALUES ('e1', 'a', 'primary', 'p', 'T', 's', 'e')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_migrations(&pool).await.unwrap();
+
+        // The same provider id in another calendar is now allowed...
+        sqlx::query("INSERT INTO calendar_events (id, account_id, calendar_id, provider_event_id, title, start_at, end_at) VALUES ('e2', 'a', 'default', 'p', 'T', 's', 'e')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // ...but a duplicate within one calendar is still refused.
+        assert!(sqlx::query("INSERT INTO calendar_events (id, account_id, calendar_id, provider_event_id, title, start_at, end_at) VALUES ('e3', 'a', 'default', 'p', 'T', 's', 'e')")
+            .execute(&pool)
+            .await
+            .is_err());
+    }
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     use super::*;
