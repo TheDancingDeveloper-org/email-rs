@@ -709,6 +709,14 @@ pub(crate) fn handle_message_list_key(
     command: bool,
     app_cx: &mut App,
 ) -> bool {
+    if !command {
+        match key {
+            "z" => return undo_latest_action(state_entity, app_cx),
+            "escape" if cancel_pending_undo_on_escape(state_entity, app_cx) => return true,
+            _ => {}
+        }
+    }
+
     if ids.is_empty() {
         return false;
     }
