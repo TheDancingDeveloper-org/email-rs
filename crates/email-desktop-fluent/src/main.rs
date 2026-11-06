@@ -27,6 +27,7 @@ mod state;
 mod status_bar;
 mod sync_events;
 mod system;
+mod thread_stack;
 
 #[allow(unused_imports)]
 use account_actions::*;
@@ -86,6 +87,8 @@ use status_bar::*;
 use sync_events::*;
 #[allow(unused_imports)]
 use system::*;
+#[allow(unused_imports)]
+use thread_stack::*;
 
 fn main() -> Result<()> {
     // SQLite creates the database, WAL, SHM and migration backups with the
