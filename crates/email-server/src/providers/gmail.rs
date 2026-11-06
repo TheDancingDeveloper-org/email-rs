@@ -796,6 +796,50 @@ impl MailProvider for GmailProvider {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopStore;
+
+    #[async_trait]
+    impl crate::auth::token_source::TokenStore for NoopStore {
+        async fn load(&self) -> Result<crate::auth::oauth2::StoredToken> {
+            unreachable!("constructor test never loads a token")
+        }
+
+        async fn refresh(
+            &self,
+            _current: &crate::auth::oauth2::StoredToken,
+        ) -> Result<crate::auth::oauth2::StoredToken> {
+            unreachable!("constructor test never refreshes a token")
+        }
+    }
+
+    #[test]
+    fn outlook_constructor_uses_microsoft_imap_defaults() {
+        let source = Arc::new(AccessTokenSource::new(
+            "account-id".to_string(),
+            crate::auth::oauth2::StoredToken {
+                access_token: "outlook-token".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                id_token: None,
+            },
+            Arc::new(NoopStore),
+        ));
+        let provider = GmailProvider::new_outlook(
+            "account-id".to_string(),
+            "person@example.com".to_string(),
+            source,
+        );
+
+        assert_eq!(provider.provider_id(), "microsoft365");
+        assert_eq!(provider.imap_host, "outlook.office365.com");
+        assert_eq!(provider.imap_port, 993);
+    }
+}
+
+#[cfg(test)]
 mod thread_tests {
     use super::*;
     use async_imap::imap_proto::types::AttributeValue;
