@@ -1009,6 +1009,70 @@ pub(crate) fn settings_general_body(
                         }),
                 ),
         )
+        .child(settings_section_title("Mail behavior", cx))
+        .child(settings_preference_checkbox(
+            state_entity,
+            "settings-conversation-view",
+            "Conversation view",
+            "Group related messages into expandable conversations.",
+            state.conversation_view,
+            colors.on_subtle,
+            |state| state.conversation_view = !state.conversation_view,
+        ))
+        .child(settings_preference_checkbox(
+            state_entity,
+            "settings-reply-all-default",
+            "Reply all by default",
+            "Include all original recipients when replying.",
+            state.reply_all_default,
+            colors.on_subtle,
+            |state| state.reply_all_default = !state.reply_all_default,
+        ))
+        .child(settings_preference_checkbox(
+            state_entity,
+            "settings-notifications",
+            "Desktop notifications",
+            "Allow new-message notifications from the native app.",
+            state.notifications_enabled,
+            colors.on_subtle,
+            |state| state.notifications_enabled = !state.notifications_enabled,
+        ))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(settings_label("Mark-read delay", cx))
+                .child(
+                    IconButton::new("settings-mark-read-delay-down", "icons/chevron_down.svg")
+                        .size(ButtonSize::Compact)
+                        .disabled(state.mark_read_delay_secs == 0)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| {
+                                update_native_preferences(&state_entity, app_cx, |state| {
+                                    state.mark_read_delay_secs =
+                                        state.mark_read_delay_secs.saturating_sub(1);
+                                });
+                            }
+                        }),
+                )
+                .child(format!("{} seconds", state.mark_read_delay_secs))
+                .child(
+                    IconButton::new("settings-mark-read-delay-up", "icons/chevron_up.svg")
+                        .size(ButtonSize::Compact)
+                        .disabled(state.mark_read_delay_secs >= MAX_MARK_READ_DELAY_SECS)
+                        .on_click({
+                            let state_entity = state_entity.clone();
+                            move |_, _, app_cx| {
+                                update_native_preferences(&state_entity, app_cx, |state| {
+                                    state.mark_read_delay_secs = (state.mark_read_delay_secs + 1)
+                                        .min(MAX_MARK_READ_DELAY_SECS);
+                                });
+                            }
+                        }),
+                ),
+        )
         .child(settings_section_title("Session", cx))
         .child(
             Button::new("settings-logout")
@@ -1018,6 +1082,40 @@ pub(crate) fn settings_general_body(
                     let state_entity = state_entity.clone();
                     move |_, _, app_cx| start_native_logout(&state_entity, app_cx)
                 }),
+        )
+}
+
+fn settings_preference_checkbox(
+    state_entity: &Entity<NativeAppState>,
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    checked: bool,
+    subtle_color: Hsla,
+    update: fn(&mut NativeAppState),
+) -> gpui::Div {
+    let state_entity = state_entity.clone();
+    div()
+        .flex()
+        .items_start()
+        .gap(px(8.0))
+        .child(
+            Checkbox::new(id)
+                .state(if checked {
+                    CheckboxState::Checked
+                } else {
+                    CheckboxState::Unchecked
+                })
+                .on_click(move |_, _, _, app_cx| {
+                    update_native_preferences(&state_entity, app_cx, update);
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(label)
+                .child(div().text_color(subtle_color).child(description)),
         )
 }
 
