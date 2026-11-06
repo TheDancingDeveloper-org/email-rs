@@ -39,6 +39,9 @@ pub enum AppError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
     #[error("IMAP error: {0}")]
     Imap(String),
 
@@ -60,6 +63,7 @@ impl IntoResponse for AppError {
             AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg, None),
             AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg, None),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg, None),
+            AppError::Unsupported(msg) => (StatusCode::NOT_IMPLEMENTED, msg, None),
             AppError::Imap(msg) => (StatusCode::BAD_GATEWAY, msg, None),
             AppError::Smtp(msg) => (StatusCode::BAD_GATEWAY, msg, None),
             AppError::Internal(error) => internal_error_response("internal", &error),

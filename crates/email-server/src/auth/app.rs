@@ -1406,6 +1406,11 @@ mod tests {
                 Some(serde_json::json!({"name": "x", "email": "x@example.com"})),
             ),
             (Method::DELETE, "/accounts/a1/identities/i1", None),
+            (
+                Method::POST,
+                "/accounts/a1/folders",
+                Some(serde_json::json!({"name": "Projects"})),
+            ),
         ] {
             let (status, _, _) = send(
                 crate::api::router(Arc::clone(&state)),
@@ -1499,6 +1504,87 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn folder_management_routes_need_mail_modify_and_creation_stays_closed() {
+        for (method, path) in [
+            (Method::POST, "/folders/f1/rename"),
+            (Method::DELETE, "/folders/f1"),
+            (Method::POST, "/folders/f1/subscribe"),
+            (Method::POST, "/folders/f1/unsubscribe"),
+        ] {
+            assert_eq!(
+                required_integration_scope(&method, path),
+                Some("mail.modify"),
+                "{method} {path}"
+            );
+        }
+        // Creating a folder is an account-level write: no integration scope.
+        assert_eq!(
+            required_integration_scope(&Method::POST, "/accounts/a1/folders"),
+            None
+        );
+        assert_eq!(
+            required_integration_scope(&Method::GET, "/accounts/a1/folders"),
+            Some("mail.accounts.read")
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_management_denies_unauthenticated_and_underscoped_tokens() {
+        let state = setup().await;
+        seed_user(&state).await;
+        let (_, login) = login_as(&state, ClientKind::Bearer).await;
+        let user_authorization = format!("Bearer {}", login["token"].as_str().unwrap());
+        let mut tokens = Vec::new();
+        for scopes in [vec!["mail.metadata.read"], vec!["mail.modify"]] {
+            let (_, _, created) = send(
+                crate::api::router(Arc::clone(&state)),
+                Method::POST,
+                "/integration-tokens",
+                Some(serde_json::json!({ "name": "folders", "scopes": scopes })),
+                &[("authorization", &user_authorization)],
+            )
+            .await;
+            tokens.push(format!("Bearer {}", created["token"].as_str().unwrap()));
+        }
+        for (method, path) in [
+            (Method::POST, "/folders/f1/rename"),
+            (Method::DELETE, "/folders/f1"),
+            (Method::POST, "/folders/f1/subscribe"),
+            (Method::POST, "/folders/f1/unsubscribe"),
+        ] {
+            let body = Some(serde_json::json!({"name": "X"}));
+            let (status, _, _) = send(
+                crate::api::router(Arc::clone(&state)),
+                method.clone(),
+                path,
+                body.clone(),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+            let (status, _, _) = send(
+                crate::api::router(Arc::clone(&state)),
+                method.clone(),
+                path,
+                body.clone(),
+                &[("authorization", &tokens[0])],
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}");
+            // mail.modify passes the scope check; the folder does not exist.
+            let (status, _, _) = send(
+                crate::api::router(Arc::clone(&state)),
+                method.clone(),
+                path,
+                body,
+                &[("authorization", &tokens[1])],
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+        }
     }
 
     #[tokio::test]
