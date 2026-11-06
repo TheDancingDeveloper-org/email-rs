@@ -303,6 +303,20 @@ fn doc_move_message() {}
 
 #[utoipa::path(
     post,
+    path = "/messages/{id}/copy",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path)),
+    request_body = MoveMessageRequest,
+    responses(
+        (status = 200, body = MoveMessageResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse)
+    )
+)]
+fn doc_copy_message() {}
+
+#[utoipa::path(
+    post,
     path = "/messages/bulk",
     security(("bearerAuth" = ["mail.modify"])),
     request_body = BulkRequest,
@@ -550,6 +564,7 @@ fn doc_events() {}
         doc_delete_message,
         doc_archive_message,
         doc_move_message,
+        doc_copy_message,
         doc_bulk_messages,
         doc_list_attachments,
         doc_download_attachment,

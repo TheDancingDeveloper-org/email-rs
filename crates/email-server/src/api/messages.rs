@@ -330,6 +330,23 @@ pub async fn move_message(
     Path(message_id): Path<String>,
     Json(body): Json<MoveMessageRequest>,
 ) -> Result<Json<MoveMessageResponse>> {
+    transfer_message(state, message_id, body, false).await
+}
+
+pub async fn copy_message(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+    Json(body): Json<MoveMessageRequest>,
+) -> Result<Json<MoveMessageResponse>> {
+    transfer_message(state, message_id, body, true).await
+}
+
+async fn transfer_message(
+    state: Arc<AppState>,
+    message_id: String,
+    body: MoveMessageRequest,
+    copy: bool,
+) -> Result<Json<MoveMessageResponse>> {
     ensure_message_exists(&state.pool, &message_id).await?;
     let event = message_event_context(&state.pool, &message_id).await?;
     let source_folder_id = message_folder_id(&state.pool, &message_id).await?;
@@ -352,12 +369,16 @@ pub async fn move_message(
     }
 
     let (source, uid, provider) = load_provider(&state, &message_id).await?;
-    let moved = provider.move_message(&source, uid, &destination).await?;
+    let moved = if copy {
+        provider.copy_message(&source, uid, &destination).await?
+    } else {
+        provider.move_message(&source, uid, &destination).await?
+    };
     // The server chose the destination UID. Record the destination occurrence
     // under a new id so the caller can move it back; the next sync upserts
     // onto the same row.
     let new_message_id =
-        record_moved_message(&state.pool, &message_id, &body.folder_id, moved).await?;
+        record_moved_message(&state.pool, &message_id, &body.folder_id, moved, copy).await?;
     if new_message_id.is_some() {
         refresh_folder_counts(&state.pool, &body.folder_id).await?;
     }
@@ -368,11 +389,16 @@ pub async fn move_message(
         if let Some(object) = data.as_object_mut() {
             object.insert("destination".to_string(), destination.into());
         }
-        fire_webhooks(&state.pool, &account_id, "message.moved", data).await;
+        let event_name = if copy {
+            "message.copied"
+        } else {
+            "message.moved"
+        };
+        fire_webhooks(&state.pool, &account_id, event_name, data).await;
     }
 
     Ok(Json(MoveMessageResponse {
-        status: "moved".to_string(),
+        status: if copy { "copied" } else { "moved" }.to_string(),
         message_id: new_message_id,
     }))
 }
@@ -385,6 +411,7 @@ async fn record_moved_message(
     source_id: &str,
     destination_folder_id: &str,
     moved: MovedMessage,
+    copy: bool,
 ) -> Result<Option<String>> {
     let mut tx = pool.begin().await?;
     let mut new_id = None;
@@ -425,10 +452,12 @@ async fn record_moved_message(
         .await?;
         new_id = Some(id);
     }
-    sqlx::query("DELETE FROM messages WHERE id = ?")
-        .bind(source_id)
-        .execute(&mut *tx)
-        .await?;
+    if !copy {
+        sqlx::query("DELETE FROM messages WHERE id = ?")
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(new_id)
 }
@@ -2153,6 +2182,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copy_without_copyuid_keeps_source_until_destination_sync() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "inbox", "acc1", Some("inbox")).await;
+        seed_folder(&state.pool, "projects", "acc1", None).await;
+        seed_message(&state.pool, "original", "acc1", "inbox").await;
+        let result = super::record_moved_message(
+            &state.pool,
+            "original",
+            "projects",
+            crate::providers::MovedMessage {
+                uid: None,
+                uid_validity: None,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, None);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id = 'original'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn copy_to_folder_preserves_source_occurrence_and_refreshes_counts() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld-inbox", "acc1", Some("inbox")).await;
+        seed_folder(&state.pool, "fld-projects", "acc1", None).await;
+        seed_message(&state.pool, "move-msg", "acc1", "fld-inbox").await;
+
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/move-msg/copy",
+            Some(serde_json::json!({"folderId": "fld-projects"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "copied");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id = 'move-msg'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(folder_counts(&state.pool, "fld-inbox").await, (1, 1));
+
+        // The destination occurrence exists under the id the API returned.
+        let new_id = body["messageId"].as_str().expect("messageId").to_string();
+        assert_ne!(new_id, "move-msg");
+        let (folder, subject): (String, Option<String>) =
+            sqlx::query_as("SELECT folder_id, subject FROM messages WHERE id = ?")
+                .bind(&new_id)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(folder, "fld-projects");
+        assert_eq!(subject.as_deref(), Some("Subject of move-msg"));
+        assert_eq!(folder_counts(&state.pool, "fld-projects").await.1, 1);
+    }
+
+    #[tokio::test]
     async fn move_to_folder_removes_source_occurrence_and_refreshes_counts() {
         let state = setup().await;
         seed_account(&state.pool, "acc1").await;
@@ -2230,6 +2326,46 @@ mod tests {
             .unwrap();
         assert_eq!(total, 1);
         assert_eq!(folder_counts(&state.pool, "fld-projects").await.1, 0);
+    }
+
+    #[tokio::test]
+    async fn copy_rejects_same_folder_and_foreign_account_folder() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        sqlx::query(
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('acc2','T','u2@example.com','test','test')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        seed_folder(&state.pool, "fld-inbox", "acc1", Some("inbox")).await;
+        seed_folder(&state.pool, "fld-other", "acc2", None).await;
+        seed_message(&state.pool, "stay-msg", "acc1", "fld-inbox").await;
+
+        for folder in ["fld-inbox", "fld-other", "missing"] {
+            let (status, _) = req(
+                crate::api::router(Arc::clone(&state)),
+                "POST",
+                "/messages/stay-msg/copy",
+                Some(serde_json::json!({ "folderId": folder })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{folder}");
+        }
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/nope/copy",
+            Some(serde_json::json!({"folderId": "fld-inbox"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id = 'stay-msg'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 1);
     }
 
     #[tokio::test]
