@@ -575,6 +575,15 @@ pub async fn require_auth(
     next.run(request).await
 }
 
+/// `/accounts/{id}/identities/{identity_id}`, with no further segments.
+fn is_identity_item_path(path: &str) -> bool {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    matches!(
+        segments.as_slice(),
+        ["accounts", account, "identities", identity] if !account.is_empty() && !identity.is_empty()
+    )
+}
+
 fn required_integration_scope(method: &Method, path: &str) -> Option<&'static str> {
     if *method == Method::POST && path == "/messages" {
         return Some("mail.send");
@@ -604,12 +613,14 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
     if path.ends_with("/invitation/rsvp") {
         return (*method == Method::POST).then_some("mail.send");
     }
+    if *method == Method::PATCH && is_identity_item_path(path) {
+        // Editing an identity's name, address or signature. Every other write
+        // under /accounts (accounts, credentials, identity create/delete)
+        // stays closed to integration tokens.
+        return Some("mail.modify");
+    }
     if path.starts_with("/accounts") || path == "/health/details" {
-        return match *method {
-            Method::GET => Some("mail.accounts.read"),
-            Method::PATCH | Method::POST | Method::DELETE => Some("mail.modify"),
-            _ => None,
-        };
+        return (*method == Method::GET).then_some("mail.accounts.read");
     }
     if *method == Method::GET
         && path.starts_with("/messages/")
@@ -1375,6 +1386,37 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        // mail.modify covers editing an identity only: every other write under
+        // /accounts stays closed to integration tokens.
+        for (method, path, body) in [
+            (
+                Method::POST,
+                "/accounts",
+                Some(serde_json::json!({"name": "x", "email": "x@example.com"})),
+            ),
+            (
+                Method::PATCH,
+                "/accounts/a1",
+                Some(serde_json::json!({"name": "x"})),
+            ),
+            (Method::DELETE, "/accounts/a1", None),
+            (
+                Method::POST,
+                "/accounts/a1/identities",
+                Some(serde_json::json!({"name": "x", "email": "x@example.com"})),
+            ),
+            (Method::DELETE, "/accounts/a1/identities/i1", None),
+        ] {
+            let (status, _, _) = send(
+                crate::api::router(Arc::clone(&state)),
+                method.clone(),
+                path,
+                body,
+                &[("authorization", &modifier_authorization)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}");
+        }
         let (status, _, _) = send(
             crate::api::router(Arc::clone(&state)),
             Method::GET,
