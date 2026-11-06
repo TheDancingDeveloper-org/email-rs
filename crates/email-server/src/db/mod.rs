@@ -508,7 +508,31 @@ fn migrations() -> Vec<Migration> {
             name: "gmail_history_sync",
             apply: in_transaction!(run_gmail_history_sync_migration),
         },
+        Migration {
+            version: 36,
+            name: "account_vacation",
+            apply: in_transaction!(run_account_vacation_migration),
+        },
     ]
+}
+
+/// Per-account vacation auto-reply settings, stored once the provider has
+/// accepted them.
+async fn run_account_vacation_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TABLE account_vacation (
+            account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            subject TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            start_date TEXT,
+            end_date TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Microsoft Graph delta sync state: one deltaLink per folder (NULL after a

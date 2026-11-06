@@ -30,6 +30,7 @@ pub mod smart_folders;
 pub mod snooze;
 pub mod threads;
 pub mod unsubscribe;
+pub mod vacation;
 pub mod webhooks;
 
 pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
@@ -64,6 +65,10 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/messages/{id}/archive"),
     ("POST", "/messages/{id}/move"),
     ("POST", "/messages/{id}/copy"),
+    ("POST", "/messages/{id}/spam"),
+    ("POST", "/messages/{id}/not-spam"),
+    ("GET", "/accounts/{id}/vacation"),
+    ("PUT", "/accounts/{id}/vacation"),
     ("GET", "/messages/{id}/labels"),
     ("POST", "/messages/{id}/labels/{label_id}"),
     ("DELETE", "/messages/{id}/labels/{label_id}"),
@@ -233,6 +238,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/messages/{id}/archive", post(messages::archive_message))
         .route("/messages/{id}/move", post(messages::move_message))
         .route("/messages/{id}/copy", post(messages::copy_message))
+        .route(
+            "/accounts/{id}/vacation",
+            get(vacation::get_vacation).put(vacation::put_vacation),
+        )
+        .route("/messages/{id}/spam", post(messages::report_spam))
+        .route("/messages/{id}/not-spam", post(messages::report_not_spam))
         .route("/messages/{id}/labels", get(labels::get_message_labels))
         .route(
             "/messages/{id}/labels/{label_id}",

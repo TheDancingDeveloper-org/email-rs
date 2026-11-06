@@ -391,6 +391,31 @@ pub struct MoveMessageResponse {
     pub message_id: Option<String>,
 }
 
+/// A per-account vacation auto-reply. Dates are `YYYY-MM-DD` in UTC; the end
+/// date is inclusive.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VacationSettings {
+    pub enabled: bool,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+/// The stored vacation reply and whether the account's provider can apply it
+/// server-side. Providers that cannot (IMAP without ManageSieve) refuse writes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VacationStatus {
+    pub supported: bool,
+    pub settings: VacationSettings,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct BulkRequest {
     pub ids: Vec<String>,
