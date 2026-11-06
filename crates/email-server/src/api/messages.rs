@@ -706,7 +706,7 @@ fn message_trust_signals(
     }
 }
 
-fn unfolded_headers(raw_headers: &str) -> Vec<(String, String)> {
+pub(crate) fn unfolded_headers(raw_headers: &str) -> Vec<(String, String)> {
     let mut headers: Vec<(String, String)> = Vec::new();
     for line in raw_headers.lines() {
         let line = line.trim_end_matches('\r');
@@ -722,7 +722,7 @@ fn unfolded_headers(raw_headers: &str) -> Vec<(String, String)> {
     headers
 }
 
-fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+pub(crate) fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
         .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
@@ -1200,10 +1200,8 @@ pub async fn get_message(
         .await?;
     refresh_folder_counts(&state.pool, &msg.folder_id).await?;
     let attachments = load_message_attachments(&state.pool, &message_id).await?;
-    let trust_signals = message_trust_signals(
-        body.as_ref().and_then(|body| body.raw_headers.as_deref()),
-        msg.from_email.as_deref(),
-    );
+    let body_headers = body.as_ref().and_then(|body| body.raw_headers.clone());
+    let trust_signals = message_trust_signals(body_headers.as_deref(), msg.from_email.as_deref());
 
     let result = serde_json::json!({
         "id": msg.id,
@@ -1235,6 +1233,9 @@ pub async fn get_message(
         "authenticationResults": trust_signals.authentication_results,
         "fromReplyToDomainMismatch": trust_signals.from_reply_to_domain_mismatch,
         "displayNameSpoofing": trust_signals.display_name_spoofing,
+        "listUnsubscribe": body_headers
+            .as_deref()
+            .and_then(super::unsubscribe::parse_list_unsubscribe),
         "attachments": attachments,
     });
 

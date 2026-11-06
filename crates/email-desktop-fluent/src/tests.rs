@@ -87,6 +87,7 @@ fn full_message(id: &str, folder_id: &str, is_read: bool, is_flagged: bool) -> F
         authentication_results: Default::default(),
         from_reply_to_domain_mismatch: false,
         display_name_spoofing: false,
+        list_unsubscribe: None,
     }
 }
 
