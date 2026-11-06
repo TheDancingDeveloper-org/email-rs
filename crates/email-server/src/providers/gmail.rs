@@ -89,6 +89,8 @@ pub struct GmailProvider {
     pub provider_type: String,
     /// Microsoft Graph delta sync; `None` (the default) keeps the IMAP path.
     pub graph: Option<Arc<super::graph_delta::GraphDelta>>,
+    /// Gmail REST history sync; `None` (the default) keeps the IMAP path.
+    pub gmail_api: Option<Arc<super::gmail_history::GmailHistory>>,
 }
 
 impl GmailProvider {
@@ -101,6 +103,7 @@ impl GmailProvider {
             imap_port: 993,
             provider_type: "gmail".to_string(),
             graph: None,
+            gmail_api: None,
         }
     }
 
@@ -113,12 +116,19 @@ impl GmailProvider {
             imap_port: 993,
             provider_type: "microsoft365".to_string(),
             graph: None,
+            gmail_api: None,
         }
     }
 
     /// Route folder listing and message sync through Graph delta.
     pub fn with_graph_delta(mut self, graph: Arc<super::graph_delta::GraphDelta>) -> Self {
         self.graph = Some(graph);
+        self
+    }
+
+    /// Route folder listing and message sync through Gmail history.
+    pub fn with_gmail_history(mut self, api: Arc<super::gmail_history::GmailHistory>) -> Self {
+        self.gmail_api = Some(api);
         self
     }
 
@@ -299,6 +309,9 @@ impl MailProvider for GmailProvider {
         if let Some(graph) = &self.graph {
             return graph.list_folders().await;
         }
+        if let Some(api) = &self.gmail_api {
+            return api.list_folders().await;
+        }
         info!("listing folders for account {}", self.account_id);
         let mut session = self.connect().await?;
 
@@ -353,8 +366,8 @@ impl MailProvider for GmailProvider {
     }
 
     async fn folder_uid_validity(&self, folder: &str) -> Result<Option<u32>> {
-        if self.graph.is_some() {
-            // Graph UIDs are allocated by a never-reused counter, so they are
+        if self.graph.is_some() || self.gmail_api.is_some() {
+            // Graph and Gmail API UIDs are allocated by a never-reused counter, so they are
             // valid for the life of the cache.
             let _ = folder;
             return Ok(Some(1));
@@ -376,6 +389,9 @@ impl MailProvider for GmailProvider {
     ) -> Result<Vec<Message>> {
         if let Some(graph) = &self.graph {
             return graph.sync_folder(folder).await;
+        }
+        if let Some(api) = &self.gmail_api {
+            return api.sync_folder(folder).await;
         }
         info!("fetching messages for folder {}", folder);
         let mut session = self.connect().await?;
@@ -575,6 +591,8 @@ impl MailProvider for GmailProvider {
     async fn commit_pending_sync(&self, folder: &str) -> Result<()> {
         if let Some(graph) = &self.graph {
             graph.commit_pending(folder).await
+        } else if let Some(api) = &self.gmail_api {
+            api.commit_pending(folder).await
         } else {
             Ok(())
         }
@@ -584,12 +602,18 @@ impl MailProvider for GmailProvider {
         if let Some(graph) = &self.graph {
             graph.discard_pending(folder);
         }
+        if let Some(api) = &self.gmail_api {
+            api.discard_pending(folder);
+        }
         Ok(())
     }
 
     async fn fetch_messages_by_uid(&self, folder: &str, uids: &[u32]) -> Result<Vec<Message>> {
         if let Some(graph) = &self.graph {
             return graph.fetch_by_uids(folder, uids).await;
+        }
+        if let Some(api) = &self.gmail_api {
+            return api.fetch_by_uids(folder, uids).await;
         }
         let wanted: std::collections::HashSet<u32> = uids.iter().copied().collect();
         Ok(self
@@ -603,6 +627,9 @@ impl MailProvider for GmailProvider {
     async fn list_message_uids(&self, folder: &str) -> Result<Vec<u32>> {
         if let Some(graph) = &self.graph {
             return graph.list_uids(folder).await;
+        }
+        if let Some(api) = &self.gmail_api {
+            return api.list_uids(folder).await;
         }
         let mut session = self.connect().await?;
         session

@@ -503,6 +503,11 @@ fn migrations() -> Vec<Migration> {
             name: "graph_delta_sync",
             apply: in_transaction!(run_graph_delta_sync_migration),
         },
+        Migration {
+            version: 35,
+            name: "gmail_history_sync",
+            apply: in_transaction!(run_gmail_history_sync_migration),
+        },
     ]
 }
 
@@ -528,6 +533,36 @@ async fn run_graph_delta_sync_migration(conn: &mut SqliteConnection) -> anyhow::
             graph_id TEXT NOT NULL,
             uid INTEGER NOT NULL,
             PRIMARY KEY (account_id, folder_id, graph_id),
+            UNIQUE (account_id, folder_id, uid)
+        )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Gmail API history sync state: one historyId per label (NULL until the
+/// first full listing commits), a never-reused UID counter, and the mapping
+/// from opaque Gmail message ids to the UIDs the sync engine uses.
+async fn run_gmail_history_sync_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TABLE gmail_history_cursors (
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            folder_id TEXT NOT NULL,
+            history_id TEXT,
+            next_uid INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (account_id, folder_id)
+        )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE gmail_message_map (
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            folder_id TEXT NOT NULL,
+            gmail_id TEXT NOT NULL,
+            uid INTEGER NOT NULL,
+            PRIMARY KEY (account_id, folder_id, gmail_id),
             UNIQUE (account_id, folder_id, uid)
         )",
     )

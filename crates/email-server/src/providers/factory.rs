@@ -126,11 +126,17 @@ pub async fn provider_for_account(
         }),
     ));
     if account.provider_type == "gmail" {
-        Ok(Arc::new(GmailProvider::new(
-            account.id,
-            account.email,
-            tokens,
-        )))
+        let mut provider = GmailProvider::new(account.id.clone(), account.email, tokens.clone());
+        if super::gmail_history::gmail_api_sync_enabled() {
+            provider =
+                provider.with_gmail_history(Arc::new(super::gmail_history::GmailHistory::new(
+                    super::gmail_history::DEFAULT_BASE_URL,
+                    tokens,
+                    pool.clone(),
+                    account.id,
+                )));
+        }
+        Ok(Arc::new(provider))
     } else {
         let mut provider =
             GmailProvider::new_outlook(account.id.clone(), account.email, tokens.clone());
