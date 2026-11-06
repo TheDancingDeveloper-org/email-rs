@@ -1106,6 +1106,7 @@ pub(crate) fn reading_placeholder(
         .or_else(|| summary.map(|message| message.is_read))
         .unwrap_or(true);
     let message_id = selected_id.unwrap_or_default();
+    let thread_stack = thread_stack_entries(state);
     let has_quoted_text = state
         .selected_full_message
         .as_ref()
@@ -1595,6 +1596,9 @@ pub(crate) fn reading_placeholder(
                 .py(px(16.0))
                 .child(DocumentViewer::new(selected_document(state)).max_height(520.0)),
         )
+        .when(!thread_stack.is_empty(), |pane| {
+            pane.child(thread_stack_section(state_entity, &thread_stack, cx))
+        })
         .when(has_attachments, |pane| {
             pane.child(reading_attachment_section(
                 state_entity,
