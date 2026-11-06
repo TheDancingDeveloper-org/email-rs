@@ -585,6 +585,10 @@ fn native_preferences_parse_and_clamp_density() {
             },
             remote_image_allowlist: BTreeSet::new(),
             undo_window_secs: DEFAULT_UNDO_WINDOW_SECS,
+            mark_read_delay_secs: DEFAULT_MARK_READ_DELAY_SECS,
+            reply_all_default: DEFAULT_REPLY_ALL_DEFAULT,
+            conversation_view: DEFAULT_CONVERSATION_VIEW,
+            notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             key_overrides: BTreeMap::new(),
         }
     );
@@ -616,6 +620,10 @@ fn native_preferences_round_trip_to_disk() {
         },
         remote_image_allowlist: BTreeSet::from(["alice@example.test".to_string()]),
         undo_window_secs: 12,
+        mark_read_delay_secs: 4,
+        reply_all_default: true,
+        conversation_view: false,
+        notifications_enabled: false,
         key_overrides: BTreeMap::from([("compose".to_string(), "ctrl-n".to_string())]),
     };
 

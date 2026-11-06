@@ -408,7 +408,7 @@ pub(crate) fn group_messages_by_thread(messages: &[Message]) -> Vec<MessageThrea
 }
 
 pub(crate) fn message_list_uses_threading(state: &NativeAppState) -> bool {
-    selected_regular_folder_id(state).is_some()
+    state.conversation_view && selected_regular_folder_id(state).is_some()
 }
 
 pub(crate) fn message_list_render_rows(state: &NativeAppState) -> Vec<MessageListRenderRow> {
