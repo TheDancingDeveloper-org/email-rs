@@ -18,6 +18,7 @@ pub mod events;
 pub mod folders;
 pub mod identities;
 pub mod integration_tokens;
+pub mod invitations;
 pub mod labels;
 pub mod messages;
 pub mod openapi;
@@ -69,6 +70,8 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/calendar/events/{id}/links"),
     ("POST", "/calendar/events/{id}/links"),
     ("DELETE", "/calendar/events/{id}/links/{message_id}"),
+    ("GET", "/messages/{id}/invitation"),
+    ("POST", "/messages/{id}/invitation/rsvp"),
     ("POST", "/sync/{account_id}"),
     ("GET", "/auth/gmail/authorize"),
     ("GET", "/auth/microsoft/authorize"),
@@ -181,6 +184,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(messages::get_message)
                 .patch(messages::patch_message)
                 .delete(messages::delete_message),
+        )
+        .route(
+            "/messages/{id}/invitation",
+            get(invitations::get_invitation),
+        )
+        .route(
+            "/messages/{id}/invitation/rsvp",
+            post(invitations::rsvp_invitation),
         )
         .route(
             "/messages/{id}/attachments",
