@@ -205,6 +205,28 @@ pub struct Folder {
     pub total_count: i64,
     pub synced_at: Option<String>,
     pub is_excluded: bool,
+    #[serde(default = "default_true")]
+    pub is_subscribed: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateFolder {
+    /// Leaf name of the new folder; it may not contain the hierarchy separator.
+    pub name: String,
+    /// Folder to nest the new one under; top level when absent.
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameFolder {
+    /// New leaf name; the folder stays under the same parent.
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]

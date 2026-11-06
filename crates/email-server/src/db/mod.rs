@@ -1147,6 +1147,15 @@ async fn run_message_identity_migration(pool: &SqlitePool) -> anyhow::Result<()>
             .await?;
     }
 
+    if !folder_columns
+        .iter()
+        .any(|column| column == "is_subscribed")
+    {
+        sqlx::query("ALTER TABLE folders ADD COLUMN is_subscribed BOOLEAN NOT NULL DEFAULT 1")
+            .execute(pool)
+            .await?;
+    }
+
     let message_columns: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('messages')")
             .fetch_all(pool)
