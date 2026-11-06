@@ -2,9 +2,9 @@
 //!
 //! Opt-in (see [`graph_sync_enabled`]); the IMAP path is untouched when it is
 //! off. Each folder keeps one persisted `@odata.deltaLink`. A run follows
-//! `@odata.nextLink` pages to the end, then applies the whole result in one
-//! transaction together with the new deltaLink, so a failed run leaves the old
-//! link and replays cleanly. Graph message ids are opaque strings, so they are
+//! `@odata.nextLink` pages to the end, then stages the result until the sync
+//! engine commits its messages; a failed run leaves the old link and replays
+//! cleanly. Graph message ids are opaque strings, so they are
 //! mapped to stable per-folder UIDs that are never reused.
 //!
 //! Access tokens are sent only as a bearer header, only to the configured
@@ -12,7 +12,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -66,6 +66,15 @@ pub struct GraphDelta {
     tokens: Arc<AccessTokenSource>,
     pool: SqlitePool,
     account_id: String,
+    pending: Mutex<HashMap<String, PendingDelta>>,
+}
+
+struct PendingDelta {
+    delta_link: Option<String>,
+    next_uid: i64,
+    upserts: HashMap<String, i64>,
+    removed: HashSet<String>,
+    full: bool,
 }
 
 /// What one pass over a folder's delta feed produced.
@@ -89,6 +98,7 @@ impl GraphDelta {
             tokens,
             pool,
             account_id,
+            pending: Mutex::new(HashMap::new()),
         }
     }
 
@@ -251,13 +261,6 @@ impl GraphDelta {
         let batch = match self.read_feed(start).await {
             Ok(batch) => batch,
             Err(GraphError::Gone) if !full => {
-                sqlx::query(
-                    "UPDATE graph_delta_links SET delta_link = NULL WHERE account_id = ? AND folder_id = ?",
-                )
-                .bind(&self.account_id)
-                .bind(folder_id)
-                .execute(&self.pool)
-                .await?;
                 full = true;
                 self.read_feed(initial_url).await.map_err(into_app)?
             }
@@ -267,9 +270,69 @@ impl GraphDelta {
     }
 
     async fn apply(&self, folder_id: &str, batch: DeltaBatch, full: bool) -> Result<Vec<Message>> {
-        let mut tx = crate::db::begin_write(&self.pool)
-            .await
-            .map_err(|e| AppError::Transient(format!("database busy: {e}")))?;
+        let mut next_uid: i64 = sqlx::query_scalar(
+            "SELECT next_uid FROM graph_delta_links WHERE account_id = ? AND folder_id = ?",
+        )
+        .bind(&self.account_id)
+        .bind(folder_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or(1);
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT graph_id, uid FROM graph_message_map WHERE account_id = ? AND folder_id = ?",
+        )
+        .bind(&self.account_id)
+        .bind(folder_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut mapped: HashMap<String, i64> = rows.into_iter().collect();
+        let mut removed = batch.removed.clone();
+        for id in &removed {
+            mapped.remove(id);
+        }
+        if full {
+            for id in mapped
+                .keys()
+                .filter(|id| !batch.upserts.contains_key(*id))
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                mapped.remove(&id);
+                removed.insert(id);
+            }
+        }
+        let mut messages = Vec::with_capacity(batch.upserts.len());
+        let mut ordered: Vec<(&String, &Value)> = batch.upserts.iter().collect();
+        ordered.sort_by(|a, b| a.0.cmp(b.0));
+        for (graph_id, item) in ordered {
+            let uid = if let Some(uid) = mapped.get(graph_id) {
+                *uid
+            } else {
+                let uid = next_uid;
+                next_uid += 1;
+                mapped.insert(graph_id.clone(), uid);
+                uid
+            };
+            messages.push(parse_message(item, graph_id, uid as u32));
+        }
+        self.pending.lock().unwrap().insert(
+            folder_id.to_string(),
+            PendingDelta {
+                delta_link: batch.delta_link,
+                next_uid,
+                upserts: mapped,
+                removed,
+                full,
+            },
+        );
+        Ok(messages)
+    }
+
+    pub async fn commit_pending(&self, folder_id: &str) -> Result<()> {
+        let Some(pending) = self.pending.lock().unwrap().remove(folder_id) else {
+            return Ok(());
+        };
+        let mut tx = crate::db::begin_write(&self.pool).await?;
         sqlx::query(
             "INSERT OR IGNORE INTO graph_delta_links (account_id, folder_id) VALUES (?, ?)",
         )
@@ -277,92 +340,26 @@ impl GraphDelta {
         .bind(folder_id)
         .execute(&mut *tx)
         .await?;
-        let mut next_uid: i64 = sqlx::query_scalar(
-            "SELECT next_uid FROM graph_delta_links WHERE account_id = ? AND folder_id = ?",
-        )
-        .bind(&self.account_id)
-        .bind(folder_id)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        for id in &batch.removed {
-            sqlx::query(
-                "DELETE FROM graph_message_map WHERE account_id = ? AND folder_id = ? AND graph_id = ?",
-            )
-            .bind(&self.account_id)
-            .bind(folder_id)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        for id in pending.removed {
+            sqlx::query("DELETE FROM graph_message_map WHERE account_id = ? AND folder_id = ? AND graph_id = ?").bind(&self.account_id).bind(folder_id).bind(id).execute(&mut *tx).await?;
         }
-        if full {
-            // A full pass lists every message, so anything unmapped from it is gone.
-            let known: Vec<String> = sqlx::query_scalar(
-                "SELECT graph_id FROM graph_message_map WHERE account_id = ? AND folder_id = ?",
-            )
-            .bind(&self.account_id)
-            .bind(folder_id)
-            .fetch_all(&mut *tx)
-            .await?;
-            for id in known.iter().filter(|id| !batch.upserts.contains_key(*id)) {
-                sqlx::query(
-                    "DELETE FROM graph_message_map WHERE account_id = ? AND folder_id = ? AND graph_id = ?",
-                )
-                .bind(&self.account_id)
-                .bind(folder_id)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            }
+        for (id, uid) in pending.upserts {
+            sqlx::query("INSERT OR REPLACE INTO graph_message_map (account_id, folder_id, graph_id, uid) VALUES (?, ?, ?, ?)").bind(&self.account_id).bind(folder_id).bind(id).bind(uid).execute(&mut *tx).await?;
         }
-
-        let mut messages = Vec::with_capacity(batch.upserts.len());
-        let mut ordered: Vec<(&String, &Value)> = batch.upserts.iter().collect();
-        ordered.sort_by(|a, b| a.0.cmp(b.0));
-        for (graph_id, item) in ordered {
-            let existing: Option<i64> = sqlx::query_scalar(
-                "SELECT uid FROM graph_message_map WHERE account_id = ? AND folder_id = ? AND graph_id = ?",
-            )
-            .bind(&self.account_id)
-            .bind(folder_id)
-            .bind(graph_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let uid = match existing {
-                Some(uid) => uid,
-                None => {
-                    let uid = next_uid;
-                    next_uid += 1;
-                    sqlx::query(
-                        "INSERT INTO graph_message_map (account_id, folder_id, graph_id, uid) VALUES (?, ?, ?, ?)",
-                    )
-                    .bind(&self.account_id)
-                    .bind(folder_id)
-                    .bind(graph_id)
-                    .bind(uid)
-                    .execute(&mut *tx)
-                    .await?;
-                    uid
-                }
-            };
-            messages.push(parse_message(item, graph_id, uid as u32));
-        }
-
-        sqlx::query(
-            "UPDATE graph_delta_links SET delta_link = ?, next_uid = ? WHERE account_id = ? AND folder_id = ?",
-        )
-        .bind(&batch.delta_link)
-        .bind(next_uid)
-        .bind(&self.account_id)
-        .bind(folder_id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE graph_delta_links SET delta_link = ?, next_uid = ? WHERE account_id = ? AND folder_id = ?").bind(pending.delta_link).bind(pending.next_uid).bind(&self.account_id).bind(folder_id).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(messages)
+        Ok(())
     }
 
     /// Every UID currently mapped in the folder (the post-delta snapshot).
     pub async fn list_uids(&self, folder_id: &str) -> Result<Vec<u32>> {
+        if let Some(pending) = self.pending.lock().unwrap().get(folder_id) {
+            return Ok(pending
+                .upserts
+                .values()
+                .filter_map(|uid| u32::try_from(*uid).ok())
+                .collect());
+        }
         let uids: Vec<i64> = sqlx::query_scalar(
             "SELECT uid FROM graph_message_map WHERE account_id = ? AND folder_id = ?",
         )
