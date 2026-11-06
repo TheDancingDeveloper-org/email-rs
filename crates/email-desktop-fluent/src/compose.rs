@@ -16,6 +16,7 @@ pub(crate) fn start_new_compose(state_entity: &Entity<NativeAppState>, app_cx: &
             mode: Some("compose".to_string()),
             account_id: Some(account_id.clone()),
             revision: state.compose.revision.saturating_add(1),
+            session_generation: state.compose.session_generation.saturating_add(1),
             signature_loading: true,
             ..ComposeState::default()
         };
@@ -74,6 +75,7 @@ pub(crate) fn start_reply_draft(state_entity: &Entity<NativeAppState>, app_cx: &
             quoted_from: Some(selected_sender(state)),
             signature_loading: true,
             revision: state.compose.revision.saturating_add(1),
+            session_generation: state.compose.session_generation.saturating_add(1),
             ..ComposeState::default()
         };
         state.selected_view = SelectedView::Mail;
@@ -125,6 +127,7 @@ pub(crate) fn start_forward_draft(state_entity: &Entity<NativeAppState>, app_cx:
             quoted_from: Some(selected_sender(state)),
             signature_loading: true,
             revision: state.compose.revision.saturating_add(1),
+            session_generation: state.compose.session_generation.saturating_add(1),
             ..ComposeState::default()
         };
         state.selected_view = SelectedView::Mail;
@@ -464,6 +467,7 @@ pub(crate) fn update_compose_subject(
 ) {
     state_entity.update(app_cx, |state, cx| {
         state.compose.subject = Some(subject);
+        state.compose.autosave_dirty = true;
         cx.notify();
     });
     start_draft_autosave(state_entity, app_cx);
@@ -476,23 +480,33 @@ pub(crate) fn update_compose_body(
 ) {
     state_entity.update(app_cx, |state, cx| {
         state.compose.body = body;
+        state.compose.autosave_dirty = true;
         cx.notify();
     });
     start_draft_autosave(state_entity, app_cx);
 }
 
 fn start_draft_autosave(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
-    let Some((base_url, draft_id, request)) = state_entity.update(app_cx, |state, cx| {
-        let request = build_draft_request(state).ok()?;
-        state.compose.autosaving = true;
-        state.compose.notice = Some("Draft saving...".to_string());
-        cx.notify();
-        Some((
-            state.api_base_url.clone(),
-            state.compose.draft_id.clone(),
-            request,
-        ))
-    }) else {
+    let Some((base_url, draft_id, request, revision, session_generation)) =
+        state_entity.update(app_cx, |state, cx| {
+            let request = build_draft_request(state).ok()?;
+            state.compose.autosave_dirty = true;
+            if !autosave_can_start(state.compose.autosaving) {
+                return None;
+            }
+            state.compose.autosave_dirty = false;
+            state.compose.autosaving = true;
+            state.compose.notice = Some("Draft saving...".to_string());
+            cx.notify();
+            Some((
+                state.api_base_url.clone(),
+                state.compose.draft_id.clone(),
+                request,
+                state.compose.revision,
+                state.compose.session_generation,
+            ))
+        })
+    else {
         return;
     };
     let task = app_cx
@@ -504,7 +518,11 @@ fn start_draft_autosave(state_entity: &Entity<NativeAppState>, app_cx: &mut App)
             let mut async_cx = async_cx.clone();
             async move {
                 let result = task.await;
-                state_entity.update(&mut async_cx, |state, cx| {
+                let continue_saving = state_entity.update(&mut async_cx, |state, cx| {
+                    if !autosave_reply_is_current(&state.compose, revision, session_generation) {
+                        state.compose.autosaving = false;
+                        return false;
+                    }
                     state.compose.autosaving = false;
                     match result {
                         Ok(response) => {
@@ -514,8 +532,70 @@ fn start_draft_autosave(state_entity: &Entity<NativeAppState>, app_cx: &mut App)
                         }
                         Err(error) => state.compose.error = Some(error.to_string()),
                     }
+                    let continue_saving = autosave_needs_follow_up(state.compose.autosave_dirty);
                     cx.notify();
+                    continue_saving
                 });
+                if continue_saving {
+                    start_draft_autosave_async(&state_entity, &mut async_cx);
+                }
+            }
+        })
+        .detach();
+}
+
+fn start_draft_autosave_async(state_entity: &Entity<NativeAppState>, app_cx: &mut gpui::AsyncApp) {
+    let Some((base_url, draft_id, request, revision, session_generation)) =
+        state_entity.update(app_cx, |state, cx| {
+            let request = build_draft_request(state).ok()?;
+            if !autosave_can_start(state.compose.autosaving) {
+                return None;
+            }
+            state.compose.autosave_dirty = false;
+            state.compose.autosaving = true;
+            state.compose.notice = Some("Draft saving...".to_string());
+            cx.notify();
+            Some((
+                state.api_base_url.clone(),
+                state.compose.draft_id.clone(),
+                request,
+                state.compose.revision,
+                state.compose.session_generation,
+            ))
+        })
+    else {
+        return;
+    };
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { save_draft_request(base_url, draft_id.as_deref(), request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                let continue_saving = state_entity.update(&mut async_cx, |state, cx| {
+                    if !autosave_reply_is_current(&state.compose, revision, session_generation) {
+                        state.compose.autosaving = false;
+                        return false;
+                    }
+                    state.compose.autosaving = false;
+                    match result {
+                        Ok(response) => {
+                            state.compose.draft_id = Some(response.id);
+                            state.compose.notice = Some("Draft saved".to_string());
+                            state.compose.error = None;
+                        }
+                        Err(error) => state.compose.error = Some(error.to_string()),
+                    }
+                    let continue_saving = autosave_needs_follow_up(state.compose.autosave_dirty);
+                    cx.notify();
+                    continue_saving
+                });
+                if continue_saving {
+                    start_draft_autosave_async(&state_entity, &mut async_cx);
+                }
             }
         })
         .detach();
@@ -567,11 +647,18 @@ pub(crate) fn build_draft_request(
 }
 
 pub(crate) fn attachment_from_path(path: &Path) -> Result<OutgoingAttachment> {
+    const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
     let filename = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("attachment has no valid filename"))?
         .to_string();
+    let size = std::fs::metadata(path)
+        .with_context(|| format!("stat attachment {}", path.display()))?
+        .len();
+    if size > MAX_ATTACHMENT_BYTES {
+        return Err(anyhow!("attachment exceeds the 25 MiB size limit"));
+    }
     let bytes =
         std::fs::read(path).with_context(|| format!("read attachment {}", path.display()))?;
     let content_type = match path
@@ -684,7 +771,7 @@ pub(crate) fn start_quick_reply_send(
         .collect::<Vec<_>>();
     let body = quick_reply_input.read(app_cx).text().trim().to_string();
 
-    let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
+    let Some((base_url, request, draft_id)) = state_entity.update(app_cx, |state, cx| {
         match build_quick_reply_request(state, recipients, body) {
             Ok(request) => {
                 state.compose.sending = true;
@@ -692,7 +779,11 @@ pub(crate) fn start_quick_reply_send(
                 state.compose.notice = None;
                 state.last_error = None;
                 cx.notify();
-                Some((state.api_base_url.clone(), request))
+                Some((
+                    state.api_base_url.clone(),
+                    request,
+                    state.compose.draft_id.clone(),
+                ))
             }
             Err(message) => {
                 state.compose.error = Some(message.clone());
@@ -705,6 +796,7 @@ pub(crate) fn start_quick_reply_send(
         return;
     };
 
+    let delete_base_url = base_url.clone();
     let task = app_cx
         .background_executor()
         .spawn(async move { send_quick_reply(base_url, request) });
@@ -736,6 +828,14 @@ pub(crate) fn start_quick_reply_send(
                 });
 
                 if sent {
+                    if let Some(draft_id) = draft_id_to_delete(draft_id, sent) {
+                        let delete_task = async_cx
+                            .background_executor()
+                            .spawn(async move { delete_draft(delete_base_url, draft_id) });
+                        if let Err(error) = delete_task.await {
+                            tracing::warn!("failed to delete draft after reply: {error:#}");
+                        }
+                    }
                     quick_reply_input.update(&mut async_cx, |input, cx| {
                         input.set_value("", cx);
                     });
@@ -805,7 +905,7 @@ pub(crate) fn start_compose_send(
     let subject = subject_input.read(app_cx).text().to_string();
     let body = body_input.read(app_cx).text().to_string();
 
-    let Some((base_url, request)) = state_entity.update(app_cx, |state, cx| {
+    let Some((base_url, request, draft_id)) = state_entity.update(app_cx, |state, cx| {
         match build_compose_request(state, to, cc, bcc, subject, body) {
             Ok(request) => {
                 state.compose.sending = true;
@@ -813,7 +913,11 @@ pub(crate) fn start_compose_send(
                 state.compose.notice = None;
                 state.last_error = None;
                 cx.notify();
-                Some((state.api_base_url.clone(), request))
+                Some((
+                    state.api_base_url.clone(),
+                    request,
+                    state.compose.draft_id.clone(),
+                ))
             }
             Err(message) => {
                 state.compose.error = Some(message.clone());
@@ -826,6 +930,7 @@ pub(crate) fn start_compose_send(
         return;
     };
 
+    let delete_base_url = base_url.clone();
     let task = app_cx
         .background_executor()
         .spawn(async move { send_message_request(base_url, request) });
@@ -855,6 +960,14 @@ pub(crate) fn start_compose_send(
                 });
 
                 if sent {
+                    if let Some(draft_id) = draft_id_to_delete(draft_id, sent) {
+                        let delete_task = async_cx
+                            .background_executor()
+                            .spawn(async move { delete_draft(delete_base_url, draft_id) });
+                        if let Err(error) = delete_task.await {
+                            tracing::warn!("failed to delete draft after send: {error:#}");
+                        }
+                    }
                     to_input.update(&mut async_cx, |input, cx| {
                         input.set_tokens(Vec::<TokenInputToken>::new(), cx);
                     });
@@ -890,9 +1003,11 @@ pub(crate) fn resolve_compose_discard(
     discard: bool,
     app_cx: &mut App,
 ) {
-    state_entity.update(app_cx, |state, cx| {
+    let draft_id = state_entity.update(app_cx, |state, cx| {
+        let mut draft_id = None;
         if state.compose.discard_pending && !state.compose.sending {
             if discard {
+                draft_id = state.compose.draft_id.clone();
                 reset_compose_state(state, None);
                 state.last_error = None;
             } else {
@@ -900,7 +1015,21 @@ pub(crate) fn resolve_compose_discard(
             }
         }
         cx.notify();
+        draft_id
     });
+    if let Some(draft_id) = draft_id {
+        let base_url = state_entity.read(app_cx).api_base_url.clone();
+        let task = app_cx
+            .background_executor()
+            .spawn(async move { delete_draft(base_url, draft_id) });
+        app_cx
+            .spawn(move |_async_cx: &mut gpui::AsyncApp| async move {
+                if let Err(error) = task.await {
+                    tracing::warn!("failed to delete discarded draft: {error:#}");
+                }
+            })
+            .detach();
+    }
 }
 
 pub(crate) fn token_input_values(input: &Entity<TokenInput>, app_cx: &App) -> Vec<String> {
@@ -915,11 +1044,43 @@ pub(crate) fn token_input_values(input: &Entity<TokenInput>, app_cx: &App) -> Ve
 
 pub(crate) fn reset_compose_state(state: &mut NativeAppState, notice: Option<String>) {
     let revision = state.compose.revision.saturating_add(1);
+    let session_generation = state.compose.session_generation;
     state.compose = ComposeState {
         revision,
+        session_generation,
         notice,
         ..ComposeState::default()
     };
+}
+
+fn autosave_reply_is_current(
+    compose: &ComposeState,
+    revision: u64,
+    session_generation: u64,
+) -> bool {
+    compose.open && compose.revision == revision && compose.session_generation == session_generation
+}
+
+fn autosave_can_start(autosaving: bool) -> bool {
+    !autosaving
+}
+
+fn autosave_needs_follow_up(dirty: bool) -> bool {
+    dirty
+}
+
+fn draft_id_to_delete(draft_id: Option<String>, operation_succeeded: bool) -> Option<String> {
+    operation_succeeded.then_some(draft_id).flatten()
+}
+
+fn delete_draft(base_url: String, draft_id: String) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        EmailClient::new(&base_url)?.delete_draft(&draft_id).await?;
+        Ok(())
+    })
 }
 
 pub(crate) fn send_quick_reply(base_url: String, request: SendRequest) -> Result<SendResponse> {
@@ -1358,6 +1519,35 @@ mod tests {
         assert_eq!(attachment.filename, "note.txt");
         assert_eq!(attachment.content_type, "text/plain");
         assert_eq!(attachment.content_base64, "aGVsbG8=");
+    }
+
+    #[test]
+    fn autosave_serializes_and_coalesces_edits() {
+        assert!(autosave_can_start(false));
+        assert!(!autosave_can_start(true));
+        assert!(autosave_needs_follow_up(true));
+        assert!(!autosave_needs_follow_up(false));
+    }
+
+    #[test]
+    fn stale_autosave_reply_is_ignored_after_new_compose() {
+        let mut state = open_compose(vec![]);
+        state.compose.session_generation = 7;
+        assert!(autosave_reply_is_current(&state.compose, 3, 7));
+        assert!(!autosave_reply_is_current(&state.compose, 2, 7));
+
+        state.compose.session_generation = 8;
+        assert!(!autosave_reply_is_current(&state.compose, 3, 7));
+    }
+
+    #[test]
+    fn successful_send_or_discard_deletes_existing_draft_only() {
+        assert_eq!(
+            draft_id_to_delete(Some("draft-1".into()), true).as_deref(),
+            Some("draft-1")
+        );
+        assert_eq!(draft_id_to_delete(Some("draft-1".into()), false), None);
+        assert_eq!(draft_id_to_delete(None, true), None);
     }
 
     #[test]
