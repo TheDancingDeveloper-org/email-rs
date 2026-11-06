@@ -12,10 +12,10 @@ use email_types::{
     AuthSession, AuthenticationResultStatus, AuthorizeResponse, BulkRequest, BulkResponse,
     CalendarEvent, CancelOutboxResponse, Contact, CreateAccount, CreateFolder, CreateIdentity,
     CreateLabelBody, CreateRuleBody, CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder,
-    FullMessage, Identity, Label, Message, MessageAttachment, MessageAuthenticationResults,
-    MoveMessageRequest, MoveMessageResponse, OutboxItem, PatchFolder, PatchMessageRequest,
-    RenameFolder, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
-    StatusResponse, SuggestResponse, UpdateAccount, UpdateIdentity, UpdateLabelBody,
+    FullMessage, Identity, Label, ListUnsubscribe, Message, MessageAttachment,
+    MessageAuthenticationResults, MoveMessageRequest, MoveMessageResponse, OutboxItem, PatchFolder,
+    PatchMessageRequest, RenameFolder, RuleDto, SearchResponse, SendRequest, SendResponse,
+    SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount, UpdateIdentity, UpdateLabelBody,
     UpdateRuleBody, UpdateWebhook, Webhook,
 };
 
@@ -25,6 +25,7 @@ use super::integration_tokens::{
 };
 use super::invitations::{Invitation, InvitationAttendee, RsvpRequest};
 use super::messages::CursorMessagesResponse;
+use super::unsubscribe::UnsubscribeResponse;
 use super::webhooks::{IntegrationEvent, WebhookDelivery};
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -75,6 +76,9 @@ fn doc_get_invitation() {}
 
 #[utoipa::path(post, path = "/messages/{id}/invitation/rsvp", security(("bearerAuth" = ["mail.send"])), params(("id" = String, Path)), request_body = RsvpRequest, responses((status = 200, body = serde_json::Value), (status = 400, body = ErrorResponse)))]
 fn doc_rsvp_invitation() {}
+
+#[utoipa::path(post, path = "/messages/{id}/unsubscribe", security(("bearerAuth" = ["mail.send"])), params(("id" = String, Path)), responses((status = 200, body = UnsubscribeResponse), (status = 400, body = ErrorResponse), (status = 404, body = ErrorResponse), (status = 502, body = ErrorResponse)))]
+fn doc_unsubscribe_message() {}
 
 #[utoipa::path(get, path = "/openapi.json", responses((status = 200, description = "OpenAPI 3.1 contract")))]
 fn doc_openapi() {}
@@ -682,6 +686,7 @@ fn doc_events() {}
         doc_health_details,
         doc_get_invitation,
         doc_rsvp_invitation,
+        doc_unsubscribe_message,
         doc_openapi,
         doc_ready,
         doc_version,
@@ -774,6 +779,8 @@ fn doc_events() {}
         ErrorResponse,
         Invitation,
         InvitationAttendee,
+        UnsubscribeResponse,
+        ListUnsubscribe,
         RsvpRequest,
         VersionResponse,
         CapabilitiesResponse,

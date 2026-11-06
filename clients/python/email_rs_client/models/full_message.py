@@ -9,6 +9,7 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.list_unsubscribe import ListUnsubscribe
     from ..models.message_attachment import MessageAttachment
     from ..models.message_authentication_results import MessageAuthenticationResults
     from ..models.message_body import MessageBody
@@ -39,6 +40,7 @@ class FullMessage:
         from_email (None | str | Unset):
         from_name (None | str | Unset):
         from_reply_to_domain_mismatch (bool | Unset):
+        list_unsubscribe (ListUnsubscribe | None | Unset):
         message_id (None | str | Unset):
         preview (None | str | Unset):
         subject (None | str | Unset):
@@ -64,6 +66,7 @@ class FullMessage:
     from_email: None | str | Unset = UNSET
     from_name: None | str | Unset = UNSET
     from_reply_to_domain_mismatch: bool | Unset = UNSET
+    list_unsubscribe: ListUnsubscribe | None | Unset = UNSET
     message_id: None | str | Unset = UNSET
     preview: None | str | Unset = UNSET
     subject: None | str | Unset = UNSET
@@ -72,6 +75,7 @@ class FullMessage:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.list_unsubscribe import ListUnsubscribe  # noqa: PLC0415
         from ..models.message_body import MessageBody  # noqa: PLC0415
 
         account_id = self.account_id
@@ -135,6 +139,14 @@ class FullMessage:
 
         from_reply_to_domain_mismatch = self.from_reply_to_domain_mismatch
 
+        list_unsubscribe: dict[str, Any] | None | Unset
+        if isinstance(self.list_unsubscribe, Unset):
+            list_unsubscribe = UNSET
+        elif isinstance(self.list_unsubscribe, ListUnsubscribe):
+            list_unsubscribe = self.list_unsubscribe.to_dict()
+        else:
+            list_unsubscribe = self.list_unsubscribe
+
         message_id: None | str | Unset
         if isinstance(self.message_id, Unset):
             message_id = UNSET
@@ -197,6 +209,8 @@ class FullMessage:
             field_dict["fromName"] = from_name
         if from_reply_to_domain_mismatch is not UNSET:
             field_dict["fromReplyToDomainMismatch"] = from_reply_to_domain_mismatch
+        if list_unsubscribe is not UNSET:
+            field_dict["listUnsubscribe"] = list_unsubscribe
         if message_id is not UNSET:
             field_dict["messageId"] = message_id
         if preview is not UNSET:
@@ -212,6 +226,7 @@ class FullMessage:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.list_unsubscribe import ListUnsubscribe  # noqa: PLC0415
         from ..models.message_attachment import MessageAttachment  # noqa: PLC0415
         from ..models.message_authentication_results import MessageAuthenticationResults  # noqa: PLC0415
         from ..models.message_body import MessageBody  # noqa: PLC0415
@@ -301,6 +316,23 @@ class FullMessage:
 
         from_reply_to_domain_mismatch = d.pop("fromReplyToDomainMismatch", UNSET)
 
+        def _parse_list_unsubscribe(data: object) -> ListUnsubscribe | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                list_unsubscribe_type_1 = ListUnsubscribe.from_dict(data)
+
+                return list_unsubscribe_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(ListUnsubscribe | None | Unset, data)
+
+        list_unsubscribe = _parse_list_unsubscribe(d.pop("listUnsubscribe", UNSET))
+
         def _parse_message_id(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -365,6 +397,7 @@ class FullMessage:
             from_email=from_email,
             from_name=from_name,
             from_reply_to_domain_mismatch=from_reply_to_domain_mismatch,
+            list_unsubscribe=list_unsubscribe,
             message_id=message_id,
             preview=preview,
             subject=subject,

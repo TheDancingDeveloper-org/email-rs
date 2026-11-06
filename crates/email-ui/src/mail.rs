@@ -133,6 +133,7 @@ mod tests {
             authentication_results: Default::default(),
             from_reply_to_domain_mismatch: false,
             display_name_spoofing: false,
+            list_unsubscribe: None,
             attachments: vec![],
         }
     }

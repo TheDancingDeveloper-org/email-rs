@@ -337,6 +337,15 @@ impl EmailClient {
         .await
     }
 
+    pub async fn unsubscribe_message(&self, message_id: &str) -> Result<serde_json::Value> {
+        self.json(
+            Method::POST,
+            &format!("messages/{message_id}/unsubscribe"),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
     pub async fn update_account(&self, id: &str, body: &UpdateAccount) -> Result<Account> {
         self.json(Method::PATCH, &format!("accounts/{id}"), body)
             .await

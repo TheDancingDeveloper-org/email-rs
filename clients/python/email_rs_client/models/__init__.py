@@ -50,6 +50,7 @@ from .integration_token import IntegrationToken
 from .invitation import Invitation
 from .invitation_attendee import InvitationAttendee
 from .label import Label
+from .list_unsubscribe import ListUnsubscribe
 from .mail_endpoint import MailEndpoint
 from .message import Message
 from .message_attachment import MessageAttachment
@@ -73,6 +74,7 @@ from .send_response import SendResponse
 from .snooze_request import SnoozeRequest
 from .status_response import StatusResponse
 from .suggest_response import SuggestResponse
+from .unsubscribe_response import UnsubscribeResponse
 from .update_account import UpdateAccount
 from .update_identity import UpdateIdentity
 from .update_label_body import UpdateLabelBody
@@ -133,6 +135,7 @@ __all__ = (
     "Invitation",
     "InvitationAttendee",
     "Label",
+    "ListUnsubscribe",
     "MailEndpoint",
     "Message",
     "MessageAttachment",
@@ -156,6 +159,7 @@ __all__ = (
     "SnoozeRequest",
     "StatusResponse",
     "SuggestResponse",
+    "UnsubscribeResponse",
     "UpdateAccount",
     "UpdateIdentity",
     "UpdateLabelBody",
