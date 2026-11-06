@@ -48,6 +48,7 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/folders/{id}/messages"),
     ("POST", "/messages/bulk"),
     ("GET", "/messages/{id}"),
+    ("GET", "/messages/{id}/source"),
     ("GET", "/threads/{id}"),
     ("PATCH", "/messages/{id}"),
     ("DELETE", "/messages/{id}"),
@@ -188,6 +189,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .patch(messages::patch_message)
                 .delete(messages::delete_message),
         )
+        .route("/messages/{id}/source", get(messages::download_source))
         .route(
             "/messages/{id}/invitation",
             get(invitations::get_invitation),

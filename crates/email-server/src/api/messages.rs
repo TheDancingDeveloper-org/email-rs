@@ -552,6 +552,26 @@ pub async fn download_attachment(
     Ok((StatusCode::OK, headers, body).into_response())
 }
 
+/// Return the original RFC822 message without parsing or rewriting it.
+pub async fn download_source(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Response> {
+    let (folder, uid, provider) = load_provider(&state, &message_id).await?;
+    let raw = provider.fetch_raw_message(&folder, uid).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("message/rfc822"));
+    headers.insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=message.eml"),
+    );
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::try_from(raw.len().to_string()).expect("content length is valid"),
+    );
+    Ok((headers, Body::from(raw)).into_response())
+}
+
 /// Keep fetched attachment bytes: in the content-addressed store when the
 /// database has a data directory, otherwise as a BLOB.
 async fn cache_attachment_content(
@@ -1920,6 +1940,32 @@ mod tests {
         assert_eq!(
             headers["content-disposition"],
             "attachment; filename=\"report.txt\""
+        );
+    }
+
+    #[tokio::test]
+    async fn download_source_returns_original_rfc822_and_headers() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld1", "acc1", None).await;
+        seed_message(&state.pool, "msg-source", "acc1", "fld1").await;
+
+        let (status, headers, bytes) = req_raw(
+            crate::api::router(state),
+            "GET",
+            "/messages/msg-source/source",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            bytes,
+            b"From: sender@example.com\r\nSubject: Test\r\n\r\nraw body\r\n"
+        );
+        assert_eq!(headers["content-type"], "message/rfc822");
+        assert_eq!(
+            headers["content-disposition"],
+            "attachment; filename=message.eml"
         );
     }
 

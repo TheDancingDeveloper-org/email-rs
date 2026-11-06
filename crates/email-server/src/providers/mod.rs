@@ -158,6 +158,13 @@ pub trait MailProvider: Send + Sync {
         Ok(Vec::new())
     }
     async fn fetch_message_body(&self, folder: &str, uid: u32) -> Result<MessageBody>;
+    /// Fetch the complete RFC822 message, preserving headers and MIME
+    /// encoding for source viewing and .eml export.
+    async fn fetch_raw_message(&self, _folder: &str, _uid: u32) -> Result<Vec<u8>> {
+        Err(crate::error::AppError::Provider(
+            "raw message fetching is unsupported".into(),
+        ))
+    }
     async fn fetch_attachment(&self, folder: &str, uid: u32, part_id: &str) -> Result<Vec<u8>> {
         let body = self.fetch_message_body(folder, uid).await?;
         body.attachments
