@@ -147,6 +147,8 @@ pub(crate) struct ComposeState {
     pub(crate) body: String,
     pub(crate) attachments: Vec<OutgoingAttachment>,
     pub(crate) autosaving: bool,
+    pub(crate) autosave_dirty: bool,
+    pub(crate) session_generation: u64,
     pub(crate) in_reply_to: Option<String>,
     pub(crate) quoted_text: Option<String>,
     pub(crate) quoted_from: Option<String>,
