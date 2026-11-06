@@ -129,13 +129,43 @@ fn safe_file_stem(id: &str) -> String {
 
 /// Create a private, unique file without following a pre-existing symlink.
 fn unique_file(prefix: &str, extension: &str, directory: &Path) -> Result<PathBuf> {
-    let file = tempfile::Builder::new()
-        .prefix(&format!("{prefix}-"))
-        .suffix(&format!(".{extension}"))
+    let prefix = format!("{prefix}-");
+    let suffix = format!(".{extension}");
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(&prefix).suffix(&suffix);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    let file = builder
         .tempfile_in(directory)
         .with_context(|| format!("create private export in {}", directory.display()))?;
     let (_file, path) = file.keep().map_err(|error| anyhow!(error.error))?;
     Ok(path)
+}
+
+/// Build the printable page. HTML bodies go through the same allowlist
+/// sanitizer the server applies for the reader (no scripts, event handlers or
+/// remote fetches), and a CSP blocks anything that slips past it.
+pub(crate) fn print_html(message: &FullMessage) -> String {
+    let html = message
+        .body
+        .as_ref()
+        .and_then(|body| body.html_body.as_deref())
+        .map(email_server::sanitize::sanitize_html)
+        .unwrap_or_else(|| {
+            message_body_text(message)
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\n', "<br>")
+        });
+    format!(
+        "<!doctype html><meta charset=\"utf-8\">\
+         <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\">\
+         <main>{html}</main>"
+    )
 }
 
 pub(crate) fn print_message(message: &FullMessage) -> Result<PathBuf> {
@@ -144,22 +174,7 @@ pub(crate) fn print_message(message: &FullMessage) -> Result<PathBuf> {
         "html",
         &std::env::temp_dir(),
     )?;
-    let html = message
-        .body
-        .as_ref()
-        .and_then(|body| body.html_body.as_deref())
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            message_body_text(message)
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-                .replace('\n', "<br>")
-        });
-    std::fs::write(
-        &path,
-        format!("<!doctype html><meta charset=\"utf-8\"><main>{html}</main>"),
-    )?;
+    std::fs::write(&path, print_html(message))?;
     open_path_with_system(&path)?;
     Ok(path)
 }
@@ -182,6 +197,57 @@ pub(crate) fn show_source_dialog(message: &FullMessage, cx: &mut App) {
 mod tests {
     use super::*;
     use email_types::MessageBody;
+
+    #[test]
+    fn print_html_strips_scripts_and_event_handlers() {
+        let message = FullMessage {
+            id: "print-xss".into(),
+            occurrence_id: "print-xss".into(),
+            logical_id: "logical-print-xss".into(),
+            account_id: "account".into(),
+            folder_id: "inbox".into(),
+            uid: 1,
+            message_id: None,
+            thread_id: None,
+            subject: None,
+            from_name: None,
+            from_email: None,
+            to: None,
+            date: None,
+            is_read: true,
+            is_flagged: false,
+            is_draft: false,
+            has_attachments: false,
+            preview: None,
+            body: Some(MessageBody {
+                html_body: Some(
+                    "<p>keep me</p><script>alert(1)</script>\
+                     <img src=\"https://tracker.example/p.png\" onerror=\"alert(2)\">"
+                        .into(),
+                ),
+                ..Default::default()
+            }),
+            authentication_results: Default::default(),
+            from_reply_to_domain_mismatch: false,
+            display_name_spoofing: false,
+            attachments: Vec::new(),
+        };
+        let out = print_html(&message).to_ascii_lowercase();
+        assert!(out.contains("keep me"));
+        assert!(!out.contains("<script") && !out.contains("alert"));
+        assert!(!out.contains("onerror"));
+        assert!(!out.contains("tracker.example"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unique_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = unique_file("perm", "html", dir.path()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0);
+    }
 
     #[test]
     fn eml_export_round_trip_preserves_headers_and_body() {
