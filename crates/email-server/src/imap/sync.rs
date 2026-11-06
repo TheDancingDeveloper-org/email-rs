@@ -264,6 +264,8 @@ impl ImapSyncEngine {
         }
 
         let provider = provider_for_account(&self.pool, account_id).await?;
+        // Reconnect is the natural replay point; actions remain ordered per account.
+        crate::queue::replay(&self.pool, account_id).await?;
         self.sync_provider(account_id, provider, event_tx, account.sync_days_limit)
             .await?;
 

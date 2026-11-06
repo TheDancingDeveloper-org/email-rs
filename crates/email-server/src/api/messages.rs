@@ -122,6 +122,28 @@ async fn load_provider(
     provider_for_message(&state.pool, message_id).await
 }
 
+async fn message_account_id(pool: &sqlx::SqlitePool, message_id: &str) -> Result<String> {
+    sqlx::query_scalar("SELECT account_id FROM messages WHERE id = ?")
+        .bind(message_id)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
+}
+
+async fn queue_if_transient(
+    pool: &sqlx::SqlitePool,
+    account_id: &str,
+    action: crate::queue::Action,
+    error: AppError,
+) -> Result<bool> {
+    if crate::queue::is_transient(&error) {
+        crate::queue::enqueue(pool, account_id, &action).await?;
+        Ok(true)
+    } else {
+        Err(error)
+    }
+}
+
 async fn delete_remote(state: &AppState, message_id: &str) -> Result<()> {
     let (source, uid, provider) = load_provider(state, message_id).await?;
     let trash: Option<String> = sqlx::query_scalar(
@@ -239,8 +261,21 @@ pub async fn patch_message(
     }
 
     if let Some(is_flagged) = req.is_flagged {
+        let account_id = message_account_id(&state.pool, &message_id).await?;
         let (folder, uid, provider) = load_provider(&state, &message_id).await?;
-        provider.set_flagged(&folder, uid, is_flagged).await?;
+        if let Err(error) = provider.set_flagged(&folder, uid, is_flagged).await {
+            queue_if_transient(
+                &state.pool,
+                &account_id,
+                crate::queue::Action::Flag {
+                    folder,
+                    uid,
+                    flagged: is_flagged,
+                },
+                error,
+            )
+            .await?;
+        }
         sqlx::query("UPDATE messages SET is_flagged = ? WHERE id = ?")
             .bind(is_flagged)
             .bind(&message_id)
@@ -262,7 +297,46 @@ pub async fn delete_message(
     let event = message_event_context(&state.pool, &message_id).await?;
     let folder_id = message_folder_id(&state.pool, &message_id).await?;
 
-    delete_remote(&state, &message_id).await?;
+    let account_id = message_account_id(&state.pool, &message_id).await?;
+    let (source, uid, provider) = load_provider(&state, &message_id).await?;
+    let trash: Option<String> = sqlx::query_scalar("SELECT f.full_path FROM folders f JOIN messages m ON m.account_id = f.account_id WHERE m.id = ? AND f.special_use = 'trash' LIMIT 1")
+        .bind(&message_id).fetch_optional(&state.pool).await?;
+    let queued = match trash {
+        Some(destination) if destination != source => {
+            match provider.move_message(&source, uid, &destination).await {
+                Ok(_) => false,
+                Err(error) => {
+                    queue_if_transient(
+                        &state.pool,
+                        &account_id,
+                        crate::queue::Action::Move {
+                            folder: source.clone(),
+                            uid,
+                            destination,
+                        },
+                        error,
+                    )
+                    .await?
+                }
+            }
+        }
+        _ => match provider.delete_message(&source, uid).await {
+            Ok(()) => false,
+            Err(error) => {
+                queue_if_transient(
+                    &state.pool,
+                    &account_id,
+                    crate::queue::Action::Delete {
+                        folder: source.clone(),
+                        uid,
+                    },
+                    error,
+                )
+                .await?
+            }
+        },
+    };
+    let _ = queued;
 
     // Remove from local DB immediately.
     sqlx::query("DELETE FROM messages WHERE id = ?")
@@ -307,7 +381,20 @@ pub async fn archive_message(
             ))
         }
     };
-    provider.move_message(&source, uid, &destination).await?;
+    let account_id = message_account_id(&state.pool, &message_id).await?;
+    if let Err(error) = provider.move_message(&source, uid, &destination).await {
+        queue_if_transient(
+            &state.pool,
+            &account_id,
+            crate::queue::Action::Move {
+                folder: source.clone(),
+                uid,
+                destination: destination.clone(),
+            },
+            error,
+        )
+        .await?;
+    }
     sqlx::query("DELETE FROM messages WHERE id = ?")
         .bind(&message_id)
         .execute(&state.pool)
@@ -368,11 +455,41 @@ async fn transfer_message(
         ));
     }
 
+    let account_id = message_account_id(&state.pool, &message_id).await?;
     let (source, uid, provider) = load_provider(&state, &message_id).await?;
     let moved = if copy {
         provider.copy_message(&source, uid, &destination).await?
     } else {
-        provider.move_message(&source, uid, &destination).await?
+        match provider.move_message(&source, uid, &destination).await {
+            Ok(moved) => moved,
+            Err(error) => {
+                queue_if_transient(
+                    &state.pool,
+                    &account_id,
+                    crate::queue::Action::Move {
+                        folder: source.clone(),
+                        uid,
+                        destination: destination.clone(),
+                    },
+                    error,
+                )
+                .await?;
+                // Optimistically remove the source occurrence. The next sync
+                // discovers the destination and restores its metadata.
+                record_moved_message(
+                    &state.pool,
+                    &message_id,
+                    &body.folder_id,
+                    MovedMessage::default(),
+                    false,
+                )
+                .await?;
+                return Ok(Json(MoveMessageResponse {
+                    status: "queued".to_string(),
+                    message_id: None,
+                }));
+            }
+        }
     };
     // The server chose the destination UID. Record the destination occurrence
     // under a new id so the caller can move it back; the next sync upserts
