@@ -13,7 +13,7 @@ use crate::sync::SyncOrchestrator;
 
 pub async fn list_accounts(State(state): State<Arc<AppState>>) -> Result<Json<Vec<AccountRow>>> {
     let rows = sqlx::query_as::<_, AccountRow>(
-        "SELECT id, name, email, provider_type, auth_type, created_at FROM accounts ORDER BY created_at"
+        "SELECT id, name, email, provider_type, auth_type, created_at, needs_reauth, reauth_reason FROM accounts ORDER BY created_at"
     )
     .fetch_all(&state.pool)
     .await?;
@@ -54,7 +54,7 @@ pub async fn create_account(
     .await?;
 
     let row = sqlx::query_as::<_, AccountRow>(
-        "SELECT id, name, email, provider_type, auth_type, created_at FROM accounts WHERE id = ?",
+        "SELECT id, name, email, provider_type, auth_type, created_at, needs_reauth, reauth_reason FROM accounts WHERE id = ?",
     )
     .bind(&id)
     .fetch_one(&state.pool)
@@ -90,7 +90,7 @@ pub async fn update_account(
             .await?;
     }
     let row = sqlx::query_as::<_, AccountRow>(
-        "SELECT id, name, email, provider_type, auth_type, created_at FROM accounts WHERE id = ?",
+        "SELECT id, name, email, provider_type, auth_type, created_at, needs_reauth, reauth_reason FROM accounts WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.pool)

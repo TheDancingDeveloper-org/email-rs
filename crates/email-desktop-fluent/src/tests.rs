@@ -9,6 +9,8 @@ fn account(id: &str) -> Account {
         provider_type: "generic_imap".to_string(),
         auth_type: "basic".to_string(),
         created_at: "2026-05-25T00:00:00Z".to_string(),
+        needs_reauth: false,
+        reauth_reason: None,
     }
 }
 
@@ -2986,4 +2988,28 @@ fn send_request_carries_the_configured_undo_window() {
     )
     .expect("request");
     assert_eq!(request.send_delay_seconds, Some(17));
+}
+
+#[test]
+fn needs_reauth_event_shows_reconnect_error_until_reauthed() {
+    let mut status = NativeSyncStatus::default();
+    let needs = NativeSyncUpdate::Event(SyncEvent::AccountNeedsReauth {
+        account_id: "account".to_string(),
+        reason: Some("invalid_grant".to_string()),
+    });
+    assert!(sync_update_requests_refresh(&needs));
+    apply_sync_update(&mut status, needs);
+    assert!(!status.syncing);
+    assert!(status
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.contains("Reconnect")));
+    assert!(sync_status_visible(&status));
+
+    let reauthed = NativeSyncUpdate::Event(SyncEvent::AccountReauthed {
+        account_id: "account".to_string(),
+    });
+    assert!(sync_update_requests_refresh(&reauthed));
+    apply_sync_update(&mut status, reauthed);
+    assert!(status.last_error.is_none());
 }

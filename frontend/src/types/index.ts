@@ -2,8 +2,11 @@ export interface Account {
   id: string;
   name: string;
   email: string;
-  providerType: 'gmail' | 'imap' | 'exchange';
+  providerType: 'gmail' | 'microsoft365' | 'imap' | 'exchange';
   color?: string;
+  /** The provider refused the OAuth grant; sync is paused until reconnect. */
+  needsReauth?: boolean;
+  reauthReason?: string;
 }
 
 export interface AccountSettings {

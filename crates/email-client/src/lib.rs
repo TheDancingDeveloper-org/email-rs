@@ -634,6 +634,18 @@ impl EmailClient {
         self.get("auth/microsoft/authorize", &[]).await
     }
 
+    /// Start re-consent for an account in the needs-reauth state. The server
+    /// refreshes that account's grant and refuses a different mailbox. `None`
+    /// for accounts that are not OAuth-backed.
+    pub async fn reauthorize(&self, account: &Account) -> Result<Option<AuthorizeResponse>> {
+        let Some(path) = reauthorize_path(&account.provider_type) else {
+            return Ok(None);
+        };
+        self.get(path, &[("accountId", account.id.clone())])
+            .await
+            .map(Some)
+    }
+
     pub async fn open_sync_events(&self) -> Result<reqwest::Response> {
         let response = self
             .authorized(self.http.get(self.sync_events_url()))
@@ -749,6 +761,15 @@ fn api_error(status: StatusCode, body: impl AsRef<[u8]>) -> EmailClientError {
         })
         .unwrap_or_else(|| String::from_utf8_lossy(body.as_ref()).into_owned());
     EmailClientError::Api { status, message }
+}
+
+/// The authorize endpoint that re-consents an account of this provider type.
+pub fn reauthorize_path(provider_type: &str) -> Option<&'static str> {
+    match provider_type {
+        "gmail" => Some("auth/gmail/authorize"),
+        "microsoft365" => Some("auth/microsoft/authorize"),
+        _ => None,
+    }
 }
 
 pub fn parse_sync_event(data: &str) -> Result<SyncEvent> {
@@ -1221,6 +1242,33 @@ mod tests {
             }],
         };
         assert!(client.advanced_search_url(&group).is_none());
+    }
+
+    #[test]
+    fn parses_account_needs_reauth_event_and_account_flag() {
+        let event = parse_sync_event(
+            r#"{"type":"account_needs_reauth","accountId":"acc1","reason":"invalid_grant"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            event,
+            SyncEvent::AccountNeedsReauth {
+                account_id: "acc1".into(),
+                reason: Some("invalid_grant".into()),
+            }
+        );
+        let account: Account = serde_json::from_str(
+            r#"{"id":"a","name":"A","email":"a@x","providerType":"gmail","authType":"oauth2","createdAt":"t","needsReauth":true}"#,
+        )
+        .unwrap();
+        assert!(account.needs_reauth);
+        let legacy: Account = serde_json::from_str(
+            r#"{"id":"a","name":"A","email":"a@x","providerType":"imap","authType":"basic","createdAt":"t"}"#,
+        )
+        .unwrap();
+        assert!(!legacy.needs_reauth, "older servers omit the flag");
+        assert_eq!(reauthorize_path("gmail"), Some("auth/gmail/authorize"));
+        assert_eq!(reauthorize_path("imap"), None);
     }
 
     #[test]

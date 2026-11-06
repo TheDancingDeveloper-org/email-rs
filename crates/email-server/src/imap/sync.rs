@@ -179,8 +179,9 @@ impl ImapSyncEngine {
         crate::metrics::inc(&crate::metrics::SYNC_RUNS);
         let result = self.sync_account_unlocked(account_id, event_tx).await;
         drop(guard);
-        if result.is_err() {
+        if let Err(error) = &result {
             crate::metrics::inc(&crate::metrics::SYNC_ERRORS);
+            self.record_sync_failure(account_id, event_tx, error).await;
         }
         if result.is_ok() {
             fire_webhooks(
@@ -192,6 +193,28 @@ impl ImapSyncEngine {
             .await;
         }
         result
+    }
+
+    /// A refused OAuth grant puts the account into the needs-reauth state.
+    async fn record_sync_failure(
+        &self,
+        account_id: &str,
+        event_tx: Option<&broadcast::Sender<String>>,
+        error: &AppError,
+    ) {
+        if !crate::auth::reauth::is_revoked_grant(error) {
+            return;
+        }
+        if let Err(mark_error) = crate::auth::reauth::mark_needs_reauth(
+            &self.pool,
+            event_tx,
+            account_id,
+            &error.to_string(),
+        )
+        .await
+        {
+            warn!("failed to flag {account_id} as needing reauth: {mark_error}");
+        }
     }
 
     async fn sync_account_unlocked(
@@ -210,6 +233,11 @@ impl ImapSyncEngine {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("account {} not found", account_id)))?;
+        // A refused grant stays refused: don't ask the provider again until
+        // the user reconnects.
+        if crate::auth::reauth::needs_reauth(&self.pool, account_id).await? {
+            return Err(crate::auth::reauth::needs_reauth_error(account_id));
+        }
 
         let provider = provider_for_account(&self.pool, account_id).await?;
         self.sync_provider(account_id, provider, event_tx, account.sync_days_limit)
@@ -254,16 +282,17 @@ impl ImapSyncEngine {
     }
 
     async fn spawn_idle_watchers(self: &Arc<Self>, event_tx: Option<broadcast::Sender<String>>) {
-        let account_ids: Vec<String> = match sqlx::query_scalar("SELECT id FROM accounts")
-            .fetch_all(&self.pool)
-            .await
-        {
-            Ok(ids) => ids,
-            Err(error) => {
-                warn!("failed to list accounts for IMAP IDLE: {}", error);
-                return;
-            }
-        };
+        let account_ids: Vec<String> =
+            match sqlx::query_scalar("SELECT id FROM accounts WHERE needs_reauth = 0")
+                .fetch_all(&self.pool)
+                .await
+            {
+                Ok(ids) => ids,
+                Err(error) => {
+                    warn!("failed to list accounts for IMAP IDLE: {}", error);
+                    return;
+                }
+            };
 
         for account_id in account_ids {
             let engine = Arc::clone(self);
@@ -307,16 +336,17 @@ impl ImapSyncEngine {
     async fn run_scheduled(&self, event_tx: Option<broadcast::Sender<String>>) {
         let mut schedule = SyncSchedule::default();
         loop {
-            let account_ids: Vec<String> = match sqlx::query_scalar("SELECT id FROM accounts")
-                .fetch_all(&self.pool)
-                .await
-            {
-                Ok(ids) => ids,
-                Err(error) => {
-                    error!("failed to list accounts: {}", error);
-                    Vec::new()
-                }
-            };
+            let account_ids: Vec<String> =
+                match sqlx::query_scalar("SELECT id FROM accounts WHERE needs_reauth = 0")
+                    .fetch_all(&self.pool)
+                    .await
+                {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        error!("failed to list accounts: {}", error);
+                        Vec::new()
+                    }
+                };
             let now = monotonic_seconds();
             let due: Vec<String> = account_ids
                 .into_iter()
@@ -366,9 +396,10 @@ impl ImapSyncEngine {
 
     #[allow(dead_code)]
     async fn sync_all_accounts(&self) -> Result<()> {
-        let account_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM accounts")
-            .fetch_all(&self.pool)
-            .await?;
+        let account_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM accounts WHERE needs_reauth = 0")
+                .fetch_all(&self.pool)
+                .await?;
 
         for id in account_ids {
             if let Err(e) = self.sync_account(&id).await {
@@ -1614,6 +1645,43 @@ mod tests {
             "the refused refresh is not repeated by every folder"
         );
         assert!(synced_labels(&pool).await < 202);
+
+        // The refusal puts the account into needs-reauth and tells clients.
+        let engine = ImapSyncEngine::new(pool.clone(), 60);
+        let (tx, mut rx) = broadcast::channel(8);
+        engine.record_sync_failure("a", Some(&tx), &error).await;
+        assert!(crate::auth::reauth::needs_reauth(&pool, "a").await.unwrap());
+        let event: email_types::SyncEvent = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            event,
+            email_types::SyncEvent::AccountNeedsReauth { ref account_id, reason: Some(ref reason) }
+                if account_id == "a" && reason.contains("invalid_grant")
+        ));
+
+        // Later syncs stop before contacting the provider, and the scheduler skips it.
+        let again = engine.sync_account("a").await.unwrap_err();
+        assert!(
+            matches!(&again, AppError::Auth(message) if message.contains("needs reauthorization")),
+            "got {again}"
+        );
+        let schedulable: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM accounts WHERE needs_reauth = 0")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(schedulable.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transient_sync_failure_does_not_flag_reauth() {
+        let (pool, _) = crate::db::create_pool("sqlite::memory:").await.unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('a','A','a@example.test','gmail','oauth2')")
+            .execute(&pool).await.unwrap();
+        let engine = ImapSyncEngine::new(pool.clone(), 60);
+        engine
+            .record_sync_failure("a", None, &AppError::Provider("HTTP 503".into()))
+            .await;
+        assert!(!crate::auth::reauth::needs_reauth(&pool, "a").await.unwrap());
     }
 
     /// File-backed WAL, 202 folders, 4 workers, instant fake IMAP. This is

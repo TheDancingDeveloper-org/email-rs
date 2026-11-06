@@ -48,6 +48,15 @@ pub struct Account {
     pub provider_type: String,
     pub auth_type: String,
     pub created_at: String,
+    /// The provider refused the stored OAuth grant (`invalid_grant`): sync is
+    /// paused until the user reconnects the account.
+    #[serde(default)]
+    #[cfg_attr(feature = "server", sqlx(default))]
+    pub needs_reauth: bool,
+    /// The provider's reason, when `needs_reauth` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "server", sqlx(default))]
+    pub reauth_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -718,6 +727,18 @@ pub enum SyncEvent {
         total: Option<i64>,
     },
     SyncComplete {
+        #[serde(rename = "accountId")]
+        account_id: String,
+    },
+    /// The provider refused the account's OAuth grant; the account must be
+    /// reconnected (re-consent) before it syncs again.
+    AccountNeedsReauth {
+        #[serde(rename = "accountId")]
+        account_id: String,
+        reason: Option<String>,
+    },
+    /// A reconnect replaced the refused grant; sync resumes.
+    AccountReauthed {
         #[serde(rename = "accountId")]
         account_id: String,
     },

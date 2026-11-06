@@ -780,6 +780,16 @@ async fn finish_oauth(
     .await
     {
         Ok(aid) => {
+            // Connecting the same mailbox again is also a re-consent.
+            if let Err(error) = crate::auth::reauth::clear_needs_reauth(
+                &app_state.pool,
+                Some(&app_state.event_tx),
+                &aid,
+            )
+            .await
+            {
+                return error.into_response();
+            }
             spawn_sync(app_state.pool.clone(), app_state.event_tx.clone(), aid);
             Redirect::to("/?oauth=success").into_response()
         }
@@ -840,6 +850,15 @@ async fn update_account_token(
         )
             .into_response(),
         Ok(_) => {
+            if let Err(error) = crate::auth::reauth::clear_needs_reauth(
+                &app_state.pool,
+                Some(&app_state.event_tx),
+                account_id,
+            )
+            .await
+            {
+                return error.into_response();
+            }
             spawn_sync(
                 app_state.pool.clone(),
                 app_state.event_tx.clone(),
@@ -1055,6 +1074,82 @@ mod tests {
         assert!(opened.contains("original"), "{opened}");
         assert!(!opened.contains("stolen"));
         assert!(!opened.contains("other-provider"));
+    }
+
+    #[tokio::test]
+    async fn reconnect_clears_needs_reauth_and_announces_it() {
+        let pool = pool().await;
+        let state = std::sync::Arc::new(crate::state::AppState::new(pool.clone(), false));
+        let account_id = upsert_account(
+            &pool,
+            "owner@example.com",
+            "Owner",
+            "gmail",
+            r#"{"access_token":"revoked"}"#,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::auth::reauth::mark_needs_reauth(&pool, None, &account_id, "invalid_grant")
+            .await
+            .unwrap();
+        let mut rx = state.event_tx.subscribe();
+
+        let response = finish_oauth(
+            &state,
+            Some(&account_id),
+            &identity("owner@example.com", "Owner"),
+            "gmail",
+            r#"{"access_token":"fresh","refresh_token":"new"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(!crate::auth::reauth::needs_reauth(&pool, &account_id)
+            .await
+            .unwrap());
+        let event: email_types::SyncEvent =
+            serde_json::from_str(&rx.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            event,
+            email_types::SyncEvent::AccountReauthed { account_id }
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_reconnect_keeps_needs_reauth() {
+        let pool = pool().await;
+        let state = std::sync::Arc::new(crate::state::AppState::new(pool.clone(), false));
+        let account_id = upsert_account(
+            &pool,
+            "owner@example.com",
+            "Owner",
+            "gmail",
+            r#"{"access_token":"revoked"}"#,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::auth::reauth::mark_needs_reauth(&pool, None, &account_id, "invalid_grant")
+            .await
+            .unwrap();
+        let response = finish_oauth(
+            &state,
+            Some(&account_id),
+            &identity("someone-else@example.com", "Other"),
+            "gmail",
+            r#"{"access_token":"other"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(crate::auth::reauth::needs_reauth(&pool, &account_id)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

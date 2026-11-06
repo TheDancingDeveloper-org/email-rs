@@ -91,6 +91,8 @@ impl MailApi for FakeMail {
                 provider_type: "imap".into(),
                 auth_type: "password".into(),
                 created_at: "2026-10-01".into(),
+                needs_reauth: false,
+                reauth_reason: None,
             },
             folders: vec![
                 folder("inbox", "Inbox", 2),

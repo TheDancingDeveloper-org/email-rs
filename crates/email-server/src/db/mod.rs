@@ -767,6 +767,16 @@ async fn run_provider_subject_migration(conn: &mut SqliteConnection) -> anyhow::
             "provider_object_id",
             "ALTER TABLE accounts ADD COLUMN provider_object_id TEXT",
         ),
+        // Set when the provider refuses the refresh token (`invalid_grant`);
+        // cleared by a successful reconnect.
+        (
+            "needs_reauth",
+            "ALTER TABLE accounts ADD COLUMN needs_reauth INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "reauth_reason",
+            "ALTER TABLE accounts ADD COLUMN reauth_reason TEXT",
+        ),
     ] {
         if !columns.iter().any(|name| name == column) {
             sqlx::query(ddl).execute(&mut *conn).await?;

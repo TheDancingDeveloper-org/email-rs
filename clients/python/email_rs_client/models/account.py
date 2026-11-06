@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
+
+from ..types import UNSET, Unset
 
 T = TypeVar("T", bound="Account")
 
@@ -19,6 +21,9 @@ class Account:
         id (str):
         name (str):
         provider_type (str):
+        needs_reauth (bool | Unset): The provider refused the stored OAuth grant (`invalid_grant`): sync is
+            paused until the user reconnects the account.
+        reauth_reason (None | str | Unset): The provider's reason, when `needs_reauth` is set.
     """
 
     auth_type: str
@@ -27,6 +32,8 @@ class Account:
     id: str
     name: str
     provider_type: str
+    needs_reauth: bool | Unset = UNSET
+    reauth_reason: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,6 +49,14 @@ class Account:
 
         provider_type = self.provider_type
 
+        needs_reauth = self.needs_reauth
+
+        reauth_reason: None | str | Unset
+        if isinstance(self.reauth_reason, Unset):
+            reauth_reason = UNSET
+        else:
+            reauth_reason = self.reauth_reason
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -54,6 +69,10 @@ class Account:
                 "providerType": provider_type,
             }
         )
+        if needs_reauth is not UNSET:
+            field_dict["needsReauth"] = needs_reauth
+        if reauth_reason is not UNSET:
+            field_dict["reauthReason"] = reauth_reason
 
         return field_dict
 
@@ -72,6 +91,17 @@ class Account:
 
         provider_type = d.pop("providerType")
 
+        needs_reauth = d.pop("needsReauth", UNSET)
+
+        def _parse_reauth_reason(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        reauth_reason = _parse_reauth_reason(d.pop("reauthReason", UNSET))
+
         account = cls(
             auth_type=auth_type,
             created_at=created_at,
@@ -79,6 +109,8 @@ class Account:
             id=id,
             name=name,
             provider_type=provider_type,
+            needs_reauth=needs_reauth,
+            reauth_reason=reauth_reason,
         )
 
         account.additional_properties = d
