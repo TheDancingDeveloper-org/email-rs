@@ -2,6 +2,7 @@
 
 from .account import Account
 from .account_candidate import AccountCandidate
+from .account_health import AccountHealth
 from .account_settings import AccountSettings
 from .action_input import ActionInput
 from .add_link_body import AddLinkBody
@@ -40,6 +41,7 @@ from .error_response import ErrorResponse
 from .event_link import EventLink
 from .folder import Folder
 from .full_message import FullMessage
+from .health_details import HealthDetails
 from .identity import Identity
 from .index_admin_response import IndexAdminResponse
 from .integration_event import IntegrationEvent
@@ -80,6 +82,7 @@ from .webhook_delivery import WebhookDelivery
 __all__ = (
     "Account",
     "AccountCandidate",
+    "AccountHealth",
     "AccountSettings",
     "ActionInput",
     "AddLinkBody",
@@ -118,6 +121,7 @@ __all__ = (
     "EventLink",
     "Folder",
     "FullMessage",
+    "HealthDetails",
     "Identity",
     "IndexAdminResponse",
     "IntegrationEvent",

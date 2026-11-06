@@ -604,7 +604,7 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
     if path.ends_with("/invitation/rsvp") {
         return (*method == Method::POST).then_some("mail.send");
     }
-    if path.starts_with("/accounts") {
+    if path.starts_with("/accounts") || path == "/health/details" {
         return (*method == Method::GET).then_some("mail.accounts.read");
     }
     if *method == Method::GET
@@ -1310,7 +1310,48 @@ mod tests {
         assert_ne!(stored.0, integration_token);
         assert!(integration_token.starts_with(&stored.1));
 
+        let (_, _, limited) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::POST,
+            "/integration-tokens",
+            Some(serde_json::json!({"name": "metadata only", "scopes": ["mail.metadata.read"]})),
+            &[("authorization", &user_authorization)],
+        )
+        .await;
+        let limited_authorization = format!("Bearer {}", limited["token"].as_str().unwrap());
+        let (status, _, denied) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::GET,
+            "/health/details",
+            None,
+            &[("authorization", &limited_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(denied["error"]
+            .as_str()
+            .unwrap()
+            .contains("mail.accounts.read"));
         let integration_authorization = format!("Bearer {integration_token}");
+        let (status, _, _) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::GET,
+            "/health/details",
+            None,
+            &[("authorization", &integration_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, _) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::GET,
+            "/health/details",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
         let (status, _, _) = send(
             crate::api::router(Arc::clone(&state)),
             Method::GET,

@@ -51,6 +51,9 @@ pub struct CapabilitiesResponse {
 #[utoipa::path(get, path = "/health", responses((status = 200, body = String)))]
 fn doc_health() {}
 
+#[utoipa::path(get, path = "/health/details", security(("bearerAuth" = ["mail.accounts.read"])), responses((status = 200, body = super::health::HealthDetails), (status = 500, body = ErrorResponse)))]
+fn doc_health_details() {}
+
 #[utoipa::path(get, path = "/messages/{id}/invitation", security(("bearerAuth" = ["mail.body.read"])), params(("id" = String, Path)), responses((status = 200, body = Invitation), (status = 404, body = ErrorResponse)))]
 fn doc_get_invitation() {}
 
@@ -562,6 +565,7 @@ fn doc_events() {}
     servers((url = "/api/v1")),
     paths(
         doc_health,
+        doc_health_details,
         doc_get_invitation,
         doc_rsvp_invitation,
         doc_openapi,
