@@ -61,6 +61,7 @@ pub(crate) struct AccountSetupModal {
     pub(crate) smtp_password_input: Entity<TextInput>,
     pub(crate) same_password: bool,
     pub(crate) submitting: bool,
+    pub(crate) discovering: bool,
     pub(crate) refreshing: bool,
     pub(crate) oauth_loading: Option<AccountSetupProvider>,
     pub(crate) status: Option<(String, bool)>,
@@ -87,6 +88,7 @@ impl AccountSetupModal {
                 .new(|_| TextInput::new().placeholder("SMTP password").masked(true)),
             same_password: true,
             submitting: false,
+            discovering: false,
             refreshing: false,
             oauth_loading: None,
             status: None,
@@ -101,6 +103,7 @@ impl AccountSetupModal {
         self.mode = AccountSetupMode::Choice;
         self.same_password = true;
         self.submitting = false;
+        self.discovering = false;
         self.refreshing = false;
         self.oauth_loading = None;
         self.status = None;
@@ -131,6 +134,7 @@ impl AccountSetupModal {
         self.mode = mode;
         self.same_password = true;
         self.submitting = false;
+        self.discovering = false;
         self.refreshing = false;
         self.oauth_loading = None;
         self.status = None;
@@ -461,6 +465,23 @@ pub(crate) fn account_setup_form_body(
         .gap(px(12.0))
         .child(account_setup_field("Name", modal.name_input.clone(), cx))
         .child(account_setup_field("Email", modal.email_input.clone(), cx))
+        .child(
+            Button::new("account-setup-discover")
+                .label(if modal.discovering {
+                    "Discovering settings..."
+                } else {
+                    "Discover mail settings"
+                })
+                .appearance(ButtonAppearance::Neutral)
+                .disabled(busy)
+                .on_click({
+                    let state_entity = state_entity.clone();
+                    let modal_entity = modal_entity.clone();
+                    move |_, _, app_cx| {
+                        start_account_discovery(&state_entity, &modal_entity, app_cx);
+                    }
+                }),
+        )
         .child(
             div()
                 .flex()
