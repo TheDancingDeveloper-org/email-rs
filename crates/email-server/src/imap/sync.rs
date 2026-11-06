@@ -1118,6 +1118,108 @@ mod tests {
     use super::*;
     use crate::providers::{Folder, Message, MessageBody, MovedMessage};
 
+    /// End-to-end: `ImapSyncEngine` -> `GenericImapProvider` -> TLS -> mock
+    /// IMAP server -> SQLite (email-rs #75).
+    #[tokio::test]
+    async fn imap_server_fixture_drives_end_to_end_sync() {
+        use crate::imap::mock_server::{MockImapServer, MockMessage};
+
+        let server = MockImapServer::start().await;
+        server.add_mailbox("Archive", 7);
+        let mut first = MockMessage::new(1, "first");
+        first.seen = true;
+        let mut reply = MockMessage::new(2, "Re: first");
+        reply.in_reply_to = Some(first.message_id.clone());
+        reply.flagged = true;
+        server.add_message("INBOX", first);
+        server.add_message("INBOX", reply);
+        server.add_message("Archive", MockMessage::new(5, "archived"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("email.db").display().to_string();
+        let (pool, _) = crate::db::create_pool(&format!("sqlite:{path}"))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('mock','M','mock@example.test','imap','basic')")
+            .execute(&pool).await.unwrap();
+        let engine = ImapSyncEngine::new(pool.clone(), 60);
+        let provider = || -> Arc<dyn MailProvider> { Arc::new(server.provider("mock")) };
+
+        engine
+            .sync_provider("mock", provider(), None, None)
+            .await
+            .unwrap();
+
+        let rows: Vec<(String, i64, String, bool, bool)> = sqlx::query_as(
+            "SELECT f.full_path, m.uid, m.subject, m.is_read, m.is_flagged FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.account_id = 'mock' ORDER BY f.full_path, m.uid",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("Archive".into(), 5, "archived".into(), false, false),
+                ("INBOX".into(), 1, "first".into(), true, false),
+                ("INBOX".into(), 2, "Re: first".into(), false, true),
+            ]
+        );
+        let validity: i64 = sqlx::query_scalar(
+            "SELECT uid_validity FROM folders WHERE account_id='mock' AND full_path='Archive'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(validity, 7);
+        assert!(server.commands().iter().any(|c| c.contains("UID SEARCH")));
+
+        // Remote delete + new arrival are reflected by the next sync.
+        server.remove_message("INBOX", 1);
+        server.add_message("INBOX", MockMessage::new(3, "third"));
+        engine
+            .sync_provider("mock", provider(), None, None)
+            .await
+            .unwrap();
+        let uids: Vec<i64> = sqlx::query_scalar(
+            "SELECT m.uid FROM messages m JOIN folders f ON f.id = m.folder_id WHERE f.full_path='INBOX' ORDER BY m.uid",
+        )
+        .fetch_all(&pool).await.unwrap();
+        assert_eq!(uids, vec![2, 3]);
+
+        // A UIDVALIDITY change rebuilds the folder cache.
+        server.reset_mailbox("INBOX", 2, vec![MockMessage::new(1, "renumbered")]);
+        engine
+            .sync_provider("mock", provider(), None, None)
+            .await
+            .unwrap();
+        let subjects: Vec<String> = sqlx::query_scalar(
+            "SELECT m.subject FROM messages m JOIN folders f ON f.id = m.folder_id WHERE f.full_path='INBOX'",
+        )
+        .fetch_all(&pool).await.unwrap();
+        assert_eq!(subjects, vec!["renumbered".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn imap_server_fixture_rejects_bad_credentials_and_syncs_many_messages() {
+        use crate::imap::mock_server::MockImapServer;
+
+        let server = MockImapServer::start().await;
+        server.populate("INBOX", 300);
+
+        let mut bad = server.provider("mock");
+        bad.password = "wrong".into();
+        assert!(bad.list_folders().await.is_err());
+
+        let good = server.provider("mock");
+        let uids = good.list_message_uids("INBOX").await.unwrap();
+        assert_eq!(uids.len(), 300);
+        let fetched = good.fetch_messages("INBOX", None).await.unwrap();
+        assert_eq!(fetched.len(), 300);
+        assert_eq!(fetched[0].subject.as_deref(), Some("generated 1"));
+        let bodies = good.fetch_bodies_batch("INBOX", &[1, 2]).await.unwrap();
+        assert_eq!(bodies.len(), 2);
+    }
+
     #[tokio::test]
     async fn cancelled_sync_releases_account_lock() {
         let account_id = "sync-lock-cancel-test";
