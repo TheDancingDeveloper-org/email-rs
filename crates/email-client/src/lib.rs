@@ -1019,8 +1019,8 @@ mod tests {
         let server = std::thread::spawn(move || {
             let mut requests = Vec::new();
             for body in [
-                "[{\"id\":\"default\",\"accountId\":\"a1\",\"name\":\"Me\",\"email\":\"me@example.com\",\"isDefault\":true}]",
-                "{\"id\":\"i1\",\"accountId\":\"a1\",\"name\":\"Sales\",\"email\":\"sales@example.com\",\"isDefault\":false}",
+                "[{\"id\":\"default\",\"accountId\":\"a1\",\"name\":\"Me\",\"email\":\"me@example.com\",\"isDefault\":true,\"signaturePlacement\":\"below\"}]",
+                "{\"id\":\"i1\",\"accountId\":\"a1\",\"name\":\"Sales\",\"email\":\"sales@example.com\",\"isDefault\":false,\"signaturePlacement\":\"below\"}",
                 "{\"status\":\"deleted\"}",
                 "{\"status\":\"queued\"}",
             ] {
