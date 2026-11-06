@@ -523,7 +523,7 @@ fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     None
 }
 
-fn ip_is_blocked(ip: std::net::IpAddr) -> bool {
+pub(crate) fn ip_is_blocked(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             v4.is_private()

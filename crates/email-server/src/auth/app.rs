@@ -613,6 +613,10 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
     if path.ends_with("/invitation/rsvp") {
         return (*method == Method::POST).then_some("mail.send");
     }
+    if path.ends_with("/unsubscribe") && path.starts_with("/messages/") {
+        // Sends an outbound request or message on the sender's behalf.
+        return (*method == Method::POST).then_some("mail.send");
+    }
     if *method == Method::PATCH && is_identity_item_path(path) {
         // Editing an identity's name, address or signature. Every other write
         // under /accounts (accounts, credentials, identity create/delete)
@@ -1504,6 +1508,50 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn unsubscribe_needs_mail_send_and_post() {
+        assert_eq!(
+            required_integration_scope(&Method::POST, "/messages/m1/unsubscribe"),
+            Some("mail.send")
+        );
+        assert_eq!(
+            required_integration_scope(&Method::GET, "/messages/m1/unsubscribe"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_is_denied_without_mail_send_and_allowed_with_it() {
+        let state = setup().await;
+        seed_user(&state).await;
+        let (_, login) = login_as(&state, ClientKind::Bearer).await;
+        let user_authorization = format!("Bearer {}", login["token"].as_str().unwrap());
+        let mut results = Vec::new();
+        for scope in ["mail.modify", "mail.send"] {
+            let (_, _, created) = send(
+                crate::api::router(Arc::clone(&state)),
+                Method::POST,
+                "/integration-tokens",
+                Some(serde_json::json!({"name": scope, "scopes": [scope]})),
+                &[("authorization", &user_authorization)],
+            )
+            .await;
+            let authorization = format!("Bearer {}", created["token"].as_str().unwrap());
+            let (status, _, _) = send(
+                crate::api::router(Arc::clone(&state)),
+                Method::POST,
+                "/messages/missing/unsubscribe",
+                None,
+                &[("authorization", &authorization)],
+            )
+            .await;
+            results.push(status);
+        }
+        // mail.modify is refused at the gate; mail.send reaches the handler,
+        // which reports the unknown message.
+        assert_eq!(results, vec![StatusCode::FORBIDDEN, StatusCode::NOT_FOUND]);
     }
 
     #[test]
