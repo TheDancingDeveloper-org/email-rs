@@ -605,7 +605,11 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
         return (*method == Method::POST).then_some("mail.send");
     }
     if path.starts_with("/accounts") || path == "/health/details" {
-        return (*method == Method::GET).then_some("mail.accounts.read");
+        return match *method {
+            Method::GET => Some("mail.accounts.read"),
+            Method::PATCH | Method::POST | Method::DELETE => Some("mail.modify"),
+            _ => None,
+        };
     }
     if *method == Method::GET
         && path.starts_with("/messages/")
@@ -1334,6 +1338,15 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("mail.accounts.read"));
+        let (status, _, _) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::PATCH,
+            "/accounts/a1/identities/i1",
+            Some(serde_json::json!({"signature": "Regards"})),
+            &[("authorization", &limited_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
         let integration_authorization = format!("Bearer {integration_token}");
         let (status, _, _) = send(
             crate::api::router(Arc::clone(&state)),
@@ -1344,6 +1357,24 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        let (_, _, modifier) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::POST,
+            "/integration-tokens",
+            Some(serde_json::json!({"name": "modifier", "scopes": ["mail.modify"]})),
+            &[("authorization", &user_authorization)],
+        )
+        .await;
+        let modifier_authorization = format!("Bearer {}", modifier["token"].as_str().unwrap());
+        let (status, _, _) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::PATCH,
+            "/accounts/a1/identities/i1",
+            Some(serde_json::json!({"signature": "Regards"})),
+            &[("authorization", &modifier_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _, _) = send(
             crate::api::router(Arc::clone(&state)),
             Method::GET,

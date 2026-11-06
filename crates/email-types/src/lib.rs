@@ -143,6 +143,9 @@ pub struct Identity {
     pub name: String,
     pub email: String,
     pub is_default: bool,
+    pub signature: Option<String>,
+    pub signature_html: Option<String>,
+    pub signature_placement: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -150,6 +153,35 @@ pub struct Identity {
 pub struct CreateIdentity {
     pub name: String,
     pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_html: Option<String>,
+    #[serde(
+        default = "default_signature_placement",
+        skip_serializing_if = "is_below"
+    )]
+    pub signature_placement: String,
+}
+
+fn default_signature_placement() -> String {
+    "below".to_string()
+}
+
+fn is_below(value: &str) -> bool {
+    value == "below"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateIdentity {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_html: Option<Option<String>>,
+    pub signature_placement: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
