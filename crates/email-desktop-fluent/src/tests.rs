@@ -21,6 +21,7 @@ fn folder(id: &str, unread_count: i64) -> Folder {
         name: id.to_string(),
         full_path: id.to_string(),
         special_use: None,
+        delimiter: None,
         unread_count,
         total_count: unread_count.max(0),
         synced_at: None,
