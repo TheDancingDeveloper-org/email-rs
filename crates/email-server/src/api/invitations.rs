@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::{
     api::outbox,
+    calendar::CalendarService,
     error::{AppError, Result},
+    providers::{Attendee, CalendarEvent},
     state::AppState,
 };
 
@@ -95,6 +97,10 @@ pub async fn rsvp_invitation(
         ));
     }
     let body = build_reply(&invitation, &status, &from)?;
+    // Local calendar change first: the reply is only queued once it succeeded,
+    // so a retry after a failure cannot send a duplicate REPLY.
+    let calendar_event_id =
+        apply_to_calendar(&state.pool, &account_id, &invitation, &status, &from).await?;
     let request = SendRequest {
         account_id,
         to: vec![organizer],
@@ -119,8 +125,88 @@ pub async fn rsvp_invitation(
     };
     let response = outbox::enqueue(&state, request).await?;
     Ok(Json(
-        serde_json::json!({"status": status, "outbox": response}),
+        serde_json::json!({"status": status, "outbox": response, "calendarEventId": calendar_event_id}),
     ))
+}
+
+/// Calendar the invitation events are stored in.
+const INVITATION_CALENDAR_ID: &str = "default";
+const MAX_UID_LEN: usize = 255;
+
+/// A UID is used as the event's provider id and may become a CalDAV object
+/// name (`<calendar>/<uid>.ics`), so only a conservative set of characters is
+/// accepted: no path separators, dots-only names, percent escapes, or control
+/// characters.
+fn valid_event_uid(uid: &str) -> bool {
+    !uid.is_empty()
+        && uid.len() <= MAX_UID_LEN
+        && !uid.chars().all(|c| c == '.')
+        && uid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-' | '+' | '='))
+}
+
+/// ACCEPTED/TENTATIVE create or update the event for the invitation UID;
+/// DECLINED removes it. Returns the stored event id, if any remains.
+async fn apply_to_calendar(
+    pool: &sqlx::SqlitePool,
+    account_id: &str,
+    invitation: &Invitation,
+    status: &str,
+    from: &str,
+) -> Result<Option<String>> {
+    if !valid_event_uid(&invitation.uid) {
+        return Err(AppError::Validation(
+            "invitation UID is not valid for a calendar event".into(),
+        ));
+    }
+    let service = CalendarService::new(pool.clone());
+    if status == "DECLINED" {
+        service
+            .delete_event_by_uid(account_id, &invitation.uid)
+            .await?;
+        return Ok(None);
+    }
+    let parse = |value: &str| {
+        DateTime::parse_from_rfc3339(value)
+            .map(|d| d.with_timezone(&Utc))
+            .map_err(|_| AppError::Validation("invitation has an invalid time".into()))
+    };
+    let attendees = invitation
+        .attendees
+        .iter()
+        .map(|a| Attendee {
+            email: a.email.clone(),
+            name: a.name.clone(),
+            response_status: if a.email.eq_ignore_ascii_case(from) {
+                Some(status.to_string())
+            } else {
+                a.response_status.clone()
+            },
+        })
+        .collect();
+    let event = CalendarEvent {
+        id: String::new(),
+        calendar_id: INVITATION_CALENDAR_ID.into(),
+        provider_event_id: Some(invitation.uid.clone()),
+        title: invitation
+            .summary
+            .clone()
+            .unwrap_or_else(|| "(no title)".into()),
+        description: invitation.description.clone(),
+        start_at: parse(&invitation.start_at)?,
+        end_at: parse(&invitation.end_at)?,
+        location: invitation.location.clone(),
+        is_all_day: false,
+        recurrence_rule: None,
+        attendees,
+        meet_link: None,
+    };
+    let event_id = service.upsert_event(account_id, &event).await?;
+    service
+        .add_event_link(&event_id, &invitation.message_id)
+        .await?;
+    Ok(Some(event_id))
 }
 
 fn has_control(value: &str) -> bool {
@@ -439,5 +525,97 @@ mod tests {
     fn rejects_unbounded_and_malformed_input() {
         assert!(parse_ical(&"x".repeat(MAX_ICAL_BYTES + 1)).is_err());
         assert!(parse_ical("BEGIN:VCALENDAR\r\nEND:VCALENDAR").is_err());
+    }
+    #[test]
+    fn event_uid_rejects_path_and_control_injection() {
+        for uid in [
+            "a/b", "../x", "..", ".", "a\\b", "a?b", "a#b", "a%2fb", "a b", "a\nb", "", "é",
+        ] {
+            assert!(!valid_event_uid(uid), "{uid:?}");
+        }
+        assert!(!valid_event_uid(&"u".repeat(MAX_UID_LEN + 1)));
+        for uid in ["abc", "040000008200E000", "a-b_c.d+e=f@example.com"] {
+            assert!(valid_event_uid(uid), "{uid}");
+        }
+    }
+
+    async fn setup() -> (sqlx::SqlitePool, Invitation) {
+        let (pool, _) = crate::db::create_pool("sqlite::memory:").await.unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('acc', 'Me', 'me@example.com', 'imap', 'password')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO folders (id, account_id, name, full_path) VALUES ('f', 'acc', 'INBOX', 'INBOX')")
+            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, account_id, folder_id, uid) VALUES ('m', 'acc', 'f', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut invitation = invitation_with_uid("evt-1@example.com");
+        invitation.summary = Some("Team".into());
+        invitation.start_at = "2026-11-06T12:00:00+00:00".into();
+        invitation.end_at = "2026-11-06T13:00:00+00:00".into();
+        invitation.attendees = vec![InvitationAttendee {
+            email: "me@example.com".into(),
+            name: None,
+            response_status: Some("NEEDS-ACTION".into()),
+        }];
+        (pool, invitation)
+    }
+
+    async fn event_count(pool: &sqlx::SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM calendar_events")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn accept_creates_then_updates_event_by_uid_and_decline_removes_it() {
+        let (pool, mut invitation) = setup().await;
+        let id = apply_to_calendar(&pool, "acc", &invitation, "ACCEPTED", "me@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event_count(&pool).await, 1);
+        invitation.summary = Some("Team renamed".into());
+        let again = apply_to_calendar(&pool, "acc", &invitation, "TENTATIVE", "me@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, again);
+        assert_eq!(event_count(&pool).await, 1);
+        let (title, attendees): (String, String) =
+            sqlx::query_as("SELECT title, attendees_json FROM calendar_events WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(title, "Team renamed");
+        assert!(attendees.contains("TENTATIVE"), "{attendees}");
+        let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_calendar_links")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(links, 1);
+        let gone = apply_to_calendar(&pool, "acc", &invitation, "DECLINED", "me@example.com")
+            .await
+            .unwrap();
+        assert!(gone.is_none());
+        assert_eq!(event_count(&pool).await, 0);
+    }
+
+    #[tokio::test]
+    async fn unsafe_uid_is_refused_before_touching_the_calendar() {
+        let (pool, mut invitation) = setup().await;
+        invitation.uid = "../../etc/passwd".into();
+        for status in ["ACCEPTED", "DECLINED"] {
+            assert!(
+                apply_to_calendar(&pool, "acc", &invitation, status, "me@example.com")
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(event_count(&pool).await, 0);
     }
 }
