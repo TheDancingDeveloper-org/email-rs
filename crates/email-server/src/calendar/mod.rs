@@ -140,7 +140,7 @@ impl CalendarService {
     pub async fn upsert_event(&self, account_id: &str, event: &CalendarEvent) -> Result<String> {
         let existing_id: Option<String> = if let Some(pid) = &event.provider_event_id {
             sqlx::query_scalar(
-                "SELECT id FROM calendar_events WHERE account_id = ? AND provider_event_id = ?",
+                "SELECT id FROM calendar_events WHERE account_id = ? AND calendar_id = 'default' AND provider_event_id = ?",
             )
             .bind(account_id)
             .bind(pid)
@@ -202,7 +202,7 @@ impl CalendarService {
     /// provider event id of invitation-created events).
     pub async fn find_event_by_uid(&self, account_id: &str, uid: &str) -> Result<Option<String>> {
         Ok(sqlx::query_scalar(
-            "SELECT id FROM calendar_events WHERE account_id = ? AND provider_event_id = ?",
+            "SELECT id FROM calendar_events WHERE account_id = ? AND calendar_id = 'default' AND provider_event_id = ?",
         )
         .bind(account_id)
         .bind(uid)
