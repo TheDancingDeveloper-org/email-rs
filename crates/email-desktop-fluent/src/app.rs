@@ -416,6 +416,26 @@ impl Render for EmailDesktopApp {
                     });
                 }),
             )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &GoToInbox, _, cx| {
+                    go_to_special_folder(&app.state, "inbox", cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &GoToSent, _, cx| {
+                    go_to_special_folder(&app.state, "sent", cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &GoToDrafts, _, cx| {
+                    go_to_special_folder(&app.state, "drafts", cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|app: &mut EmailDesktopApp, _: &GoToArchive, _, cx| {
+                    go_to_special_folder(&app.state, "archive", cx);
+                }),
+            )
             .on_action(cx.listener(
                 |_app: &mut EmailDesktopApp, _: &CyclePaneFocus, window, cx| {
                     window.focus_next(cx);
@@ -434,7 +454,11 @@ impl Render for EmailDesktopApp {
                         .border_1()
                         .border_color(cx.theme().colors.stroke_neutral_subtle)
                         .rounded(px(8.))
-                        .child(div().font_family("monospace").child(shortcut_help())),
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .child(shortcut_help_with(&self.state.read(cx).key_overrides)),
+                        ),
                 )
             })
             .child(self.palette.clone())

@@ -99,14 +99,23 @@ pub(crate) fn parse_native_preferences(raw: &str) -> NativePreferences {
                     preferences.undo_window_secs = clamp_undo_window(secs);
                 }
             }
-            _ => {}
+            other => {
+                if let Some(id) = other.strip_prefix("key.") {
+                    let keystroke = value.trim();
+                    if native_key_action_by_id(id).is_some() && !keystroke.is_empty() {
+                        preferences
+                            .key_overrides
+                            .insert(id.to_string(), keystroke.to_ascii_lowercase());
+                    }
+                }
+            }
         }
     }
     preferences
 }
 
 pub(crate) fn serialize_native_preferences(preferences: &NativePreferences) -> String {
-    format!(
+    let mut out = format!(
         "theme={}\ndensity={}\nemail_sidebar_w={}\nemail_msglist_w={}\nremote_image_allowlist={}\nundo_window_secs={}\n",
         preferences.theme.as_str(),
         preferences.density_level.min(8),
@@ -119,7 +128,11 @@ pub(crate) fn serialize_native_preferences(preferences: &NativePreferences) -> S
             .collect::<Vec<_>>()
             .join(","),
         clamp_undo_window(preferences.undo_window_secs)
-    )
+    );
+    for (id, keystroke) in &preferences.key_overrides {
+        out.push_str(&format!("key.{id}={keystroke}\n"));
+    }
+    out
 }
 
 pub(crate) const DEFAULT_UNDO_WINDOW_SECS: u8 = 5;
