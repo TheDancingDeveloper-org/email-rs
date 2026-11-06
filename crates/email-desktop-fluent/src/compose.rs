@@ -466,6 +466,7 @@ pub(crate) fn update_compose_subject(
         state.compose.subject = Some(subject);
         cx.notify();
     });
+    start_draft_autosave(state_entity, app_cx);
 }
 
 pub(crate) fn update_compose_body(
@@ -477,6 +478,141 @@ pub(crate) fn update_compose_body(
         state.compose.body = body;
         cx.notify();
     });
+    start_draft_autosave(state_entity, app_cx);
+}
+
+fn start_draft_autosave(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let Some((base_url, draft_id, request)) = state_entity.update(app_cx, |state, cx| {
+        let request = build_draft_request(state).ok()?;
+        state.compose.autosaving = true;
+        state.compose.notice = Some("Draft saving...".to_string());
+        cx.notify();
+        Some((
+            state.api_base_url.clone(),
+            state.compose.draft_id.clone(),
+            request,
+        ))
+    }) else {
+        return;
+    };
+    let task = app_cx
+        .background_executor()
+        .spawn(async move { save_draft_request(base_url, draft_id.as_deref(), request) });
+    let state_entity = state_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                state_entity.update(&mut async_cx, |state, cx| {
+                    state.compose.autosaving = false;
+                    match result {
+                        Ok(response) => {
+                            state.compose.draft_id = Some(response.id);
+                            state.compose.notice = Some("Draft saved".to_string());
+                            state.compose.error = None;
+                        }
+                        Err(error) => state.compose.error = Some(error.to_string()),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+}
+
+pub(crate) fn save_draft_request(
+    base_url: String,
+    draft_id: Option<&str>,
+    request: DraftRequest,
+) -> Result<DraftResponse> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = EmailClient::new(&base_url)?;
+        Ok(match draft_id {
+            Some(id) => client.update_draft(id, &request).await?,
+            None => client.create_draft(&request).await?,
+        })
+    })
+}
+
+pub(crate) fn build_draft_request(
+    state: &NativeAppState,
+) -> std::result::Result<DraftRequest, String> {
+    let account_id = state
+        .compose
+        .account_id
+        .clone()
+        .or_else(|| state.accounts.first().map(|account| account.id.clone()))
+        .ok_or_else(|| "No account is available for this draft.".to_string())?;
+    Ok(DraftRequest {
+        account_id,
+        to: normalize_recipients(state.compose.to.clone()),
+        cc: normalize_recipients(state.compose.cc.clone()),
+        bcc: normalize_recipients(state.compose.bcc.clone()),
+        subject: state
+            .compose
+            .subject
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        text_body: Some(state.compose.body.clone()),
+        html_body: None,
+        in_reply_to: state.compose.in_reply_to.clone(),
+        attachments: state.compose.attachments.clone(),
+    })
+}
+
+pub(crate) fn attachment_from_path(path: &Path) -> Result<OutgoingAttachment> {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("attachment has no valid filename"))?
+        .to_string();
+    let bytes =
+        std::fs::read(path).with_context(|| format!("read attachment {}", path.display()))?;
+    let content_type = match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "txt" => "text/plain",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
+    .to_string();
+    Ok(OutgoingAttachment {
+        filename,
+        content_type,
+        content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+pub(crate) fn add_compose_attachment(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
+    let Some(path) = rfd::FileDialog::new().set_title("Attach file").pick_file() else {
+        return;
+    };
+    match attachment_from_path(&path) {
+        Ok(attachment) => state_entity.update(app_cx, |state, cx| {
+            state.compose.attachments.push(attachment);
+            state.compose.notice = Some("Attachment added".to_string());
+            cx.notify();
+        }),
+        Err(error) => state_entity.update(app_cx, |state, cx| {
+            state.compose.error = Some(error.to_string());
+            cx.notify();
+        }),
+    }
 }
 
 pub(crate) fn compose_tokens(values: &[String]) -> Vec<TokenInputToken> {
@@ -859,7 +995,7 @@ pub(crate) fn build_quick_reply_request(
         text_body: Some(body),
         html_body: None,
         in_reply_to,
-        attachments: Vec::new(),
+        attachments: state.compose.attachments.clone(),
         send_at: None,
         send_delay_seconds: Some(clamp_undo_window(state.undo_window_secs).into()),
         identity_id: None,
@@ -917,7 +1053,7 @@ pub(crate) fn build_compose_request(
         text_body: Some(text_body),
         html_body: None,
         in_reply_to,
-        attachments: Vec::new(),
+        attachments: state.compose.attachments.clone(),
         send_at: None,
         send_delay_seconds: Some(clamp_undo_window(state.undo_window_secs).into()),
         identity_id: selected_send_identity(&state.compose),
@@ -1194,6 +1330,34 @@ mod tests {
             "Body".into(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn draft_request_carries_recipients_body_and_attachments() {
+        let mut state = open_compose(vec![]);
+        state.compose.to = vec!["to@example.com".into()];
+        state.compose.subject = Some(" Subject ".into());
+        state.compose.body = "Body".into();
+        state.compose.attachments.push(OutgoingAttachment {
+            filename: "a.txt".into(),
+            content_type: "text/plain".into(),
+            content_base64: "YQ==".into(),
+        });
+        let request = build_draft_request(&state).unwrap();
+        assert_eq!(request.subject, "Subject");
+        assert_eq!(request.to, vec!["to@example.com"]);
+        assert_eq!(request.attachments.len(), 1);
+    }
+
+    #[test]
+    fn attachment_from_path_encodes_bytes_and_detects_type() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        let attachment = attachment_from_path(&path).unwrap();
+        assert_eq!(attachment.filename, "note.txt");
+        assert_eq!(attachment.content_type, "text/plain");
+        assert_eq!(attachment.content_base64, "aGVsbG8=");
     }
 
     #[test]
