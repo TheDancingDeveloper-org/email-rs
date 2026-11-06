@@ -201,6 +201,7 @@ pub struct Folder {
     pub name: String,
     pub full_path: String,
     pub special_use: Option<String>,
+    pub delimiter: Option<String>,
     pub unread_count: i64,
     pub total_count: i64,
     pub synced_at: Option<String>,
