@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Opt-in Gmail API history sync (`EMAIL_RS_GMAIL_API_SYNC=1`, off by default): labels as folders, `users.history.list` from a persisted per-label historyId, full resync on 404, historyId saved only after the message write commits. IMAP remains the default path.
+
 ## 0.7.3
 
 - 0.7.1 and 0.7.2 were tagged but never published, because of release-workflow bugs. 0.7.3 is the first published release with that content.
