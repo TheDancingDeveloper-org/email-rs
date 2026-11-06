@@ -2294,6 +2294,7 @@ name = "email-desktop-fluent"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dotenvy",
  "email-client",
