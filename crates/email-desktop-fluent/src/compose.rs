@@ -1487,6 +1487,9 @@ mod tests {
             },
             email: email.to_string(),
             is_default,
+            signature: None,
+            signature_html: None,
+            signature_placement: "below".into(),
         }
     }
 
