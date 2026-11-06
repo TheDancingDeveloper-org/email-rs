@@ -9,6 +9,7 @@
 pub mod app;
 pub mod auth;
 pub mod backend;
+pub mod catalogue;
 pub mod fixture;
 pub mod mail;
 pub mod server_url;
@@ -17,6 +18,7 @@ pub mod session;
 pub use app::{EmailApp, Exec, Screen};
 pub use auth::{AuthMode, LoginForm};
 pub use backend::{AuthApi, AuthError, HttpAuth, SignedIn};
+pub use catalogue::{Catalogue, MessageArgs, MessageId};
 pub use mail::{MailApi, Mailbox};
 pub use server_url::check_server_url;
 pub use session::{KeyringStore, MemoryStore, TokenStore};
