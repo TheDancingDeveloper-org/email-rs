@@ -3137,3 +3137,9 @@ fn needs_reauth_event_shows_reconnect_error_until_reauthed() {
     apply_sync_update(&mut status, reauthed);
     assert!(status.last_error.is_none());
 }
+
+#[test]
+fn blocked_images_label_pluralises() {
+    assert_eq!(blocked_images_label(1), "1 external image is blocked.");
+    assert_eq!(blocked_images_label(3), "3 external images are blocked.");
+}
