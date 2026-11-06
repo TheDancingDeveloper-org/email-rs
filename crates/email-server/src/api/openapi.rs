@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use serde::Serialize;
-use utoipa::{Modify, OpenApi, ToSchema};
+use utoipa::{Modify, OpenApi, PartialSchema, ToSchema};
 
 use email_types::{
     Account, AccountSettings, AddLinkBody, AddLinkResponse, AuthCredentials, AuthIdentity,
@@ -31,6 +31,21 @@ use super::webhooks::{IntegrationEvent, WebhookDelivery};
 pub struct ErrorResponse {
     pub error: String,
 }
+
+struct Rfc822Message;
+
+impl PartialSchema for Rfc822Message {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
+                utoipa::openapi::KnownFormat::Binary,
+            )))
+            .into()
+    }
+}
+
+impl ToSchema for Rfc822Message {}
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -291,7 +306,12 @@ fn doc_get_message() {}
     security(("bearerAuth" = ["mail.body.read"])),
     params(("id" = String, Path, description = "Mailbox occurrence ID")),
     responses(
-        (status = 200, content_type = "message/rfc822", body = Vec<u8>),
+        (
+            status = 200,
+            description = "RFC 822 message",
+            content_type = "application/octet-stream",
+            body = Rfc822Message
+        ),
         (status = 404, body = ErrorResponse)
     )
 )]

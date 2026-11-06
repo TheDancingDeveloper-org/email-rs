@@ -1,4 +1,5 @@
 from http import HTTPStatus
+from io import BytesIO
 from typing import Any
 from urllib.parse import quote
 
@@ -7,7 +8,7 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.error_response import ErrorResponse
-from ...types import Response
+from ...types import File, Response
 
 
 def _get_kwargs(
@@ -24,7 +25,12 @@ def _get_kwargs(
     return _kwargs
 
 
-def _parse_response(*, client: AuthenticatedClient | Client, response: httpx.Response) -> ErrorResponse | None:
+def _parse_response(*, client: AuthenticatedClient | Client, response: httpx.Response) -> ErrorResponse | File | None:
+    if response.status_code == 200:
+        response_200 = File(payload=BytesIO(response.content))
+
+        return response_200
+
     if response.status_code == 401:
         response_401 = ErrorResponse.from_dict(response.json())
 
@@ -46,7 +52,9 @@ def _parse_response(*, client: AuthenticatedClient | Client, response: httpx.Res
         return None
 
 
-def _build_response(*, client: AuthenticatedClient | Client, response: httpx.Response) -> Response[ErrorResponse]:
+def _build_response(
+    *, client: AuthenticatedClient | Client, response: httpx.Response
+) -> Response[ErrorResponse | File]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -59,7 +67,7 @@ def sync_detailed(
     id: str,
     *,
     client: AuthenticatedClient,
-) -> Response[ErrorResponse]:
+) -> Response[ErrorResponse | File]:
     """
     Args:
         id (str):
@@ -69,7 +77,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse]
+        Response[ErrorResponse | File]
     """
 
     kwargs = _get_kwargs(
@@ -87,7 +95,7 @@ def sync(
     id: str,
     *,
     client: AuthenticatedClient,
-) -> ErrorResponse | None:
+) -> ErrorResponse | File | None:
     """
     Args:
         id (str):
@@ -97,7 +105,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse
+        ErrorResponse | File
     """
 
     return sync_detailed(
@@ -110,7 +118,7 @@ async def asyncio_detailed(
     id: str,
     *,
     client: AuthenticatedClient,
-) -> Response[ErrorResponse]:
+) -> Response[ErrorResponse | File]:
     """
     Args:
         id (str):
@@ -120,7 +128,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse]
+        Response[ErrorResponse | File]
     """
 
     kwargs = _get_kwargs(
@@ -136,7 +144,7 @@ async def asyncio(
     id: str,
     *,
     client: AuthenticatedClient,
-) -> ErrorResponse | None:
+) -> ErrorResponse | File | None:
     """
     Args:
         id (str):
@@ -146,7 +154,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse
+        ErrorResponse | File
     """
 
     return (
