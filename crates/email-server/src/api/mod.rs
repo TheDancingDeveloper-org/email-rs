@@ -29,6 +29,7 @@ pub mod search;
 pub mod smart_folders;
 pub mod snooze;
 pub mod threads;
+pub mod unsubscribe;
 pub mod webhooks;
 
 pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
@@ -81,6 +82,7 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("DELETE", "/calendar/events/{id}/links/{message_id}"),
     ("GET", "/messages/{id}/invitation"),
     ("POST", "/messages/{id}/invitation/rsvp"),
+    ("POST", "/messages/{id}/unsubscribe"),
     ("POST", "/sync/{account_id}"),
     ("GET", "/auth/gmail/authorize"),
     ("GET", "/auth/microsoft/authorize"),
@@ -215,6 +217,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/messages/{id}/invitation/rsvp",
             post(invitations::rsvp_invitation),
+        )
+        .route(
+            "/messages/{id}/unsubscribe",
+            post(unsubscribe::unsubscribe_message),
         )
         .route(
             "/messages/{id}/attachments",

@@ -316,6 +316,19 @@ pub struct MessageAuthenticationResults {
     pub dmarc: AuthenticationResultStatus,
 }
 
+/// Unsubscribe targets advertised by a message's `List-Unsubscribe` header
+/// (RFC 2369), with the RFC 8058 one-click flag from `List-Unsubscribe-Post`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListUnsubscribe {
+    /// `https:` targets. Plain `http:` targets are never offered.
+    pub https: Vec<String>,
+    pub mailto: Vec<String>,
+    /// True when `List-Unsubscribe-Post: List-Unsubscribe=One-Click` is present
+    /// and at least one HTTPS target exists.
+    pub one_click: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FullMessage {
@@ -345,6 +358,8 @@ pub struct FullMessage {
     pub from_reply_to_domain_mismatch: bool,
     #[serde(default)]
     pub display_name_spoofing: bool,
+    #[serde(default)]
+    pub list_unsubscribe: Option<ListUnsubscribe>,
     #[serde(default)]
     pub attachments: Vec<MessageAttachment>,
 }
