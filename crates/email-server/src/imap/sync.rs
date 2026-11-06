@@ -178,6 +178,7 @@ impl ImapSyncEngine {
         let guard = AccountSyncGuard::acquire(account_id)?;
         crate::metrics::inc(&crate::metrics::SYNC_RUNS);
         let result = self.sync_account_unlocked(account_id, event_tx).await;
+        self.record_sync_result(account_id, &result).await;
         drop(guard);
         if let Err(error) = &result {
             crate::metrics::inc(&crate::metrics::SYNC_ERRORS);
@@ -193,6 +194,29 @@ impl ImapSyncEngine {
             .await;
         }
         result
+    }
+
+    // Store only bounded error categories, never provider text (which can contain credentials).
+    async fn record_sync_result(&self, account_id: &str, result: &Result<()>) {
+        let error = result.as_ref().err().map(|error| match error {
+            AppError::Auth(_) => "authentication failed",
+            AppError::Database(_) => "database error",
+            AppError::RateLimited { .. } => "provider rate limited",
+            _ => "sync failed",
+        });
+        let query = if error.is_some() {
+            "INSERT INTO account_sync_health (account_id, last_error_at, last_error) SELECT id, datetime('now'), ? FROM accounts WHERE id = ? ON CONFLICT(account_id) DO UPDATE SET last_error_at = excluded.last_error_at, last_error = excluded.last_error"
+        } else {
+            "INSERT INTO account_sync_health (account_id, last_success_at, last_error) SELECT id, datetime('now'), ? FROM accounts WHERE id = ? ON CONFLICT(account_id) DO UPDATE SET last_success_at = excluded.last_success_at, last_error_at = NULL, last_error = NULL"
+        };
+        if let Err(error) = sqlx::query(query)
+            .bind(error)
+            .bind(account_id)
+            .execute(&self.pool)
+            .await
+        {
+            warn!(%error, "failed to persist sync health");
+        }
     }
 
     /// A refused OAuth grant puts the account into the needs-reauth state.
@@ -385,6 +409,11 @@ impl ImapSyncEngine {
                         );
                     }
                     Err(_) => {
+                        self.record_sync_result(
+                            &id,
+                            &Err(AppError::Provider("sync timed out".into())),
+                        )
+                        .await;
                         let delay = schedule.failure(&id, now, None, now);
                         error!("sync timed out for account {} (retry in {}s)", id, delay);
                     }
@@ -1670,6 +1699,51 @@ mod tests {
                 .await
                 .unwrap();
         assert!(schedulable.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_health_preserves_success_on_failure_and_clears_error_on_recovery() {
+        let (pool, _) = crate::db::create_pool("sqlite::memory:").await.unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('health-test','A','a@example.test','gmail','oauth2')").execute(&pool).await.unwrap();
+        let engine = ImapSyncEngine::new(pool.clone(), 60);
+        engine.record_sync_result("health-test", &Ok(())).await;
+        let success: String = sqlx::query_scalar(
+            "SELECT last_success_at FROM account_sync_health WHERE account_id = 'health-test'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Missing OAuth credentials exercises the real account-sync failure path.
+        assert!(engine.sync_account("health-test").await.is_err());
+        let row: (String, String, String) = sqlx::query_as("SELECT last_success_at, last_error_at, last_error FROM account_sync_health WHERE account_id = 'health-test'").fetch_one(&pool).await.unwrap();
+        assert_eq!(row.0, success);
+        assert!(!row.1.is_empty());
+        assert_eq!(row.2, "authentication failed");
+        engine
+            .record_sync_result(
+                "health-test",
+                &Err(AppError::Provider("secret provider payload".into())),
+            )
+            .await;
+        let error: String = sqlx::query_scalar(
+            "SELECT last_error FROM account_sync_health WHERE account_id = 'health-test'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(error, "sync failed");
+        engine.record_sync_result("health-test", &Ok(())).await;
+        let row: (Option<String>, Option<String>) = sqlx::query_as("SELECT last_error_at, last_error FROM account_sync_health WHERE account_id = 'health-test'").fetch_one(&pool).await.unwrap();
+        assert_eq!(row, (None, None));
+        sqlx::query("DELETE FROM accounts WHERE id = 'health-test'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM account_sync_health")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

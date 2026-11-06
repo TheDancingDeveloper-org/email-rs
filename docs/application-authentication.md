@@ -91,3 +91,22 @@ Cookie-authenticated POST, PUT, PATCH, and DELETE requests require an `Origin` m
 - Web builds of the mobile project deliberately do not persist bearer credentials because browser storage is not a secure secret store.
 
 Authentication and updated native clients must ship together. The canonical protected-route inventory is exercised anonymously in server tests, and `/api/v1/openapi.json` exposes the same inventory to client tooling.
+
+### Account health
+
+`GET /api/v1/health/details` requires an application session or an integration
+token with `mail.accounts.read`. Public `/health` remains a minimal liveness
+probe; `/ready` checks database readiness without exposing account state.
+
+The private response contains `database: "ok"` only after a successful database
+query and an `accounts` array ordered by account ID. Each row includes
+`accountId`, `lastSuccessAt`, `lastErrorAt`, `lastError`, `needsReauth`, and
+`queueDepth`. Timestamps are SQLite UTC (`YYYY-MM-DD HH:MM:SS`). History is null
+until a sync completes after this upgrade; it is not inferred from partial folder
+syncs. Success means a complete mail sync, not the separate calendar task.
+Failures retain the last success, and recovery clears the current error and its
+timestamp. Error text is a fixed safe category, never provider diagnostics.
+`queueDepth` counts pending and sending outbox entries, including scheduled mail;
+it is not the number of sync workers or failed sends. Reauthentication state is
+reported independently. Database query failures use the normal sanitized error
+response and never return a false healthy result.
