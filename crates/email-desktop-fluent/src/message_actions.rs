@@ -345,6 +345,18 @@ pub(crate) fn start_message_collection_load_with_preferred(
         .detach();
 }
 
+/// Go-to sequence target: open the `special_use` folder if the account has one.
+pub(crate) fn go_to_special_folder(
+    state_entity: &Entity<NativeAppState>,
+    special_use: &str,
+    app_cx: &mut App,
+) {
+    let folder_id = goto_folder_id(state_entity.read(app_cx), special_use);
+    if let Some(folder_id) = folder_id {
+        start_message_collection_load(state_entity, NativeMessageSource::Folder(folder_id), app_cx);
+    }
+}
+
 pub(crate) fn begin_message_collection_load(
     state: &mut NativeAppState,
     source: &NativeMessageSource,
