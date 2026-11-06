@@ -441,6 +441,7 @@ mod tests {
             name: id.to_string(),
             full_path: id.to_string(),
             special_use: None,
+            delimiter: None,
             unread_count: 0,
             total_count: 0,
             synced_at: None,

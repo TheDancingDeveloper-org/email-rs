@@ -102,6 +102,7 @@ fn test_folder(id: &str, unread: i64) -> Folder {
         name: id.to_string(),
         full_path: id.to_string(),
         special_use: None,
+        delimiter: None,
         unread_count: unread,
         total_count: unread.max(0) + 5,
         synced_at: None,
