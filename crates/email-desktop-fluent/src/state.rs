@@ -77,6 +77,8 @@ pub(crate) struct NativePreferences {
     pub(crate) layout: NativeLayoutPreferences,
     pub(crate) remote_image_allowlist: BTreeSet<String>,
     pub(crate) undo_window_secs: u8,
+    /// Shortcut action id -> keystroke overrides (`key.<id>=<keystroke>`).
+    pub(crate) key_overrides: BTreeMap<String, String>,
 }
 
 impl NativePreferences {
@@ -87,6 +89,7 @@ impl NativePreferences {
             layout: state.layout,
             remote_image_allowlist: state.remote_image_allowlist.clone(),
             undo_window_secs: state.undo_window_secs,
+            key_overrides: state.key_overrides.clone(),
         }
     }
 
@@ -96,6 +99,7 @@ impl NativePreferences {
         state.layout = self.layout;
         state.remote_image_allowlist = self.remote_image_allowlist.clone();
         state.undo_window_secs = self.undo_window_secs;
+        state.key_overrides = self.key_overrides.clone();
     }
 }
 
@@ -107,6 +111,7 @@ impl Default for NativePreferences {
             layout: NativeLayoutPreferences::default(),
             remote_image_allowlist: BTreeSet::new(),
             undo_window_secs: DEFAULT_UNDO_WINDOW_SECS,
+            key_overrides: BTreeMap::new(),
         }
     }
 }
@@ -241,6 +246,7 @@ pub(crate) struct NativeAppState {
     pub(crate) show_external_images: bool,
     pub(crate) remote_image_allowlist: BTreeSet<String>,
     pub(crate) undo_window_secs: u8,
+    pub(crate) key_overrides: BTreeMap<String, String>,
     pub(crate) pending_external_link: Option<String>,
     pub(crate) selected_event: Option<String>,
     pub(crate) calendar_week_start: NaiveDate,
@@ -296,6 +302,7 @@ impl Default for NativeAppState {
             show_external_images: false,
             remote_image_allowlist: BTreeSet::new(),
             undo_window_secs: DEFAULT_UNDO_WINDOW_SECS,
+            key_overrides: BTreeMap::new(),
             pending_external_link: None,
             selected_event: None,
             calendar_week_start: current_calendar_week_start(),
