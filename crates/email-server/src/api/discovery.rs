@@ -15,7 +15,7 @@ pub struct DiscoveryRequest {
     pub email: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct MailEndpoint {
     pub host: String,
@@ -23,7 +23,7 @@ pub struct MailEndpoint {
     pub security: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountCandidate {
     pub provider_type: String,
@@ -56,7 +56,8 @@ pub async fn discover_account(
     {
         candidates.extend(found);
     }
-    candidates.dedup();
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|candidate| seen.insert(candidate.clone()));
 
     Ok(Json(DiscoveryResponse {
         email,
