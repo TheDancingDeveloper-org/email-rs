@@ -516,7 +516,7 @@ pub(crate) fn mail_message_list(
             let selected_id = selected_id.clone();
             let state_entity = state_entity.clone();
             move |ev: &KeyDownEvent, window, app_cx| {
-                if ev.keystroke.key == "m"
+                if matches!(ev.keystroke.key.as_str(), "m" | "v")
                     && !ev.keystroke.modifiers.control
                     && !ev.keystroke.modifiers.platform
                     && !ev.keystroke.modifiers.alt
