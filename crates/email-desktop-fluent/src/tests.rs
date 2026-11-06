@@ -422,21 +422,29 @@ fn non_linux_headless_mode_only_uses_override_env() {
 fn native_key_bindings_include_ctrl_and_cmd_palette_shortcuts() {
     let specs = native_key_binding_specs();
 
-    assert!(specs.contains(&("ctrl-k", NativeKeyAction::TogglePalette)));
-    assert!(specs.contains(&("cmd-k", NativeKeyAction::TogglePalette)));
-    assert_eq!(native_key_bindings().len(), specs.len());
+    assert!(specs.contains(&("ctrl-k".to_string(), NativeKeyAction::TogglePalette)));
+    assert!(specs.contains(&("cmd-k".to_string(), NativeKeyAction::TogglePalette)));
+    assert_eq!(
+        native_key_bindings_with(&BTreeMap::new()).len(),
+        specs.len()
+    );
 }
 
 #[test]
 fn shortcut_registry_has_no_conflicts() {
-    assert!(shortcut_conflicts().is_empty());
+    assert!(shortcut_conflicts_with(&BTreeMap::new()).is_empty());
+    let ids = NATIVE_SHORTCUTS
+        .iter()
+        .map(|s| s.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids.len(), NATIVE_SHORTCUTS.len());
 }
 
 #[test]
 fn shortcut_registry_covers_gmail_and_superhuman_actions() {
-    let actions = SHORTCUT_COVERAGE
+    let actions = NATIVE_SHORTCUTS
         .iter()
-        .map(|(_, action, _)| *action)
+        .map(|s| s.label)
         .collect::<BTreeSet<_>>();
     for required in [
         "Reply",
@@ -448,12 +456,98 @@ fn shortcut_registry_covers_gmail_and_superhuman_actions() {
         "Mark read",
         "Shortcut help",
         "Cycle pane",
+        "Go to Inbox",
+        "Go to Sent",
+        "Go to Drafts",
+        "Go to Archive",
+        "Move to... (message list)",
     ] {
         assert!(
             actions.contains(required),
             "missing shortcut coverage for {required}"
         );
     }
+    let specs = native_key_binding_specs();
+    assert!(specs.contains(&("g i".to_string(), NativeKeyAction::GoInbox)));
+    let move_to = NATIVE_SHORTCUTS.iter().find(|s| s.id == "move-to").unwrap();
+    assert!(move_to.keystrokes.contains(&"v"));
+}
+
+#[test]
+fn key_overrides_replace_defaults_and_conflicts_are_dropped() {
+    let overrides =
+        parse_native_preferences("key.reply=Ctrl-R\nkey.archive=r\nkey.bogus=x\nkey.move-to=q\n")
+            .key_overrides;
+    // Unknown ids and list-scoped (unbound) entries are ignored at parse time.
+    assert_eq!(
+        overrides,
+        BTreeMap::from([
+            ("archive".to_string(), "r".to_string()),
+            ("reply".to_string(), "ctrl-r".to_string()),
+        ])
+    );
+    // `archive=r` collides with reply's rebinding only if reply kept `r`; here
+    // reply moved to ctrl-r so both apply.
+    assert_eq!(valid_key_overrides(&overrides), overrides);
+    let specs = native_key_binding_specs_with(&overrides);
+    assert!(specs.contains(&("ctrl-r".to_string(), NativeKeyAction::Reply)));
+    assert!(specs.contains(&("r".to_string(), NativeKeyAction::Archive)));
+    assert!(!specs.contains(&("a".to_string(), NativeKeyAction::Archive)));
+
+    let clash = BTreeMap::from([("archive".to_string(), "r".to_string())]);
+    assert_eq!(valid_key_overrides(&clash), BTreeMap::new());
+}
+
+#[test]
+fn key_overrides_survive_preference_round_trip() {
+    let mut preferences = NativePreferences::default();
+    preferences
+        .key_overrides
+        .insert("compose".to_string(), "ctrl-n".to_string());
+    assert_eq!(
+        parse_native_preferences(&serialize_native_preferences(&preferences)),
+        preferences
+    );
+}
+
+#[test]
+fn shortcut_help_shows_effective_keys() {
+    let help = shortcut_help_with(&BTreeMap::from([(
+        "compose".to_string(),
+        "ctrl-n".to_string(),
+    )]));
+    assert!(help.contains("ctrl-n"));
+    assert!(help.contains("g i"));
+    assert!(help.contains("v / m"));
+}
+
+#[test]
+fn goto_folder_prefers_the_current_account() {
+    let folder = |id: &str, account: &str, use_: &str| Folder {
+        account_id: account.to_string(),
+        special_use: Some(use_.to_string()),
+        ..self::folder(id, 0)
+    };
+    let mut state = NativeAppState::default();
+    state.folders_by_account.insert(
+        "a1".to_string(),
+        vec![
+            folder("a1-in", "a1", "inbox"),
+            folder("a1-sent", "a1", "sent"),
+        ],
+    );
+    state.folders_by_account.insert(
+        "a2".to_string(),
+        vec![
+            folder("a2-in", "a2", "inbox"),
+            folder("a2-sent", "a2", "sent"),
+        ],
+    );
+    state.selected_folder = Some("a2-in".to_string());
+    assert_eq!(goto_folder_id(&state, "sent").as_deref(), Some("a2-sent"));
+    state.selected_folder = None;
+    assert_eq!(goto_folder_id(&state, "inbox").as_deref(), Some("a1-in"));
+    assert_eq!(goto_folder_id(&state, "drafts"), None);
 }
 
 #[test]
@@ -491,6 +585,7 @@ fn native_preferences_parse_and_clamp_density() {
             },
             remote_image_allowlist: BTreeSet::new(),
             undo_window_secs: DEFAULT_UNDO_WINDOW_SECS,
+            key_overrides: BTreeMap::new(),
         }
     );
 }
@@ -521,6 +616,7 @@ fn native_preferences_round_trip_to_disk() {
         },
         remote_image_allowlist: BTreeSet::from(["alice@example.test".to_string()]),
         undo_window_secs: 12,
+        key_overrides: BTreeMap::from([("compose".to_string(), "ctrl-n".to_string())]),
     };
 
     write_native_preferences(&path, &preferences).expect("write preferences");

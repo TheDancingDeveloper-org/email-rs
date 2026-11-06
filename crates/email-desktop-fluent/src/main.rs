@@ -123,6 +123,7 @@ fn main() -> Result<()> {
     let preferences = load_native_preferences();
     preferences.apply_to_state(&mut initial_state);
     let initial_layout = initial_state.layout;
+    let key_overrides = valid_key_overrides(&initial_state.key_overrides);
 
     let fluent_app = FluentApp::new(native_window_title(&initial_state))
         .app_id(APP_ID)
@@ -136,7 +137,7 @@ fn main() -> Result<()> {
     };
 
     fluent_app.run(move |cx| {
-        cx.bind_keys(native_key_bindings());
+        cx.bind_keys(native_key_bindings_with(&key_overrides));
 
         let state_entity = cx.new(|_| initial_state.clone());
         let shutdown_state = state_entity.clone();

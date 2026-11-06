@@ -21,7 +21,11 @@ actions!(
         ToggleSelectedStar,
         ToggleSelectedRead,
         ToggleShortcutHelp,
-        CyclePaneFocus
+        CyclePaneFocus,
+        GoToInbox,
+        GoToSent,
+        GoToDrafts,
+        GoToArchive
     ]
 );
 
@@ -80,43 +84,210 @@ pub(crate) enum NativeKeyAction {
     MarkRead,
     Help,
     CyclePane,
+    GoInbox,
+    GoSent,
+    GoDrafts,
+    GoArchive,
 }
 
-pub(crate) const SHORTCUT_COVERAGE: &[(&str, &str, &str)] = &[
-    ("r", "Reply", "Gmail / Superhuman"),
-    ("a", "Archive", "Gmail / Superhuman"),
-    ("f", "Forward", "Gmail / Superhuman"),
-    ("c", "Compose", "Gmail / Superhuman"),
-    ("/", "Search", "Gmail / Superhuman"),
-    ("s", "Star", "Gmail"),
-    ("l", "Mark read", "Gmail / Superhuman"),
-    ("?", "Shortcut help", "Gmail / Superhuman"),
-    ("f6", "Cycle pane", "Superhuman"),
+/// One entry of the shortcut registry.  `action` is `None` for keys handled
+/// by the focused message list itself (listed in the help sheet, not rebindable).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NativeShortcut {
+    pub(crate) id: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) products: &'static str,
+    pub(crate) keystrokes: &'static [&'static str],
+    pub(crate) action: Option<NativeKeyAction>,
+}
+
+const fn shortcut(
+    id: &'static str,
+    label: &'static str,
+    products: &'static str,
+    keystrokes: &'static [&'static str],
+    action: Option<NativeKeyAction>,
+) -> NativeShortcut {
+    NativeShortcut {
+        id,
+        label,
+        products,
+        keystrokes,
+        action,
+    }
+}
+
+pub(crate) const NATIVE_SHORTCUTS: &[NativeShortcut] = &[
+    shortcut(
+        "palette",
+        "Command palette",
+        "Superhuman",
+        &["ctrl-k", "cmd-k"],
+        Some(NativeKeyAction::TogglePalette),
+    ),
+    shortcut(
+        "theme-light",
+        "Light theme",
+        "email-rs",
+        &["ctrl-shift-l"],
+        Some(NativeKeyAction::ApplyLightTheme),
+    ),
+    shortcut(
+        "theme-dark",
+        "Dark theme",
+        "email-rs",
+        &["ctrl-shift-d"],
+        Some(NativeKeyAction::ApplyDarkTheme),
+    ),
+    shortcut(
+        "density-up",
+        "Increase density",
+        "email-rs",
+        &["ctrl-plus"],
+        Some(NativeKeyAction::IncreaseDensity),
+    ),
+    shortcut(
+        "density-down",
+        "Decrease density",
+        "email-rs",
+        &["ctrl-minus"],
+        Some(NativeKeyAction::DecreaseDensity),
+    ),
+    shortcut(
+        "reply",
+        "Reply",
+        "Gmail / Superhuman",
+        &["r"],
+        Some(NativeKeyAction::Reply),
+    ),
+    shortcut(
+        "archive",
+        "Archive",
+        "Gmail / Superhuman",
+        &["a"],
+        Some(NativeKeyAction::Archive),
+    ),
+    shortcut(
+        "forward",
+        "Forward",
+        "Gmail / Superhuman",
+        &["f"],
+        Some(NativeKeyAction::Forward),
+    ),
+    shortcut(
+        "compose",
+        "Compose",
+        "Gmail / Superhuman",
+        &["c"],
+        Some(NativeKeyAction::Compose),
+    ),
+    shortcut(
+        "search",
+        "Search",
+        "Gmail / Superhuman",
+        &["/"],
+        Some(NativeKeyAction::Search),
+    ),
+    shortcut("star", "Star", "Gmail", &["s"], Some(NativeKeyAction::Star)),
+    shortcut(
+        "mark-read",
+        "Mark read",
+        "Gmail / Superhuman",
+        &["l"],
+        Some(NativeKeyAction::MarkRead),
+    ),
+    shortcut(
+        "help",
+        "Shortcut help",
+        "Gmail / Superhuman",
+        &["shift-?"],
+        Some(NativeKeyAction::Help),
+    ),
+    shortcut(
+        "cycle-pane",
+        "Cycle pane",
+        "Superhuman",
+        &["f6"],
+        Some(NativeKeyAction::CyclePane),
+    ),
+    shortcut(
+        "go-inbox",
+        "Go to Inbox",
+        "Gmail",
+        &["g i"],
+        Some(NativeKeyAction::GoInbox),
+    ),
+    shortcut(
+        "go-sent",
+        "Go to Sent",
+        "Gmail",
+        &["g t"],
+        Some(NativeKeyAction::GoSent),
+    ),
+    shortcut(
+        "go-drafts",
+        "Go to Drafts",
+        "Gmail",
+        &["g d"],
+        Some(NativeKeyAction::GoDrafts),
+    ),
+    shortcut(
+        "go-archive",
+        "Go to Archive",
+        "Gmail",
+        &["g a"],
+        Some(NativeKeyAction::GoArchive),
+    ),
+    shortcut(
+        "move-to",
+        "Move to... (message list)",
+        "Gmail",
+        &["v", "m"],
+        None,
+    ),
 ];
 
-pub(crate) fn native_key_binding_specs() -> &'static [(&'static str, NativeKeyAction)] {
-    &[
-        ("ctrl-k", NativeKeyAction::TogglePalette),
-        ("cmd-k", NativeKeyAction::TogglePalette),
-        ("ctrl-shift-l", NativeKeyAction::ApplyLightTheme),
-        ("ctrl-shift-d", NativeKeyAction::ApplyDarkTheme),
-        ("ctrl-plus", NativeKeyAction::IncreaseDensity),
-        ("ctrl-minus", NativeKeyAction::DecreaseDensity),
-        ("r", NativeKeyAction::Reply),
-        ("a", NativeKeyAction::Archive),
-        ("f", NativeKeyAction::Forward),
-        ("c", NativeKeyAction::Compose),
-        ("/", NativeKeyAction::Search),
-        ("s", NativeKeyAction::Star),
-        ("l", NativeKeyAction::MarkRead),
-        ("shift-?", NativeKeyAction::Help),
-        ("f6", NativeKeyAction::CyclePane),
-    ]
+pub(crate) fn native_key_action_by_id(id: &str) -> Option<&'static NativeShortcut> {
+    NATIVE_SHORTCUTS
+        .iter()
+        .find(|entry| entry.id == id && entry.action.is_some())
 }
 
-pub(crate) fn native_key_bindings() -> Vec<KeyBinding> {
-    native_key_binding_specs()
+/// Keystrokes in effect for `entry`: the user's override, else the defaults.
+pub(crate) fn effective_keystrokes(
+    entry: &NativeShortcut,
+    overrides: &BTreeMap<String, String>,
+) -> Vec<String> {
+    match overrides.get(entry.id) {
+        Some(keystroke) if entry.action.is_some() => vec![keystroke.clone()],
+        _ => entry.keystrokes.iter().map(|k| k.to_string()).collect(),
+    }
+}
+
+pub(crate) fn native_key_binding_specs_with(
+    overrides: &BTreeMap<String, String>,
+) -> Vec<(String, NativeKeyAction)> {
+    NATIVE_SHORTCUTS
         .iter()
+        .filter_map(|entry| entry.action.map(|action| (entry, action)))
+        .flat_map(|(entry, action)| {
+            effective_keystrokes(entry, overrides)
+                .into_iter()
+                .map(move |keystroke| (keystroke, action))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn native_key_binding_specs() -> Vec<(String, NativeKeyAction)> {
+    native_key_binding_specs_with(&BTreeMap::new())
+}
+
+pub(crate) fn native_key_bindings_with(overrides: &BTreeMap<String, String>) -> Vec<KeyBinding> {
+    // gpui wants `'static` keystrokes; these are built once at startup, so leak them.
+    native_key_binding_specs_with(overrides)
+        .into_iter()
+        .map(|(keystroke, action)| (&*Box::leak(keystroke.into_boxed_str()), action))
         .map(|(keystroke, action)| match action {
             NativeKeyAction::TogglePalette => KeyBinding::new(keystroke, TogglePalette, None),
             NativeKeyAction::ApplyLightTheme => KeyBinding::new(keystroke, ApplyLightTheme, None),
@@ -132,25 +303,80 @@ pub(crate) fn native_key_bindings() -> Vec<KeyBinding> {
             NativeKeyAction::MarkRead => KeyBinding::new(keystroke, ToggleSelectedRead, None),
             NativeKeyAction::Help => KeyBinding::new(keystroke, ToggleShortcutHelp, None),
             NativeKeyAction::CyclePane => KeyBinding::new(keystroke, CyclePaneFocus, None),
+            NativeKeyAction::GoInbox => KeyBinding::new(keystroke, GoToInbox, None),
+            NativeKeyAction::GoSent => KeyBinding::new(keystroke, GoToSent, None),
+            NativeKeyAction::GoDrafts => KeyBinding::new(keystroke, GoToDrafts, None),
+            NativeKeyAction::GoArchive => KeyBinding::new(keystroke, GoToArchive, None),
         })
         .collect()
 }
 
-#[allow(dead_code)]
-pub(crate) fn shortcut_conflicts() -> Vec<&'static str> {
+/// Keystrokes bound more than once under `overrides` (a rebinding collision).
+pub(crate) fn shortcut_conflicts_with(overrides: &BTreeMap<String, String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
-    native_key_binding_specs()
-        .iter()
-        .filter_map(|(key, _)| (!seen.insert(*key)).then_some(*key))
+    native_key_binding_specs_with(overrides)
+        .into_iter()
+        .filter_map(|(key, _)| (!seen.insert(key.clone())).then_some(key))
         .collect()
 }
 
-pub(crate) fn shortcut_help() -> String {
-    SHORTCUT_COVERAGE
+/// Drop overrides that would collide with another binding, so a bad settings
+/// line can never shadow a default shortcut.
+pub(crate) fn valid_key_overrides(
+    overrides: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut accepted = overrides.clone();
+    loop {
+        let conflicts = shortcut_conflicts_with(&accepted);
+        let offender = accepted
+            .iter()
+            .rev()
+            .find(|(_, keystroke)| conflicts.contains(keystroke))
+            .map(|(id, _)| id.clone());
+        match offender {
+            Some(id) => {
+                accepted.remove(&id);
+            }
+            None => return accepted,
+        }
+    }
+}
+
+pub(crate) fn shortcut_help_with(overrides: &BTreeMap<String, String>) -> String {
+    NATIVE_SHORTCUTS
         .iter()
-        .map(|(key, action, products)| format!("{key:>5}  {action:<16} {products}"))
+        .map(|entry| {
+            let keys = effective_keystrokes(entry, overrides)
+                .iter()
+                .map(|k| k.strip_prefix("shift-").unwrap_or(k).to_string())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            format!("{keys:>14}  {:<26} {}", entry.label, entry.products)
+        })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Folder to open for a go-to sequence: the `special_use` folder of the
+/// account that owns the current folder (else the first account that has one).
+pub(crate) fn goto_folder_id(state: &NativeAppState, special_use: &str) -> Option<String> {
+    let find = |folders: &Vec<Folder>| {
+        folders
+            .iter()
+            .find(|folder| folder.special_use.as_deref() == Some(special_use))
+            .map(|folder| folder.id.clone())
+    };
+    state
+        .selected_folder
+        .as_deref()
+        .and_then(|current| {
+            state
+                .folders_by_account
+                .values()
+                .find(|folders| folders.iter().any(|f| f.id == current))
+        })
+        .and_then(find)
+        .or_else(|| state.folders_by_account.values().find_map(find))
 }
 
 #[cfg(unix)]
