@@ -45,6 +45,21 @@ protection](ci.md). CI runs the Rust matrix in an explicitly named
 clean-checkout job and rejects manifests containing `../../../` path
 dependencies. A separate clean checkout builds the production server image.
 
+## Large-mailbox performance fixture
+
+`crates/email-server/src/imap/sync/perf_tests.rs` syncs a generated mailbox
+through the in-process mock IMAP server (email-rs #75). Messages are
+deterministic and generated lazily on fetch, so no data file is committed and
+the server holds no per-message state.
+
+- A 1k-message smoke test runs with the normal suite.
+- The 100k-message test is `#[ignore]`d. Run it in release mode to see the
+  initial and incremental sync timings:
+
+```bash
+cargo test -p email-server --release --lib imap::sync::perf_tests -- --ignored --nocapture
+```
+
 ## Optional local FluentGUI override
 
 Developers changing both repositories may create `.cargo/config.toml`, which is ignored by this repository:
