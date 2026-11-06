@@ -13,6 +13,7 @@ pub mod accounts;
 pub mod auth;
 pub mod calendar;
 pub mod compose;
+pub mod discovery;
 pub mod events;
 pub mod folders;
 pub mod identities;
@@ -31,6 +32,7 @@ pub mod webhooks;
 pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/accounts"),
     ("POST", "/accounts"),
+    ("POST", "/accounts/discover"),
     ("PATCH", "/accounts/{id}"),
     ("DELETE", "/accounts/{id}"),
     ("GET", "/accounts/{id}/settings"),
@@ -151,6 +153,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/accounts",
             get(accounts::list_accounts).post(accounts::create_account),
         )
+        .route("/accounts/discover", post(discovery::discover_account))
         .route(
             "/accounts/{id}",
             patch(accounts::update_account).delete(accounts::delete_account),
