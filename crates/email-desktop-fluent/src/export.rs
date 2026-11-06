@@ -230,6 +230,7 @@ mod tests {
             authentication_results: Default::default(),
             from_reply_to_domain_mismatch: false,
             display_name_spoofing: false,
+            list_unsubscribe: None,
             attachments: Vec::new(),
         };
         let out = print_html(&message).to_ascii_lowercase();
@@ -277,6 +278,7 @@ mod tests {
             authentication_results: Default::default(),
             from_reply_to_domain_mismatch: false,
             display_name_spoofing: false,
+            list_unsubscribe: None,
             attachments: Vec::new(),
         };
         let path =
@@ -359,6 +361,7 @@ mod tests {
             authentication_results: Default::default(),
             from_reply_to_domain_mismatch: false,
             display_name_spoofing: false,
+            list_unsubscribe: None,
             attachments: vec![],
         }
     }
