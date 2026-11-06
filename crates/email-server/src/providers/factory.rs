@@ -102,29 +102,13 @@ pub async fn provider_for_account(
         )));
     }
 
-    let raw_token = account
-        .oauth_token_json
-        .as_deref()
-        .ok_or_else(|| AppError::Auth("account has no OAuth token".to_string()))?;
-    let token: StoredToken = serde_json::from_str(raw_token)
-        .map_err(|error| AppError::Auth(format!("parse OAuth token: {error}")))?;
     if !matches!(account.provider_type.as_str(), "gmail" | "microsoft365") {
         return Err(AppError::Provider(format!(
             "unsupported provider {}",
             account.provider_type
         )));
     }
-    // Every IMAP connection the provider opens asks this source for a token,
-    // so a long sync refreshes mid-run instead of outliving its first token.
-    let tokens = Arc::new(AccessTokenSource::new(
-        account.id.clone(),
-        token,
-        Arc::new(DbTokenStore {
-            pool: pool.clone(),
-            account_id: account.id.clone(),
-            provider_type: account.provider_type.clone(),
-        }),
-    ));
+    let tokens = oauth_token_source(pool, &account)?;
     if account.provider_type == "gmail" {
         let mut provider = GmailProvider::new(account.id.clone(), account.email, tokens.clone());
         if super::gmail_history::gmail_api_sync_enabled() {
@@ -150,6 +134,31 @@ pub async fn provider_for_account(
         }
         Ok(Arc::new(provider))
     }
+}
+
+/// The shared token source for an OAuth account: hands out tokens that are not
+/// about to expire and refreshes through the account's persisted token.
+// Every IMAP connection the provider opens asks this source for a token,
+// so a long sync refreshes mid-run instead of outliving its first token.
+pub fn oauth_token_source(
+    pool: &SqlitePool,
+    account: &AccountConfig,
+) -> Result<Arc<AccessTokenSource>> {
+    let raw_token = account
+        .oauth_token_json
+        .as_deref()
+        .ok_or_else(|| AppError::Auth("account has no OAuth token".to_string()))?;
+    let token: StoredToken = serde_json::from_str(raw_token)
+        .map_err(|error| AppError::Auth(format!("parse OAuth token: {error}")))?;
+    Ok(Arc::new(AccessTokenSource::new(
+        account.id.clone(),
+        token,
+        Arc::new(DbTokenStore {
+            pool: pool.clone(),
+            account_id: account.id.clone(),
+            provider_type: account.provider_type.clone(),
+        }),
+    )))
 }
 
 /// The account's OAuth token as persisted in `accounts.oauth_token_json`.

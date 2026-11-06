@@ -13,6 +13,7 @@ use chrono::NaiveDate;
 use email_types::{VacationSettings, VacationStatus};
 
 use crate::{
+    auth::token_source::{with_fresh_token, AccessTokenSource},
     error::{AppError, Result},
     providers::{factory, gmail_settings},
     state::AppState,
@@ -54,6 +55,13 @@ fn validate(settings: &VacationSettings) -> Result<()> {
         return Err(AppError::Validation(format!(
             "subject is limited to {MAX_SUBJECT_CHARS} characters"
         )));
+    }
+    // The subject becomes a mail header line, so a line break would let the
+    // caller inject headers.
+    if settings.subject.chars().any(char::is_control) {
+        return Err(AppError::Validation(
+            "subject must not contain line breaks or other control characters".to_string(),
+        ));
     }
     if settings.body.chars().count() > MAX_BODY_CHARS {
         return Err(AppError::Validation(format!(
@@ -114,6 +122,21 @@ pub async fn get_vacation(
     }))
 }
 
+/// Send the settings to Gmail with a token that is not about to expire,
+/// refreshing and retrying once if Gmail answers 401.
+async fn apply_with_refresh(
+    tokens: &AccessTokenSource,
+    api_base: &str,
+    settings: &VacationSettings,
+) -> Result<()> {
+    with_fresh_token(
+        tokens,
+        gmail_settings::is_unauthorized,
+        |token| async move { gmail_settings::apply_vacation(api_base, &token, settings).await },
+    )
+    .await
+}
+
 pub async fn put_vacation(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -129,14 +152,8 @@ pub async fn put_vacation(
         ));
     }
     let config = factory::load_account_config(&state.pool, &id).await?;
-    let token: crate::auth::oauth2::StoredToken = serde_json::from_str(
-        config
-            .oauth_token_json
-            .as_deref()
-            .ok_or_else(|| AppError::Auth("account has no OAuth token".to_string()))?,
-    )
-    .map_err(|error| AppError::Auth(format!("parse OAuth token: {error}")))?;
-    gmail_settings::apply_vacation(&token.access_token, &settings).await?;
+    let tokens = factory::oauth_token_source(&state.pool, &config)?;
+    apply_with_refresh(&tokens, gmail_settings::GMAIL_API_BASE, &settings).await?;
     sqlx::query(
         r#"INSERT INTO account_vacation (account_id, enabled, subject, body, start_date, end_date, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
@@ -262,56 +279,120 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn gmail_accounts_apply_the_reply_to_gmail_then_store_it() {
+    /// Serve one canned HTTP response per entry, returning the raw requests.
+    fn serve(responses: Vec<&'static str>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        std::env::set_var(
-            "EMAIL_RS_GMAIL_API_BASE",
-            format!("http://{}", listener.local_addr().unwrap()),
-        );
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 2048];
-            loop {
-                let n = stream.read(&mut chunk).unwrap();
-                buf.extend_from_slice(&chunk[..n]);
-                if String::from_utf8_lossy(&buf).contains("enableAutoReply") || n == 0 {
-                    break;
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 2048];
+                loop {
+                    let n = stream.read(&mut chunk).unwrap();
+                    buf.extend_from_slice(&chunk[..n]);
+                    if String::from_utf8_lossy(&buf).contains("enableAutoReply") || n == 0 {
+                        break;
+                    }
                 }
+                stream.write_all(response.as_bytes()).unwrap();
+                requests.push(String::from_utf8_lossy(&buf).to_string());
             }
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-                .unwrap();
-            String::from_utf8_lossy(&buf).to_string()
+            requests
         });
+        (base, handle)
+    }
+
+    const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+    const UNAUTHORIZED: &str =
+        "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+    const FORBIDDEN: &str =
+        "HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+
+    fn settings() -> VacationSettings {
+        serde_json::from_value(away()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn control_characters_in_the_subject_are_rejected() {
         let state = setup().await;
-        let token = serde_json::json!({
-            "access_token": "tok-123",
-            "refresh_token": "r",
-            "expires_at": chrono::Utc::now().timestamp() + 3600
-        })
-        .to_string();
-        seed(&state, "g1", "gmail", "oauth2", Some(&token)).await;
+        seed(&state, "a1", "gmail", "oauth2", None).await;
+        for subject in [
+            "Away\r\nBcc: x@example.com",
+            "Away\nnow",
+            "Away\r",
+            "A\u{0}b",
+            "A\tb",
+        ] {
+            let body = serde_json::json!({"enabled": false, "subject": subject});
+            let (status, response) = call(&state, "PUT", "/accounts/a1/vacation", Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{subject:?}: {response}");
+        }
+    }
 
-        let (status, body) = call(&state, "PUT", "/accounts/g1/vacation", Some(away())).await;
-        std::env::remove_var("EMAIL_RS_GMAIL_API_BASE");
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["supported"], true);
-        let request = server.join().unwrap();
-        assert!(
-            request.starts_with("PUT /gmail/v1/users/me/settings/vacation "),
-            "{request}"
-        );
-        assert!(
-            request.to_ascii_lowercase().contains("bearer tok-123"),
-            "{request}"
-        );
+    #[tokio::test]
+    async fn an_expired_stored_token_is_refreshed_before_the_settings_call() {
+        use crate::auth::token_source::testing::{FakeClock, FakeOAuth};
+        let clock = FakeClock::new(1_000_000);
+        let oauth = FakeOAuth::new(clock.clone(), 3600);
+        let tokens = oauth.source("acct-vacation-expired");
+        clock.advance(7200); // token-0 is now expired
+        let (base, server) = serve(vec![OK]);
 
-        let (status, body) = call(&state, "GET", "/accounts/g1/vacation", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["supported"], true);
-        assert_eq!(body["settings"]["subject"], "Away");
-        assert_eq!(body["settings"]["endDate"], "2026-12-31");
+        apply_with_refresh(&tokens, &base, &settings())
+            .await
+            .unwrap();
+
+        let requests = server.join().unwrap();
+        assert_eq!(oauth.refresh_count(), 1);
+        assert_eq!(requests.len(), 1);
+        let request = requests[0].to_ascii_lowercase();
+        assert!(request.contains("bearer token-1"), "{request}");
+        assert!(!request.contains("token-0"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn a_401_refreshes_the_token_and_retries_once() {
+        use crate::auth::token_source::testing::{FakeClock, FakeOAuth};
+        let oauth = FakeOAuth::new(FakeClock::new(1_000_000), 3600);
+        let tokens = oauth.source("acct-vacation-401");
+        let (base, server) = serve(vec![UNAUTHORIZED, OK]);
+
+        apply_with_refresh(&tokens, &base, &settings())
+            .await
+            .unwrap();
+
+        let requests = server.join().unwrap();
+        assert_eq!(oauth.refresh_count(), 1);
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].to_ascii_lowercase().contains("bearer token-0"));
+        assert!(requests[1].to_ascii_lowercase().contains("bearer token-1"));
+    }
+
+    #[tokio::test]
+    async fn a_second_401_reports_a_reconnect_and_a_403_is_not_retried() {
+        use crate::auth::token_source::testing::{FakeClock, FakeOAuth};
+        let oauth = FakeOAuth::new(FakeClock::new(1_000_000), 3600);
+        let tokens = oauth.source("acct-vacation-401x2");
+        let (base, server) = serve(vec![UNAUTHORIZED, UNAUTHORIZED]);
+        let error = apply_with_refresh(&tokens, &base, &settings())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, AppError::Auth(ref m) if m.contains("reconnect")),
+            "{error}"
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
+
+        let oauth = FakeOAuth::new(FakeClock::new(1_000_000), 3600);
+        let tokens = oauth.source("acct-vacation-403");
+        let (base, server) = serve(vec![FORBIDDEN]);
+        let error = apply_with_refresh(&tokens, &base, &settings())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Auth(_)));
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert_eq!(oauth.refresh_count(), 0);
     }
 }

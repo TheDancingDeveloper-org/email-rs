@@ -7,11 +7,16 @@ use serde_json::json;
 
 use crate::error::{AppError, Result};
 
-const GMAIL_API_BASE: &str = "https://gmail.googleapis.com";
+/// The only host the bearer token is ever sent to. Tests pass their own base
+/// to [`apply_vacation`]; there is no runtime override.
+pub const GMAIL_API_BASE: &str = "https://gmail.googleapis.com";
 
-/// Test seam: point the settings call at a local server.
-fn api_base() -> String {
-    std::env::var("EMAIL_RS_GMAIL_API_BASE").unwrap_or_else(|_| GMAIL_API_BASE.to_string())
+const UNAUTHORIZED: &str = "Gmail settings: unauthorized";
+
+/// Gmail answered 401: the access token was rejected (as opposed to a 403
+/// permission failure, which a refresh cannot fix).
+pub fn is_unauthorized(error: &AppError) -> bool {
+    matches!(error, AppError::Auth(message) if message.starts_with(UNAUTHORIZED))
 }
 
 fn midnight_utc_millis(date: NaiveDate) -> i64 {
@@ -46,11 +51,15 @@ pub(crate) fn vacation_request_body(settings: &VacationSettings) -> serde_json::
 }
 
 /// Apply the vacation responder to the signed-in Gmail account.
-pub async fn apply_vacation(access_token: &str, settings: &VacationSettings) -> Result<()> {
+pub async fn apply_vacation(
+    api_base: &str,
+    access_token: &str,
+    settings: &VacationSettings,
+) -> Result<()> {
     let response = reqwest::Client::new()
         .put(format!(
             "{}/gmail/v1/users/me/settings/vacation",
-            api_base().trim_end_matches('/')
+            api_base.trim_end_matches('/')
         ))
         .bearer_auth(access_token)
         .json(&vacation_request_body(settings))
@@ -64,7 +73,7 @@ pub async fn apply_vacation(access_token: &str, settings: &VacationSettings) -> 
     let detail = response.text().await.unwrap_or_default();
     let detail: String = detail.chars().take(300).collect();
     Err(match status.as_u16() {
-        401 => AppError::Auth(format!("Gmail settings: unauthorized — {detail}")),
+        401 => AppError::Auth(format!("{UNAUTHORIZED} — {detail}")),
         403 => AppError::Auth(format!(
             "Gmail settings: permission denied; reconnect the account — {detail}"
         )),
