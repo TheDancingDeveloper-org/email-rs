@@ -10,7 +10,7 @@ use email_types::{
     UpdateAccount, UpdateLabelBody, UpdateWebhook,
 };
 use reqwest::{Method, StatusCode, Url};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::sync::{OnceLock, RwLock};
 use thiserror::Error;
 
@@ -32,6 +32,55 @@ fn default_bearer_token() -> Option<String> {
 }
 
 pub type Result<T> = std::result::Result<T, EmailClientError>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MailEndpoint {
+    pub host: String,
+    pub port: u16,
+    pub security: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCandidate {
+    pub provider_type: String,
+    pub imap: MailEndpoint,
+    pub smtp: MailEndpoint,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryResponse {
+    pub email: String,
+    pub domain: String,
+    pub candidates: Vec<AccountCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Invitation {
+    pub message_id: String,
+    pub method: String,
+    pub uid: String,
+    pub sequence: Option<i64>,
+    pub summary: Option<String>,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub start_at: String,
+    pub end_at: String,
+    pub organizer: Option<String>,
+    pub attendees: Vec<InvitationAttendee>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationAttendee {
+    pub email: String,
+    pub name: Option<String>,
+    pub response_status: Option<String>,
+}
 
 #[derive(Debug, Error)]
 pub enum EmailClientError {
@@ -259,6 +308,33 @@ impl EmailClient {
 
     pub async fn create_account(&self, body: &CreateAccount) -> Result<Account> {
         self.json(Method::POST, "accounts", body).await
+    }
+
+    pub async fn discover_account(&self, email: &str) -> Result<DiscoveryResponse> {
+        self.json(
+            Method::POST,
+            "accounts/discover",
+            &serde_json::json!({ "email": email }),
+        )
+        .await
+    }
+
+    pub async fn get_invitation(&self, message_id: &str) -> Result<Invitation> {
+        self.get(&format!("messages/{message_id}/invitation"), &[])
+            .await
+    }
+
+    pub async fn rsvp_invitation(
+        &self,
+        message_id: &str,
+        response_status: &str,
+    ) -> Result<serde_json::Value> {
+        self.json(
+            Method::POST,
+            &format!("messages/{message_id}/invitation/rsvp"),
+            &serde_json::json!({ "responseStatus": response_status }),
+        )
+        .await
     }
 
     pub async fn update_account(&self, id: &str, body: &UpdateAccount) -> Result<Account> {
