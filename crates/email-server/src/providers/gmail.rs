@@ -708,6 +708,18 @@ impl MailProvider for GmailProvider {
         moved
     }
 
+    async fn copy_message(
+        &self,
+        src_folder: &str,
+        uid: u32,
+        dest_folder: &str,
+    ) -> Result<MovedMessage> {
+        let mut session = self.connect().await?;
+        let copied = super::imap_move::copy_uid(&mut session, src_folder, uid, dest_folder).await;
+        let _ = session.logout().await;
+        copied
+    }
+
     async fn set_flagged(&self, folder: &str, uid: u32, flagged: bool) -> Result<()> {
         let mut session = self.connect().await?;
         session

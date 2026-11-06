@@ -221,6 +221,10 @@ pub(crate) enum NativeMessageMutation {
         /// Each message's folder before the move: id -> folder id.
         source_folders: BTreeMap<String, String>,
     },
+    CopyToFolder {
+        message_ids: Vec<String>,
+        folder_id: String,
+    },
     /// Move messages back after a completed move (the undo of `MoveToFolder`).
     UndoMove {
         moves: Vec<MovedRef>,
@@ -235,7 +239,9 @@ impl NativeMessageMutation {
             | Self::SetRead { message_id, .. }
             | Self::SetFlagged { message_id, .. }
             | Self::Snooze { message_id, .. } => message_id,
-            Self::AddLabels { message_ids, .. } | Self::MoveToFolder { message_ids, .. } => {
+            Self::AddLabels { message_ids, .. }
+            | Self::MoveToFolder { message_ids, .. }
+            | Self::CopyToFolder { message_ids, .. } => {
                 message_ids.first().map(String::as_str).unwrap_or_default()
             }
             Self::UndoMove { moves } => moves
@@ -260,6 +266,7 @@ impl NativeMessageMutation {
             Self::Snooze { .. } => "snooze message",
             Self::AddLabels { .. } => "apply label",
             Self::MoveToFolder { .. } => "move message to folder",
+            Self::CopyToFolder { .. } => "copy message to folder",
             Self::UndoMove { .. } => "undo move",
         }
     }
@@ -608,6 +615,7 @@ pub(crate) fn start_message_mutation_and_refresh(
             | NativeMessageMutation::Delete { .. }
             | NativeMessageMutation::AddLabels { .. }
             | NativeMessageMutation::MoveToFolder { .. }
+            | NativeMessageMutation::CopyToFolder { .. }
     ) {
         let previous = state_entity.update(app_cx, |state, cx| {
             let previous = replace_pending_undo(
@@ -1061,6 +1069,19 @@ pub(crate) fn mutate_message_and_refresh(
                     })
                     .collect();
                 move_summary = Some(move_each(&client, items, false).await);
+            }
+            NativeMessageMutation::CopyToFolder {
+                message_ids,
+                folder_id,
+            } => {
+                for message_id in message_ids {
+                    client
+                        .copy_message(message_id, folder_id)
+                        .await
+                        .with_context(|| {
+                            format!("copy message {message_id} to folder {folder_id}")
+                        })?;
+                }
             }
             NativeMessageMutation::UndoMove { moves } => {
                 let items = moves
