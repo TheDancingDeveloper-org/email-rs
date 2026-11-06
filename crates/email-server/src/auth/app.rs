@@ -609,7 +609,9 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
     }
     if *method == Method::GET
         && path.starts_with("/messages/")
-        && (path.matches('/').count() == 2 || path.contains("/attachments"))
+        && (path.matches('/').count() == 2
+            || path.contains("/attachments")
+            || path.ends_with("/source"))
     {
         return Some("mail.body.read");
     }
@@ -1351,6 +1353,38 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // `GET /messages/{id}/source` needs `mail.body.read`: a metadata-only
+        // token is denied, a body-read token passes the scope check.
+        let (status, _, denied) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::GET,
+            "/messages/msg-1/source",
+            None,
+            &[("authorization", &limited_authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(denied["error"].as_str().unwrap().contains("mail.body.read"));
+        let (_, _, body_reader) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::POST,
+            "/integration-tokens",
+            Some(serde_json::json!({"name": "body reader", "scopes": ["mail.body.read"]})),
+            &[("authorization", &user_authorization)],
+        )
+        .await;
+        let body_authorization = format!("Bearer {}", body_reader["token"].as_str().unwrap());
+        let (status, _, _) = send(
+            crate::api::router(Arc::clone(&state)),
+            Method::GET,
+            "/messages/msg-1/source",
+            None,
+            &[("authorization", &body_authorization)],
+        )
+        .await;
+        assert_ne!(status, StatusCode::FORBIDDEN);
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
 
         let (status, _, _) = send(
             crate::api::router(Arc::clone(&state)),
