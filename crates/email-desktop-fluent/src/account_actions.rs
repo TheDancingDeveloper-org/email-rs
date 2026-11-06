@@ -159,6 +159,7 @@ pub(crate) fn start_account_setup_create(
                 smtp_port: modal.smtp_port_input.read(app_cx).text().to_string(),
                 smtp_password: modal.smtp_password_input.read(app_cx).text().to_string(),
                 same_password: modal.same_password,
+                imap_use_ssl: modal.imap_use_ssl,
             },
             modal.is_busy(),
         )
@@ -274,31 +275,7 @@ pub(crate) fn start_account_discovery(
                 modal_entity.update(&mut async_cx, |modal, cx| {
                     modal.discovering = false;
                     match result {
-                        Ok(response) => {
-                            if let Some(candidate) = response.candidates.first() {
-                                modal.imap_host_input.update(cx, |input, cx| {
-                                    input.set_value(&candidate.imap.host, cx)
-                                });
-                                modal.imap_port_input.update(cx, |input, cx| {
-                                    input.set_value(candidate.imap.port.to_string(), cx)
-                                });
-                                modal.smtp_host_input.update(cx, |input, cx| {
-                                    input.set_value(&candidate.smtp.host, cx)
-                                });
-                                modal.smtp_port_input.update(cx, |input, cx| {
-                                    input.set_value(candidate.smtp.port.to_string(), cx)
-                                });
-                                modal.status = Some((
-                                    format!("Found settings via {}.", candidate.source),
-                                    true,
-                                ));
-                            } else {
-                                modal.status = Some((
-                                    "No mail settings were found; enter them manually.".into(),
-                                    false,
-                                ));
-                            }
-                        }
+                        Ok(response) => apply_account_discovery(modal, &response, cx),
                         Err(error) => {
                             modal.status = Some((format!("Discovery failed: {error}"), false))
                         }
@@ -663,12 +640,19 @@ pub(crate) fn build_manual_account_request(
         oauth_token_json: None,
         host: Some(imap_host),
         port: Some(imap_port),
-        use_ssl: None,
+        use_ssl: draft.imap_use_ssl,
         password: Some(imap_password),
         smtp_host: Some(smtp_host),
         smtp_port: Some(smtp_port),
         smtp_password: Some(smtp_password),
     })
+}
+
+pub(crate) fn discovered_imap_security(security: &str) -> Option<bool> {
+    match security.trim().to_ascii_lowercase().as_str() {
+        "tls" | "ssl" | "implicit_tls" | "implicit-tls" => Some(true),
+        _ => None,
+    }
 }
 
 pub(crate) fn build_microsoft_app_password_request(
@@ -753,4 +737,119 @@ pub(crate) fn parse_account_setup_port(
         return Err(format!("{label} port must be between 1 and 65535."));
     }
     Ok(port)
+}
+
+fn apply_account_discovery(
+    modal: &mut AccountSetupModal,
+    response: &email_client::DiscoveryResponse,
+    cx: &mut Context<AccountSetupModal>,
+) {
+    if let Some(candidate) = response.candidates.iter().find(|candidate| {
+        discovered_imap_security(&candidate.imap.security).is_some()
+            && discovered_imap_security(&candidate.smtp.security).is_some()
+    }) {
+        modal.imap_use_ssl = Some(true);
+        modal
+            .imap_host_input
+            .update(cx, |input, cx| input.set_value(&candidate.imap.host, cx));
+        modal.imap_port_input.update(cx, |input, cx| {
+            input.set_value(candidate.imap.port.to_string(), cx)
+        });
+        modal
+            .smtp_host_input
+            .update(cx, |input, cx| input.set_value(&candidate.smtp.host, cx));
+        modal.smtp_port_input.update(cx, |input, cx| {
+            input.set_value(candidate.smtp.port.to_string(), cx)
+        });
+        modal.status = Some((format!("Found settings via {}.", candidate.source), true));
+    } else {
+        modal.imap_use_ssl = None;
+        modal.status = Some((
+            if response.candidates.is_empty() {
+                "No mail settings were found; enter them manually.".into()
+            } else {
+                "Discovery found only STARTTLS or unencrypted settings, which aren't supported; enter details manually.".into()
+            },
+            false,
+        ));
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use email_client::{AccountCandidate, DiscoveryResponse, MailEndpoint};
+
+    #[gpui::test]
+    fn discovery_fills_only_implicit_tls_candidates(cx: &mut gpui::TestAppContext) {
+        fluent_test_utils::init_fluent_test(cx);
+        let state = cx.new(|_| NativeAppState::default());
+        let modal = cx.new(|cx| AccountSetupModal::new(cx, state));
+        let candidate = |security: &str| AccountCandidate {
+            provider_type: "imap".into(),
+            imap: MailEndpoint {
+                host: "imap.example.test".into(),
+                port: 993,
+                security: security.into(),
+            },
+            smtp: MailEndpoint {
+                host: "smtp.example.test".into(),
+                port: 465,
+                security: security.into(),
+            },
+            source: "test".into(),
+        };
+        for security in ["starttls", "plain", "ssl"] {
+            modal.update(cx, |modal, cx| {
+                let response = DiscoveryResponse {
+                    email: "me@example.test".into(),
+                    domain: "example.test".into(),
+                    candidates: vec![candidate(security)],
+                };
+                apply_account_discovery(modal, &response, cx);
+                let filled = security == "ssl";
+                assert_eq!(
+                    modal.imap_host_input.read(cx).text(),
+                    if filled { "imap.example.test" } else { "" }
+                );
+                assert_eq!(
+                    modal.smtp_host_input.read(cx).text(),
+                    if filled { "smtp.example.test" } else { "" }
+                );
+                assert_eq!(
+                    modal.imap_port_input.read(cx).text(),
+                    if filled { "993" } else { "" }
+                );
+                assert_eq!(
+                    modal.smtp_port_input.read(cx).text(),
+                    if filled { "465" } else { "" }
+                );
+                assert_eq!(modal.imap_use_ssl, filled.then_some(true));
+                let (message, success) = modal.status.as_ref().unwrap();
+                assert_eq!(*success, filled);
+                if !filled {
+                    assert!(message.contains("aren't supported"));
+                }
+            });
+        }
+        modal.update(cx, |modal, cx| {
+            let mut incompatible = candidate("ssl");
+            incompatible.smtp.security = "starttls".into();
+            let mut compatible = candidate("ssl");
+            compatible.imap.host = "compatible.example.test".into();
+            apply_account_discovery(
+                modal,
+                &DiscoveryResponse {
+                    email: "me@example.test".into(),
+                    domain: "example.test".into(),
+                    candidates: vec![candidate("plain"), incompatible, compatible],
+                },
+                cx,
+            );
+            assert_eq!(
+                modal.imap_host_input.read(cx).text(),
+                "compatible.example.test"
+            );
+        });
+    }
 }

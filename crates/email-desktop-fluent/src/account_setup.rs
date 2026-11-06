@@ -44,6 +44,7 @@ pub(crate) struct AccountSetupFormDraft {
     pub(crate) smtp_port: String,
     pub(crate) smtp_password: String,
     pub(crate) same_password: bool,
+    pub(crate) imap_use_ssl: Option<bool>,
 }
 
 pub(crate) struct AccountSetupModal {
@@ -60,6 +61,7 @@ pub(crate) struct AccountSetupModal {
     pub(crate) smtp_port_input: Entity<TextInput>,
     pub(crate) smtp_password_input: Entity<TextInput>,
     pub(crate) same_password: bool,
+    pub(crate) imap_use_ssl: Option<bool>,
     pub(crate) submitting: bool,
     pub(crate) discovering: bool,
     pub(crate) refreshing: bool,
@@ -87,6 +89,7 @@ impl AccountSetupModal {
             smtp_password_input: cx
                 .new(|_| TextInput::new().placeholder("SMTP password").masked(true)),
             same_password: true,
+            imap_use_ssl: None,
             submitting: false,
             discovering: false,
             refreshing: false,
@@ -102,6 +105,7 @@ impl AccountSetupModal {
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.mode = AccountSetupMode::Choice;
         self.same_password = true;
+        self.imap_use_ssl = None;
         self.submitting = false;
         self.discovering = false;
         self.refreshing = false;
