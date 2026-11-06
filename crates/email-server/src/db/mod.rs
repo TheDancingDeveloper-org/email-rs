@@ -468,7 +468,18 @@ fn migrations() -> Vec<Migration> {
             name: "calendar_invitations",
             apply: in_transaction!(run_calendar_invitations_migration),
         },
+        Migration {
+            version: 28,
+            name: "account_sync_health",
+            apply: in_transaction!(run_account_sync_health_migration),
+        },
     ]
+}
+
+async fn run_account_sync_health_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query("CREATE TABLE IF NOT EXISTS account_sync_health (account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, last_success_at TEXT, last_error_at TEXT, last_error TEXT)")
+        .execute(&mut *conn).await?;
+    Ok(())
 }
 
 async fn run_calendar_invitations_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
