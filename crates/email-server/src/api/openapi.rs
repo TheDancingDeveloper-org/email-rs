@@ -281,7 +281,7 @@ fn doc_get_message() {}
     security(("bearerAuth" = ["mail.body.read"])),
     params(("id" = String, Path, description = "Mailbox occurrence ID")),
     responses(
-        (status = 200, content_type = "application/octet-stream", body = Vec<u8>),
+        (status = 200, content_type = "message/rfc822", body = Vec<u8>),
         (status = 404, body = ErrorResponse)
     )
 )]
