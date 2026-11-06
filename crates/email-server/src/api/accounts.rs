@@ -255,8 +255,8 @@ mod tests {
         .fetch_one(&state.pool)
         .await
         .unwrap();
-        assert!(stored.0.starts_with("encv1:"));
-        assert!(stored.1.starts_with("encv1:"));
+        assert!(stored.0.starts_with("encv2:"));
+        assert!(stored.1.starts_with("encv2:"));
         assert_eq!(crate::credentials::open(&stored.0).unwrap(), "imap-secret");
         assert_eq!(crate::credentials::open(&stored.1).unwrap(), "smtp-secret");
     }

@@ -7,8 +7,15 @@ Provider secrets require `EMAIL_RS_CREDENTIAL_KEY`, a stable base64-encoded
 IMAP/SMTP passwords are encrypted with AES-256-GCM before SQLite writes.
 Existing plaintext rows are migrated at startup. Store and back up the key in
 secrets management; losing it makes provider credentials unrecoverable.
-Existing plaintext rows are migrated at startup. Store and back up the key in
-secrets management; losing it makes provider credentials unrecoverable.
+
+Each envelope (`encv2:`) records the id of the key that sealed it
+(`EMAIL_RS_CREDENTIAL_KEY_ID`, 0-255, default `1`). To rotate: generate a new
+key, set it as `EMAIL_RS_CREDENTIAL_KEY` with a new `EMAIL_RS_CREDENTIAL_KEY_ID`,
+and list the old one in `EMAIL_RS_CREDENTIAL_PREVIOUS_KEYS` as
+`<old-id>:<old-base64-key>` (comma-separated for several). Restart: startup
+re-seals every account credential and webhook secret, including legacy
+`encv1:` envelopes, with the current key. After that restart succeeds the
+previous key can be removed.
 
 ## Data at rest
 

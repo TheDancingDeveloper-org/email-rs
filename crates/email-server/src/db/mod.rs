@@ -638,8 +638,7 @@ async fn run_webhook_secret_migration(conn: &mut SqliteConnection) -> anyhow::Re
         let Some(secret) = secret else {
             continue;
         };
-        let sealed = crate::credentials::seal(&secret).map_err(anyhow::Error::msg)?;
-        if sealed != secret {
+        if let Some(sealed) = crate::credentials::reseal(&secret).map_err(anyhow::Error::msg)? {
             sqlx::query("UPDATE webhooks SET secret = ? WHERE id = ?")
                 .bind(sealed)
                 .bind(id)

@@ -83,6 +83,8 @@ All configuration is via environment variables (`.env` or `docker-compose.yml`).
 | `EMAIL_RS_BOOTSTRAP_USERNAME` | Initial single-user login name | `admin` |
 | `EMAIL_RS_BOOTSTRAP_PASSWORD` | Initial password secret (12+ characters; used only when no app user exists) | — |
 | `EMAIL_RS_CREDENTIAL_KEY` | Stable base64-encoded 32-byte AES key for provider credentials | — |
+| `EMAIL_RS_CREDENTIAL_KEY_ID` | Key id (0-255) recorded in each sealed credential | `1` |
+| `EMAIL_RS_CREDENTIAL_PREVIOUS_KEYS` | Comma-separated `<id>:<base64-key>` keys kept during a rotation | — |
 | `EMAIL_RS_PUBLIC_URL` | Required HTTPS URL for a non-loopback deployment | — |
 | `EMAIL_RS_ALLOWED_ORIGINS` | Comma-separated Capacitor/development origins allowed by CORS | — |
 | `EMAIL_RS_SESSION_TTL_SECS` | Browser/desktop cookie lifetime | `43200` (12 hours) |
@@ -249,7 +251,9 @@ OAuth token JSON and IMAP/SMTP passwords are stored as randomized AES-256-GCM
 envelopes. Generate `EMAIL_RS_CREDENTIAL_KEY` once with
 `openssl rand -base64 32`, keep it in secrets management, and back it up
 separately from SQLite. Startup migrates legacy plaintext credential rows in
-place and fails closed if credential rows exist but the key is missing or wrong.
+place, re-seals values written with a previous key, and fails closed if
+credential rows exist but no configured key opens them. See
+`docs/deployment-security.md` for key rotation.
 
 Integration events are persisted before delivery. Webhook payloads contain a
 top-level `id`, `event`, `timestamp`, `accountId`, and `data`; failed deliveries
