@@ -161,6 +161,7 @@ docker run -d \
   -e EMAIL_RS_BOOTSTRAP_USERNAME=admin \
   -e EMAIL_RS_BOOTSTRAP_PASSWORD=... \
   -e EMAIL_RS_PUBLIC_URL=https://mail.example.com \
+  -e EMAIL_RS_CREDENTIAL_KEY=... \
   -e GOOGLE_CLIENT_ID=... \
   -e GOOGLE_CLIENT_SECRET=... \
   -e MICROSOFT_CLIENT_ID=... \
@@ -170,6 +171,10 @@ docker run -d \
   -p 127.0.0.1:3000:3000 \
   email-rs
 ```
+
+Keep `EMAIL_RS_CREDENTIAL_KEY` stable and back it up securely. It encrypts
+provider credentials and must be preserved when replacing or restoring the
+production database.
 
 Put Caddy or another TLS reverse proxy in front of the loopback-published
 container port. Non-loopback production deployments must set
