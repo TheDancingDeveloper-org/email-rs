@@ -99,6 +99,14 @@ pub(crate) fn parse_native_preferences(raw: &str) -> NativePreferences {
                     preferences.undo_window_secs = clamp_undo_window(secs);
                 }
             }
+            "mark_read_delay_secs" => {
+                if let Ok(secs) = value.trim().parse::<u8>() {
+                    preferences.mark_read_delay_secs = clamp_mark_read_delay(secs);
+                }
+            }
+            "reply_all_default" => preferences.reply_all_default = parse_bool(value),
+            "conversation_view" => preferences.conversation_view = parse_bool(value),
+            "notifications_enabled" => preferences.notifications_enabled = parse_bool(value),
             other => {
                 if let Some(id) = other.strip_prefix("key.") {
                     let keystroke = value.trim();
@@ -116,7 +124,7 @@ pub(crate) fn parse_native_preferences(raw: &str) -> NativePreferences {
 
 pub(crate) fn serialize_native_preferences(preferences: &NativePreferences) -> String {
     let mut out = format!(
-        "theme={}\ndensity={}\nemail_sidebar_w={}\nemail_msglist_w={}\nremote_image_allowlist={}\nundo_window_secs={}\n",
+        "theme={}\ndensity={}\nemail_sidebar_w={}\nemail_msglist_w={}\nremote_image_allowlist={}\nundo_window_secs={}\nmark_read_delay_secs={}\nreply_all_default={}\nconversation_view={}\nnotifications_enabled={}\n",
         preferences.theme.as_str(),
         preferences.density_level.min(8),
         preferences.layout.sidebar_width,
@@ -127,7 +135,11 @@ pub(crate) fn serialize_native_preferences(preferences: &NativePreferences) -> S
             .cloned()
             .collect::<Vec<_>>()
             .join(","),
-        clamp_undo_window(preferences.undo_window_secs)
+        clamp_undo_window(preferences.undo_window_secs),
+        clamp_mark_read_delay(preferences.mark_read_delay_secs),
+        preferences.reply_all_default,
+        preferences.conversation_view,
+        preferences.notifications_enabled
     );
     for (id, keystroke) in &preferences.key_overrides {
         out.push_str(&format!("key.{id}={keystroke}\n"));
@@ -138,6 +150,22 @@ pub(crate) fn serialize_native_preferences(preferences: &NativePreferences) -> S
 pub(crate) const DEFAULT_UNDO_WINDOW_SECS: u8 = 5;
 pub(crate) const MIN_UNDO_WINDOW_SECS: u8 = 1;
 pub(crate) const MAX_UNDO_WINDOW_SECS: u8 = 30;
+pub(crate) const DEFAULT_MARK_READ_DELAY_SECS: u8 = 0;
+pub(crate) const MAX_MARK_READ_DELAY_SECS: u8 = 30;
+pub(crate) const DEFAULT_REPLY_ALL_DEFAULT: bool = false;
+pub(crate) const DEFAULT_CONVERSATION_VIEW: bool = true;
+pub(crate) const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
+
+pub(crate) fn clamp_mark_read_delay(secs: u8) -> u8 {
+    secs.min(MAX_MARK_READ_DELAY_SECS)
+}
+
+fn parse_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
 
 pub(crate) fn clamp_undo_window(secs: u8) -> u8 {
     secs.clamp(MIN_UNDO_WINDOW_SECS, MAX_UNDO_WINDOW_SECS)
@@ -164,6 +192,21 @@ pub(crate) fn adjust_undo_window(
         if let Err(err) = save_native_preferences(&preferences) {
             tracing::warn!("failed to save undo window: {err:#}");
         }
+    }
+}
+
+pub(crate) fn update_native_preferences(
+    state_entity: &Entity<NativeAppState>,
+    app_cx: &mut App,
+    update: impl FnOnce(&mut NativeAppState),
+) {
+    let preferences = state_entity.update(app_cx, |state, cx| {
+        update(state);
+        cx.notify();
+        NativePreferences::from_state(state)
+    });
+    if let Err(err) = save_native_preferences(&preferences) {
+        tracing::warn!("failed to save native preferences: {err:#}");
     }
 }
 
