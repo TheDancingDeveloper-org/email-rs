@@ -106,6 +106,7 @@ fn test_folder(id: &str, unread: i64) -> Folder {
         total_count: unread.max(0) + 5,
         synced_at: None,
         is_excluded: false,
+        is_subscribed: true,
     }
 }
 
