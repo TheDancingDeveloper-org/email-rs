@@ -49,6 +49,7 @@ fn folder(id: &str, name: &str, unread: i64) -> Folder {
         name: name.into(),
         full_path: name.into(),
         special_use: None,
+        delimiter: None,
         unread_count: unread,
         total_count: 2,
         synced_at: None,
