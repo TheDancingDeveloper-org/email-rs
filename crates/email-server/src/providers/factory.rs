@@ -70,9 +70,14 @@ pub async fn provider_for_account(
     let account = load_account_config(pool, account_id).await?;
 
     #[cfg(test)]
-    if matches!(account.provider_type.as_str(), "test" | "test_fail") {
+    if matches!(
+        account.provider_type.as_str(),
+        "test" | "test_fail" | "test_offline" | "test_flaky"
+    ) {
         return Ok(Arc::new(TestMailProvider {
             fail: account.provider_type == "test_fail",
+            offline: account.provider_type == "test_offline",
+            flaky: account.provider_type == "test_flaky",
         }));
     }
 
@@ -227,6 +232,10 @@ async fn refresh_oauth_token(
 #[cfg(test)]
 struct TestMailProvider {
     fail: bool,
+    /// Every connection attempt and mutation fails as unreachable.
+    offline: bool,
+    /// Mutations on UID 13 fail as unreachable; every other UID succeeds.
+    flaky: bool,
 }
 
 /// Folder operations the `test` provider has been asked to perform, in order.
@@ -236,6 +245,14 @@ pub(crate) static TEST_FOLDER_CALLS: std::sync::Mutex<Vec<String>> =
 
 #[cfg(test)]
 impl TestMailProvider {
+    fn mutation_for(&self, call: String, uid: u32) -> Result<()> {
+        TEST_FOLDER_CALLS.lock().unwrap().push(call);
+        if self.offline || (self.flaky && uid == 13) {
+            return Err(AppError::Transient("injected network failure".into()));
+        }
+        self.mutation()
+    }
+
     fn mutation(&self) -> Result<()> {
         if self.fail {
             Err(AppError::Provider(
@@ -294,6 +311,18 @@ impl MailProvider for TestMailProvider {
         Ok(Vec::new())
     }
 
+    async fn check_connection(&self) -> Result<()> {
+        TEST_FOLDER_CALLS
+            .lock()
+            .unwrap()
+            .push("check_connection".to_string());
+        if self.offline {
+            Err(AppError::Transient("injected network failure".into()))
+        } else {
+            Ok(())
+        }
+    }
+
     async fn folder_uid_validity(&self, _folder: &str) -> Result<Option<u32>> {
         Ok(Some(1))
     }
@@ -342,12 +371,12 @@ impl MailProvider for TestMailProvider {
         self.mutation()
     }
 
-    async fn delete_message(&self, _folder: &str, _uid: u32) -> Result<()> {
-        self.mutation()
+    async fn delete_message(&self, folder: &str, uid: u32) -> Result<()> {
+        self.mutation_for(format!("delete {folder} {uid}"), uid)
     }
 
-    async fn move_message(&self, _src: &str, uid: u32, _dest: &str) -> Result<super::MovedMessage> {
-        self.mutation()?;
+    async fn move_message(&self, src: &str, uid: u32, dest: &str) -> Result<super::MovedMessage> {
+        self.mutation_for(format!("move {src} {uid} {dest}"), uid)?;
         // Stand-in for the server's COPYUID: a distinct, predictable UID.
         Ok(super::MovedMessage {
             uid: Some(uid + 1000),
@@ -359,8 +388,8 @@ impl MailProvider for TestMailProvider {
         self.move_message(src, uid, dest).await
     }
 
-    async fn set_flagged(&self, _folder: &str, _uid: u32, _flagged: bool) -> Result<()> {
-        self.mutation()
+    async fn set_flagged(&self, folder: &str, uid: u32, flagged: bool) -> Result<()> {
+        self.mutation_for(format!("flag {folder} {uid} {flagged}"), uid)
     }
 
     async fn append_draft(

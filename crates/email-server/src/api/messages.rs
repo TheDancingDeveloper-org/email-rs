@@ -130,17 +130,27 @@ async fn message_account_id(pool: &sqlx::SqlitePool, message_id: &str) -> Result
         .map_err(Into::into)
 }
 
-async fn queue_if_transient(
+/// Run a remote mutation, or queue `action` instead. While the account has
+/// queued actions a new one goes behind them, so the server sees mutations in
+/// the order they were made; a transient failure queues it too. Returns the
+/// result when it ran and `None` when it was queued.
+async fn run_or_queue<T>(
     pool: &sqlx::SqlitePool,
     account_id: &str,
     action: crate::queue::Action,
-    error: AppError,
-) -> Result<bool> {
-    if crate::queue::is_transient(&error) {
+    op: impl std::future::Future<Output = Result<T>>,
+) -> Result<Option<T>> {
+    if crate::queue::pending_count(pool, account_id).await? > 0 {
         crate::queue::enqueue(pool, account_id, &action).await?;
-        Ok(true)
-    } else {
-        Err(error)
+        return Ok(None);
+    }
+    match op.await {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.is_transient() => {
+            crate::queue::enqueue(pool, account_id, &action).await?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -263,19 +273,17 @@ pub async fn patch_message(
     if let Some(is_flagged) = req.is_flagged {
         let account_id = message_account_id(&state.pool, &message_id).await?;
         let (folder, uid, provider) = load_provider(&state, &message_id).await?;
-        if let Err(error) = provider.set_flagged(&folder, uid, is_flagged).await {
-            queue_if_transient(
-                &state.pool,
-                &account_id,
-                crate::queue::Action::Flag {
-                    folder,
-                    uid,
-                    flagged: is_flagged,
-                },
-                error,
-            )
-            .await?;
-        }
+        run_or_queue(
+            &state.pool,
+            &account_id,
+            crate::queue::Action::Flag {
+                folder: folder.clone(),
+                uid,
+                flagged: is_flagged,
+            },
+            provider.set_flagged(&folder, uid, is_flagged),
+        )
+        .await?;
         sqlx::query("UPDATE messages SET is_flagged = ? WHERE id = ?")
             .bind(is_flagged)
             .bind(&message_id)
@@ -301,42 +309,33 @@ pub async fn delete_message(
     let (source, uid, provider) = load_provider(&state, &message_id).await?;
     let trash: Option<String> = sqlx::query_scalar("SELECT f.full_path FROM folders f JOIN messages m ON m.account_id = f.account_id WHERE m.id = ? AND f.special_use = 'trash' LIMIT 1")
         .bind(&message_id).fetch_optional(&state.pool).await?;
-    let queued = match trash {
+    match trash {
         Some(destination) if destination != source => {
-            match provider.move_message(&source, uid, &destination).await {
-                Ok(_) => false,
-                Err(error) => {
-                    queue_if_transient(
-                        &state.pool,
-                        &account_id,
-                        crate::queue::Action::Move {
-                            folder: source.clone(),
-                            uid,
-                            destination,
-                        },
-                        error,
-                    )
-                    .await?
-                }
-            }
+            run_or_queue(
+                &state.pool,
+                &account_id,
+                crate::queue::Action::Move {
+                    folder: source.clone(),
+                    uid,
+                    destination: destination.clone(),
+                },
+                provider.move_message(&source, uid, &destination),
+            )
+            .await?;
         }
-        _ => match provider.delete_message(&source, uid).await {
-            Ok(()) => false,
-            Err(error) => {
-                queue_if_transient(
-                    &state.pool,
-                    &account_id,
-                    crate::queue::Action::Delete {
-                        folder: source.clone(),
-                        uid,
-                    },
-                    error,
-                )
-                .await?
-            }
-        },
-    };
-    let _ = queued;
+        _ => {
+            run_or_queue(
+                &state.pool,
+                &account_id,
+                crate::queue::Action::Delete {
+                    folder: source.clone(),
+                    uid,
+                },
+                provider.delete_message(&source, uid),
+            )
+            .await?;
+        }
+    }
 
     // Remove from local DB immediately.
     sqlx::query("DELETE FROM messages WHERE id = ?")
@@ -382,19 +381,17 @@ pub async fn archive_message(
         }
     };
     let account_id = message_account_id(&state.pool, &message_id).await?;
-    if let Err(error) = provider.move_message(&source, uid, &destination).await {
-        queue_if_transient(
-            &state.pool,
-            &account_id,
-            crate::queue::Action::Move {
-                folder: source.clone(),
-                uid,
-                destination: destination.clone(),
-            },
-            error,
-        )
-        .await?;
-    }
+    run_or_queue(
+        &state.pool,
+        &account_id,
+        crate::queue::Action::Move {
+            folder: source.clone(),
+            uid,
+            destination: destination.clone(),
+        },
+        provider.move_message(&source, uid, &destination),
+    )
+    .await?;
     sqlx::query("DELETE FROM messages WHERE id = ?")
         .bind(&message_id)
         .execute(&state.pool)
@@ -460,20 +457,20 @@ async fn transfer_message(
     let moved = if copy {
         provider.copy_message(&source, uid, &destination).await?
     } else {
-        match provider.move_message(&source, uid, &destination).await {
-            Ok(moved) => moved,
-            Err(error) => {
-                queue_if_transient(
-                    &state.pool,
-                    &account_id,
-                    crate::queue::Action::Move {
-                        folder: source.clone(),
-                        uid,
-                        destination: destination.clone(),
-                    },
-                    error,
-                )
-                .await?;
+        let queued = run_or_queue(
+            &state.pool,
+            &account_id,
+            crate::queue::Action::Move {
+                folder: source.clone(),
+                uid,
+                destination: destination.clone(),
+            },
+            provider.move_message(&source, uid, &destination),
+        )
+        .await?;
+        match queued {
+            Some(moved) => moved,
+            None => {
                 // Optimistically remove the source occurrence. The next sync
                 // discovers the destination and restores its metadata.
                 record_moved_message(
@@ -2783,5 +2780,105 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 4);
         assert!(rows.iter().all(|(_, read, flagged)| !read && !flagged));
+    }
+
+    async fn queue_rows(pool: &SqlitePool, account_id: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT action FROM imap_action_queue WHERE account_id = ? ORDER BY id")
+            .bind(account_id)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn account_of_type(pool: &SqlitePool, id: &str, provider_type: &str) {
+        seed_account(pool, id).await;
+        sqlx::query("UPDATE accounts SET provider_type = ? WHERE id = ?")
+            .bind(provider_type)
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        seed_folder(pool, &format!("{id}-inbox"), id, Some("inbox")).await;
+    }
+
+    #[tokio::test]
+    async fn transient_failure_queues_the_action_and_still_commits_locally() {
+        let state = setup().await;
+        account_of_type(&state.pool, "q-offline", "test_offline").await;
+        seed_message(&state.pool, "q-off-msg", "q-offline", "q-offline-inbox").await;
+
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "PATCH",
+            "/messages/q-off-msg",
+            Some(serde_json::json!({"isFlagged": true})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let rows = queue_rows(&state.pool, "q-offline").await;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains("\"kind\":\"flag\""), "{}", rows[0]);
+        let flagged: bool =
+            sqlx::query_scalar("SELECT is_flagged FROM messages WHERE id = 'q-off-msg'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert!(flagged);
+    }
+
+    #[tokio::test]
+    async fn online_actions_queue_behind_pending_ones_instead_of_overtaking() {
+        let state = setup().await;
+        account_of_type(&state.pool, "q-behind", "test").await;
+        seed_folder(&state.pool, "q-behind-archive", "q-behind", Some("archive")).await;
+        for id in ["b-flag", "b-del", "b-arch", "b-move"] {
+            seed_message(&state.pool, id, "q-behind", "q-behind-inbox").await;
+        }
+        crate::queue::enqueue(
+            &state.pool,
+            "q-behind",
+            &crate::queue::Action::Delete {
+                folder: "q-behind-inbox".into(),
+                uid: 900,
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = [
+            (
+                "PATCH",
+                "/messages/b-flag",
+                Some(serde_json::json!({"isFlagged": true})),
+            ),
+            ("DELETE", "/messages/b-del", None),
+            ("POST", "/messages/b-arch/archive", None),
+            (
+                "POST",
+                "/messages/b-move/move",
+                Some(serde_json::json!({"folderId": "q-behind-archive"})),
+            ),
+        ];
+        for (method, uri, body) in requests {
+            let (status, _) = req(crate::api::router(Arc::clone(&state)), method, uri, body).await;
+            assert_eq!(status, StatusCode::OK, "{method} {uri}");
+        }
+
+        // The provider is online, yet nothing reached it: all four wait their turn.
+        let rows = queue_rows(&state.pool, "q-behind").await;
+        assert_eq!(rows.len(), 5);
+        assert!(rows[0].contains("900"));
+        let kinds: Vec<_> = ["flag", "delete", "move", "move"]
+            .iter()
+            .zip(&rows[1..])
+            .map(|(kind, row)| row.contains(&format!("\"kind\":\"{kind}\"")))
+            .collect();
+        assert_eq!(kinds, [true; 4], "{rows:?}");
+        assert!(crate::providers::factory::TEST_FOLDER_CALLS
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| !call.contains("q-behind")));
     }
 }

@@ -45,11 +45,23 @@ pub enum AppError {
     #[error("IMAP error: {0}")]
     Imap(String),
 
+    /// The provider could not be reached or the connection dropped; retrying
+    /// later may succeed. Mutations that hit this are queued for replay.
+    #[error("provider unreachable: {0}")]
+    Transient(String),
+
     #[error("SMTP error: {0}")]
     Smtp(String),
 
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
+}
+
+impl AppError {
+    /// True when the failure is a connectivity problem, not a rejection.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, AppError::Transient(_))
+    }
 }
 
 impl IntoResponse for AppError {
@@ -66,6 +78,7 @@ impl IntoResponse for AppError {
             AppError::Unsupported(msg) => (StatusCode::NOT_IMPLEMENTED, msg, None),
             AppError::Imap(msg) => (StatusCode::BAD_GATEWAY, msg, None),
             AppError::Smtp(msg) => (StatusCode::BAD_GATEWAY, msg, None),
+            AppError::Transient(msg) => (StatusCode::BAD_GATEWAY, msg, None),
             AppError::Internal(error) => internal_error_response("internal", &error),
         };
 

@@ -137,6 +137,11 @@ pub trait MailProvider: Send + Sync {
     }
     async fn list_folders(&self) -> Result<Vec<Folder>>;
     /// Return the mailbox UIDVALIDITY value used to scope IMAP UIDs.
+    /// Open and close a session, so callers can tell an unreachable provider
+    /// from a failing operation. Fails with `AppError::Transient` when offline.
+    async fn check_connection(&self) -> Result<()> {
+        Ok(())
+    }
     async fn folder_uid_validity(&self, folder: &str) -> Result<Option<u32>>;
     async fn fetch_messages(
         &self,

@@ -52,7 +52,7 @@ impl GenericImapProvider {
     ) -> Result<async_imap::Session<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>> {
         tokio::time::timeout(std::time::Duration::from_secs(30), self.connect_inner())
             .await
-            .map_err(|_| AppError::Imap("IMAP connection timed out after 30s".to_string()))?
+            .map_err(|_| AppError::Transient("IMAP connection timed out after 30s".to_string()))?
     }
 
     async fn connect_inner(
@@ -74,7 +74,7 @@ impl GenericImapProvider {
 
         let tcp = tokio::net::TcpStream::connect((self.imap_host.as_str(), self.imap_port))
             .await
-            .map_err(|e| AppError::Imap(format!("TCP connect failed: {}", e)))?;
+            .map_err(|e| AppError::Transient(format!("TCP connect failed: {}", e)))?;
 
         let domain = rustls::pki_types::ServerName::try_from(self.imap_host.as_str())
             .map_err(|e| AppError::Imap(format!("invalid hostname: {}", e)))?
@@ -89,7 +89,7 @@ impl GenericImapProvider {
         client
             .read_response()
             .await
-            .ok_or_else(|| AppError::Imap("IMAP server closed during greeting".to_string()))?
+            .ok_or_else(|| AppError::Transient("IMAP server closed during greeting".to_string()))?
             .map_err(|e| AppError::Imap(format!("IMAP greeting read error: {}", e)))?;
 
         let session = client
@@ -251,12 +251,18 @@ impl MailProvider for GenericImapProvider {
         Ok(folders)
     }
 
+    async fn check_connection(&self) -> Result<()> {
+        let mut session = self.connect().await?;
+        let _ = session.logout().await;
+        Ok(())
+    }
+
     async fn folder_uid_validity(&self, folder: &str) -> Result<Option<u32>> {
         let mut session = self.connect().await?;
         let mailbox = session
             .select(folder)
             .await
-            .map_err(|e| AppError::Imap(format!("SELECT failed: {}", e)))?;
+            .map_err(|e| super::imap_move::imap_command_error("SELECT", e))?;
         let uid_validity = mailbox.uid_validity;
         let _ = session.logout().await;
         Ok(uid_validity)
@@ -652,7 +658,7 @@ impl MailProvider for GenericImapProvider {
         session
             .select(folder)
             .await
-            .map_err(|e| AppError::Imap(format!("SELECT failed: {}", e)))?;
+            .map_err(|e| super::imap_move::imap_command_error("SELECT", e))?;
         let flag_cmd = if flagged {
             "+FLAGS (\\Flagged)"
         } else {
@@ -661,7 +667,7 @@ impl MailProvider for GenericImapProvider {
         let stream = session
             .uid_store(uid.to_string(), flag_cmd)
             .await
-            .map_err(|e| AppError::Imap(format!("UID STORE failed: {}", e)))?;
+            .map_err(|e| super::imap_move::imap_command_error("UID STORE", e))?;
         super::drain_imap_stream(stream, "UID STORE").await?;
         let _ = session.logout().await;
         Ok(())
