@@ -520,7 +520,15 @@ fn start_draft_autosave(state_entity: &Entity<NativeAppState>, app_cx: &mut App)
                 let result = task.await;
                 let continue_saving = state_entity.update(&mut async_cx, |state, cx| {
                     if !autosave_reply_is_current(&state.compose, revision, session_generation) {
-                        state.compose.autosaving = false;
+                        if let Some(orphan) = orphaned_draft_id(&state.compose, &result) {
+                            let base_url = state.api_base_url.clone();
+                            cx.background_executor()
+                                .spawn(async move { delete_draft(base_url, orphan) })
+                                .detach();
+                        }
+                        if state.compose.session_generation == session_generation {
+                            state.compose.autosaving = false;
+                        }
                         return false;
                     }
                     state.compose.autosaving = false;
@@ -577,7 +585,15 @@ fn start_draft_autosave_async(state_entity: &Entity<NativeAppState>, app_cx: &mu
                 let result = task.await;
                 let continue_saving = state_entity.update(&mut async_cx, |state, cx| {
                     if !autosave_reply_is_current(&state.compose, revision, session_generation) {
-                        state.compose.autosaving = false;
+                        if let Some(orphan) = orphaned_draft_id(&state.compose, &result) {
+                            let base_url = state.api_base_url.clone();
+                            cx.background_executor()
+                                .spawn(async move { delete_draft(base_url, orphan) })
+                                .detach();
+                        }
+                        if state.compose.session_generation == session_generation {
+                            state.compose.autosaving = false;
+                        }
                         return false;
                     }
                     state.compose.autosaving = false;
@@ -1061,6 +1077,13 @@ fn autosave_reply_is_current(
     compose.open && compose.revision == revision && compose.session_generation == session_generation
 }
 
+/// A stale autosave reply that created a draft the current compose does not
+/// own (send or discard ended its session first) must be deleted.
+fn orphaned_draft_id(compose: &ComposeState, result: &Result<DraftResponse>) -> Option<String> {
+    let response = result.as_ref().ok()?;
+    (compose.draft_id.as_deref() != Some(response.id.as_str())).then(|| response.id.clone())
+}
+
 fn autosave_can_start(autosaving: bool) -> bool {
     !autosaving
 }
@@ -1538,6 +1561,33 @@ mod tests {
 
         state.compose.session_generation = 8;
         assert!(!autosave_reply_is_current(&state.compose, 3, 7));
+    }
+
+    #[test]
+    fn stale_create_reply_after_send_or_discard_is_deleted() {
+        let created = |id: &str| {
+            Ok(DraftResponse {
+                id: id.into(),
+                occurrence_id: "o".into(),
+                logical_id: "l".into(),
+                message_id: "m".into(),
+                status: "draft".into(),
+            })
+        };
+        let mut state = open_compose(vec![]);
+        // Session ended in send/discard while the first create was in flight:
+        // no draft is owned, so the created one is an orphan.
+        state.compose.draft_id = None;
+        assert_eq!(
+            orphaned_draft_id(&state.compose, &created("d1")).as_deref(),
+            Some("d1")
+        );
+        // A reply for the draft the compose already owns is not an orphan.
+        state.compose.draft_id = Some("d1".into());
+        assert_eq!(orphaned_draft_id(&state.compose, &created("d1")), None);
+        // Failed saves create nothing to delete.
+        let failed: Result<DraftResponse> = Err(anyhow::anyhow!("boom"));
+        assert_eq!(orphaned_draft_id(&state.compose, &failed), None);
     }
 
     #[test]
