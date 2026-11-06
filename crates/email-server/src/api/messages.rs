@@ -425,6 +425,75 @@ pub async fn copy_message(
     transfer_message(state, message_id, body, true).await
 }
 
+/// The account's folder with the given special use, as seen from a message.
+async fn account_special_folder(
+    pool: &sqlx::SqlitePool,
+    message_id: &str,
+    special_use: &str,
+) -> Result<Option<String>> {
+    sqlx::query_scalar(
+        r#"SELECT f.id FROM folders f
+           JOIN messages m ON m.account_id = f.account_id
+           WHERE m.id = ? AND f.special_use = ? ORDER BY f.full_path LIMIT 1"#,
+    )
+    .bind(message_id)
+    .bind(special_use)
+    .fetch_optional(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Report a message as spam: move it to the account's Junk/Spam folder
+/// (IMAP `\Junk`, Gmail `[Gmail]/Spam`) through the ordinary move path, so it
+/// is queued while the server is offline.
+pub async fn report_spam(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<MoveMessageResponse>> {
+    ensure_message_exists(&state.pool, &message_id).await?;
+    let spam = account_special_folder(&state.pool, &message_id, "spam")
+        .await?
+        .ok_or_else(|| AppError::Unsupported("account has no Junk/Spam folder".to_string()))?;
+    transfer_message(
+        state,
+        message_id,
+        MoveMessageRequest { folder_id: spam },
+        false,
+    )
+    .await
+}
+
+/// Undo [`report_spam`]: move a message out of the Junk/Spam folder back to
+/// the inbox.
+pub async fn report_not_spam(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<MoveMessageResponse>> {
+    ensure_message_exists(&state.pool, &message_id).await?;
+    let spam = account_special_folder(&state.pool, &message_id, "spam")
+        .await?
+        .ok_or_else(|| AppError::Unsupported("account has no Junk/Spam folder".to_string()))?;
+    if message_folder_id(&state.pool, &message_id)
+        .await?
+        .as_deref()
+        != Some(spam.as_str())
+    {
+        return Err(AppError::Validation(
+            "message is not in the Junk/Spam folder".to_string(),
+        ));
+    }
+    let inbox = account_special_folder(&state.pool, &message_id, "inbox")
+        .await?
+        .ok_or_else(|| AppError::Unsupported("account has no inbox folder".to_string()))?;
+    transfer_message(
+        state,
+        message_id,
+        MoveMessageRequest { folder_id: inbox },
+        false,
+    )
+    .await
+}
+
 async fn transfer_message(
     state: Arc<AppState>,
     message_id: String,
@@ -2407,6 +2476,101 @@ mod tests {
         assert_eq!(folder, "fld-projects");
         assert_eq!(subject.as_deref(), Some("Subject of move-msg"));
         assert_eq!(folder_counts(&state.pool, "fld-projects").await.1, 1);
+    }
+
+    #[tokio::test]
+    async fn report_spam_moves_to_the_spam_folder_and_not_spam_moves_back_to_the_inbox() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld-inbox", "acc1", Some("inbox")).await;
+        seed_folder(&state.pool, "fld-spam", "acc1", Some("spam")).await;
+        seed_message(&state.pool, "m1", "acc1", "fld-inbox").await;
+
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/m1/not-spam",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/m1/spam",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "moved");
+        let junk_id = body["messageId"].as_str().expect("messageId").to_string();
+        assert_eq!(folder_counts(&state.pool, "fld-spam").await.1, 1);
+        assert_eq!(folder_counts(&state.pool, "fld-inbox").await.1, 0);
+
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            &format!("/messages/{junk_id}/not-spam"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(folder_counts(&state.pool, "fld-spam").await.1, 0);
+        assert_eq!(folder_counts(&state.pool, "fld-inbox").await.1, 1);
+    }
+
+    #[tokio::test]
+    async fn report_spam_without_a_spam_folder_is_unsupported() {
+        let state = setup().await;
+        seed_account(&state.pool, "acc1").await;
+        seed_folder(&state.pool, "fld-inbox", "acc1", Some("inbox")).await;
+        seed_message(&state.pool, "m1", "acc1", "fld-inbox").await;
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/m1/spam",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/missing/spam",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn report_spam_while_offline_queues_the_move() {
+        let state = setup().await;
+        sqlx::query(
+            "INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('acc1','T','t@example.com','test_offline','test')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        seed_folder(&state.pool, "fld-inbox", "acc1", Some("inbox")).await;
+        seed_folder(&state.pool, "fld-spam", "acc1", Some("spam")).await;
+        seed_message(&state.pool, "m1", "acc1", "fld-inbox").await;
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/messages/m1/spam",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "queued");
+        assert_eq!(
+            crate::queue::pending_count(&state.pool, "acc1")
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]

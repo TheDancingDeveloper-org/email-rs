@@ -1555,6 +1555,81 @@ mod tests {
     }
 
     #[test]
+    fn spam_actions_need_mail_modify_and_vacation_writes_stay_closed() {
+        for path in ["/messages/m1/spam", "/messages/m1/not-spam"] {
+            assert_eq!(
+                required_integration_scope(&Method::POST, path),
+                Some("mail.modify"),
+                "{path}"
+            );
+            assert_eq!(
+                required_integration_scope(&Method::GET, path),
+                None,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            required_integration_scope(&Method::GET, "/accounts/a1/vacation"),
+            Some("mail.accounts.read")
+        );
+        // An auto-reply writes outbound mail on the user's behalf: no scope.
+        assert_eq!(
+            required_integration_scope(&Method::PUT, "/accounts/a1/vacation"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn spam_and_vacation_routes_enforce_integration_scopes() {
+        let state = setup().await;
+        seed_user(&state).await;
+        let (_, login) = login_as(&state, ClientKind::Bearer).await;
+        let user_authorization = format!("Bearer {}", login["token"].as_str().unwrap());
+        let mut tokens = Vec::new();
+        for scope in ["mail.metadata.read", "mail.modify", "mail.accounts.read"] {
+            let (_, _, created) = send(
+                crate::api::router(Arc::clone(&state)),
+                Method::POST,
+                "/integration-tokens",
+                Some(serde_json::json!({"name": scope, "scopes": [scope]})),
+                &[("authorization", &user_authorization)],
+            )
+            .await;
+            tokens.push(format!("Bearer {}", created["token"].as_str().unwrap()));
+        }
+        let attempt = |method: Method, uri: &'static str, token: usize| {
+            let state = Arc::clone(&state);
+            let authorization = tokens[token].clone();
+            async move {
+                send(
+                    crate::api::router(state),
+                    method,
+                    uri,
+                    Some(serde_json::json!({"enabled": false})),
+                    &[("authorization", &authorization)],
+                )
+                .await
+                .0
+            }
+        };
+        // Spam: the wrong scope is refused at the gate; mail.modify reaches the handler.
+        for uri in ["/messages/missing/spam", "/messages/missing/not-spam"] {
+            assert_eq!(attempt(Method::POST, uri, 0).await, StatusCode::FORBIDDEN);
+            assert_eq!(attempt(Method::POST, uri, 1).await, StatusCode::NOT_FOUND);
+        }
+        // Vacation: reading needs mail.accounts.read; no integration scope may write.
+        let read = "/accounts/missing/vacation";
+        assert_eq!(attempt(Method::GET, read, 1).await, StatusCode::FORBIDDEN);
+        assert_eq!(attempt(Method::GET, read, 2).await, StatusCode::NOT_FOUND);
+        for token in 0..3 {
+            assert_eq!(
+                attempt(Method::PUT, read, token).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+
+    #[test]
     fn folder_management_routes_need_mail_modify_and_creation_stays_closed() {
         for (method, path) in [
             (Method::POST, "/folders/f1/rename"),

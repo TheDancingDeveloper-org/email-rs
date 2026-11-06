@@ -80,6 +80,8 @@ from .update_identity import UpdateIdentity
 from .update_label_body import UpdateLabelBody
 from .update_rule_body import UpdateRuleBody
 from .update_webhook import UpdateWebhook
+from .vacation_settings import VacationSettings
+from .vacation_status import VacationStatus
 from .version_response import VersionResponse
 from .webhook import Webhook
 from .webhook_delivery import WebhookDelivery
@@ -165,6 +167,8 @@ __all__ = (
     "UpdateLabelBody",
     "UpdateRuleBody",
     "UpdateWebhook",
+    "VacationSettings",
+    "VacationStatus",
     "VersionResponse",
     "Webhook",
     "WebhookDelivery",
