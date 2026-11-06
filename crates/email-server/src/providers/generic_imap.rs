@@ -241,6 +241,7 @@ impl MailProvider for GenericImapProvider {
                 name: display,
                 full_path,
                 special_use,
+                delimiter: name.delimiter().map(|delimiter| delimiter.to_string()),
                 unread_count: 0,
                 total_count: 0,
             });

@@ -46,20 +46,9 @@ fn validate_folder_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// A folder the user may not rename or delete: INBOX and special-use folders.
-fn ensure_not_protected(folder: &FolderRow, action: &str) -> Result<()> {
-    if folder.full_path.eq_ignore_ascii_case("inbox") || folder.special_use.is_some() {
-        return Err(AppError::Validation(format!(
-            "cannot {action} {}: it is INBOX or a special-use folder",
-            folder.name
-        )));
-    }
-    Ok(())
-}
-
 async fn load_folder(state: &AppState, folder_id: &str) -> Result<FolderRow> {
     sqlx::query_as::<_, FolderRow>(
-        r#"SELECT id, account_id, name, full_path, special_use,
+        r#"SELECT id, account_id, name, full_path, special_use, delimiter,
                   unread_count, total_count, synced_at, is_excluded, is_subscribed
            FROM folders WHERE id = ?"#,
     )
@@ -80,6 +69,36 @@ async fn path_taken(state: &AppState, account_id: &str, full_path: &str) -> Resu
         > 0)
 }
 
+fn folder_separator(folder: &FolderRow) -> char {
+    folder
+        .delimiter
+        .as_deref()
+        .and_then(|value| value.chars().next())
+        .unwrap_or(FOLDER_SEPARATOR)
+}
+
+async fn ensure_not_protected(folder: &FolderRow, action: &str, state: &AppState) -> Result<()> {
+    let separator = folder_separator(folder);
+    let descendant_prefix = format!("{}{separator}", folder.full_path);
+    let protects_special_use: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM folders WHERE account_id = ? AND special_use IS NOT NULL AND full_path LIKE ?)",
+    )
+    .bind(&folder.account_id)
+    .bind(format!("{descendant_prefix}%"))
+    .fetch_one(&state.pool)
+    .await?;
+    if folder.full_path.eq_ignore_ascii_case("inbox")
+        || folder.special_use.is_some()
+        || protects_special_use
+    {
+        return Err(AppError::Validation(format!(
+            "cannot {action} {}: it is INBOX, a special-use folder, or contains one",
+            folder.name
+        )));
+    }
+    Ok(())
+}
+
 pub async fn create_folder(
     State(state): State<Arc<AppState>>,
     Path(account_id): Path<String>,
@@ -92,7 +111,8 @@ pub async fn create_folder(
             if parent.account_id != account_id {
                 return Err(AppError::NotFound(format!("folder {parent_id} not found")));
             }
-            format!("{}{FOLDER_SEPARATOR}{}", parent.full_path, body.name)
+            let separator = folder_separator(&parent);
+            format!("{}{}{}", parent.full_path, separator, body.name)
         }
         None => body.name.clone(),
     };
@@ -125,7 +145,7 @@ pub async fn create_folder(
     .execute(&state.pool)
     .await?;
     let folder = sqlx::query_as::<_, FolderRow>(
-        r#"SELECT id, account_id, name, full_path, special_use,
+        r#"SELECT id, account_id, name, full_path, special_use, delimiter,
                   unread_count, total_count, synced_at, is_excluded, is_subscribed
            FROM folders WHERE account_id = ? AND full_path = ?"#,
     )
@@ -143,9 +163,10 @@ pub async fn rename_folder(
 ) -> Result<Json<FolderRow>> {
     validate_folder_name(&body.name)?;
     let folder = load_folder(&state, &folder_id).await?;
-    ensure_not_protected(&folder, "rename")?;
-    let new_path = match folder.full_path.rsplit_once(FOLDER_SEPARATOR) {
-        Some((parent, _)) => format!("{parent}{FOLDER_SEPARATOR}{}", body.name),
+    ensure_not_protected(&folder, "rename", &state).await?;
+    let separator = folder_separator(&folder);
+    let new_path = match folder.full_path.rsplit_once(separator) {
+        Some((parent, _)) => format!("{parent}{separator}{}", body.name),
         None => body.name.clone(),
     };
     if new_path.len() > MAX_FOLDER_PATH_LEN {
@@ -165,13 +186,13 @@ pub async fn rename_folder(
 
     // The server renames the whole subtree, so the mirror does too. Messages
     // reference folders by id and follow along.
-    let old_prefix = format!("{}{FOLDER_SEPARATOR}", folder.full_path);
+    let old_prefix = format!("{}{separator}", folder.full_path);
     let mut tx = crate::db::begin_write(&state.pool).await?;
     sqlx::query(
         "UPDATE folders SET full_path = ? || substr(full_path, ?)
          WHERE account_id = ? AND substr(full_path, 1, ?) = ?",
     )
-    .bind(format!("{new_path}{FOLDER_SEPARATOR}"))
+    .bind(format!("{new_path}{separator}"))
     .bind(old_prefix.chars().count() as i64 + 1)
     .bind(&folder.account_id)
     .bind(old_prefix.chars().count() as i64)
@@ -193,7 +214,7 @@ pub async fn delete_folder(
     Path(folder_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
     let folder = load_folder(&state, &folder_id).await?;
-    ensure_not_protected(&folder, "delete")?;
+    ensure_not_protected(&folder, "delete", &state).await?;
     let provider = provider_for_account(&state.pool, &folder.account_id).await?;
     provider.delete_folder(&folder.full_path).await?;
 
@@ -283,7 +304,7 @@ pub async fn list_folders(
     Path(account_id): Path<String>,
 ) -> Result<Json<Vec<FolderRow>>> {
     let rows = sqlx::query_as::<_, FolderRow>(
-        r#"SELECT id, account_id, name, full_path, special_use,
+        r#"SELECT id, account_id, name, full_path, special_use, delimiter,
                   unread_count, total_count, synced_at, is_excluded, is_subscribed
            FROM folders
            WHERE account_id = ?
