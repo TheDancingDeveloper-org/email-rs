@@ -105,6 +105,7 @@ pub async fn create_folder(
     Json(body): Json<CreateFolder>,
 ) -> Result<(axum::http::StatusCode, Json<FolderRow>)> {
     validate_folder_name(&body.name)?;
+    let mut parent_delimiter: Option<String> = None;
     let full_path = match body.parent_id.as_deref() {
         Some(parent_id) => {
             let parent = load_folder(&state, parent_id).await?;
@@ -112,6 +113,7 @@ pub async fn create_folder(
                 return Err(AppError::NotFound(format!("folder {parent_id} not found")));
             }
             let separator = folder_separator(&parent);
+            parent_delimiter = parent.delimiter.clone();
             format!("{}{}{}", parent.full_path, separator, body.name)
         }
         None => body.name.clone(),
@@ -133,15 +135,28 @@ pub async fn create_folder(
     let provider = provider_for_account(&state.pool, &account_id).await?;
     provider.create_folder(&full_path).await?;
 
+    // Keep nested creates on the server's separator: the parent's delimiter,
+    // else any delimiter already known for the account, else unknown (NULL).
+    let delimiter = match parent_delimiter {
+        Some(delimiter) => Some(delimiter),
+        None => sqlx::query_scalar::<_, String>(
+            "SELECT delimiter FROM folders WHERE account_id = ? AND delimiter IS NOT NULL LIMIT 1",
+        )
+        .bind(&account_id)
+        .fetch_optional(&state.pool)
+        .await?,
+    };
+
     let id = Uuid::new_v4().to_string();
     sqlx::query(
-        "INSERT INTO folders (id, account_id, name, full_path) VALUES (?, ?, ?, ?)
+        "INSERT INTO folders (id, account_id, name, full_path, delimiter) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(account_id, full_path) DO NOTHING",
     )
     .bind(&id)
     .bind(&account_id)
     .bind(&body.name)
     .bind(&full_path)
+    .bind(&delimiter)
     .execute(&state.pool)
     .await?;
     let folder = sqlx::query_as::<_, FolderRow>(
@@ -849,6 +864,138 @@ mod tests {
             vec!["INBOX", "Sent"]
         );
         assert!(calls_for("INBOX").is_empty());
+    }
+
+    async fn set_delimiter(pool: &SqlitePool, id: &str, delimiter: &str) {
+        sqlx::query("UPDATE folders SET delimiter = ? WHERE id = ?")
+            .bind(delimiter)
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dot_delimited_create_rename_and_descendants() {
+        let state = setup().await;
+        seed_test_account(&state.pool, "acc-dot", "test").await;
+        seed_folder(&state.pool, "dot-work", "acc-dot", "Work", "Work", None).await;
+        set_delimiter(&state.pool, "dot-work", ".").await;
+
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/accounts/acc-dot/folders",
+            Some(serde_json::json!({"name": "Invoices", "parentId": "dot-work"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["fullPath"], "Work.Invoices");
+        assert_eq!(body["delimiter"], ".");
+        let child_id = body["id"].as_str().unwrap().to_string();
+
+        // A nested create under the new child keeps the dot separator.
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/accounts/acc-dot/folders",
+            Some(serde_json::json!({"name": "2026", "parentId": child_id})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["fullPath"], "Work.Invoices.2026");
+        assert_eq!(body["delimiter"], ".");
+
+        // A top-level create falls back to the account's known delimiter.
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/accounts/acc-dot/folders",
+            Some(serde_json::json!({"name": "Personal"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["delimiter"], ".");
+
+        // Renaming the middle folder keeps it under its parent and rewrites
+        // the descendant's path in the mirror.
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            &format!("/folders/{child_id}/rename"),
+            Some(serde_json::json!({"name": "Bills"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["fullPath"], "Work.Bills");
+        assert_eq!(
+            calls_for("rename Work.Invoices"),
+            vec!["rename Work.Invoices Work.Bills"]
+        );
+        assert_eq!(
+            folder_paths(&state.pool, "acc-dot").await,
+            vec!["Personal", "Work", "Work.Bills", "Work.Bills.2026"]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_folder_without_any_known_delimiter_stores_null() {
+        let state = setup().await;
+        seed_test_account(&state.pool, "acc-nodelim", "test").await;
+        let (status, body) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/accounts/acc-nodelim/folders",
+            Some(serde_json::json!({"name": "Solo"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert!(body["delimiter"].is_null());
+    }
+
+    #[tokio::test]
+    async fn rename_and_delete_refuse_the_parent_of_a_special_use_folder() {
+        let state = setup().await;
+        seed_test_account(&state.pool, "acc-gmail", "test").await;
+        seed_folder(
+            &state.pool,
+            "g-parent",
+            "acc-gmail",
+            "[Gmail]",
+            "[Gmail]",
+            None,
+        )
+        .await;
+        seed_folder(
+            &state.pool,
+            "g-sent",
+            "acc-gmail",
+            "Sent Mail",
+            "[Gmail]/Sent Mail",
+            Some("sent"),
+        )
+        .await;
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "POST",
+            "/folders/g-parent/rename",
+            Some(serde_json::json!({"name": "Google"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = req(
+            crate::api::router(Arc::clone(&state)),
+            "DELETE",
+            "/folders/g-parent",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            folder_paths(&state.pool, "acc-gmail").await,
+            vec!["[Gmail]", "[Gmail]/Sent Mail"]
+        );
+        assert!(calls_for("[Gmail]").is_empty());
     }
 
     #[tokio::test]

@@ -140,9 +140,10 @@ impl CalendarService {
     pub async fn upsert_event(&self, account_id: &str, event: &CalendarEvent) -> Result<String> {
         let existing_id: Option<String> = if let Some(pid) = &event.provider_event_id {
             sqlx::query_scalar(
-                "SELECT id FROM calendar_events WHERE account_id = ? AND calendar_id = 'default' AND provider_event_id = ?",
+                "SELECT id FROM calendar_events WHERE account_id = ? AND calendar_id = ? AND provider_event_id = ?",
             )
             .bind(account_id)
+            .bind(&event.calendar_id)
             .bind(pid)
             .fetch_optional(&self.pool)
             .await?
@@ -291,5 +292,79 @@ impl CalendarService {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn service() -> CalendarService {
+        let (pool, _) = crate::db::create_pool("sqlite::memory:").await.unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('acc', 'Me', 'me@example.com', 'imap', 'password')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        CalendarService::new(pool)
+    }
+
+    fn event(calendar_id: &str, provider_id: &str, title: &str) -> CalendarEvent {
+        CalendarEvent {
+            id: String::new(),
+            calendar_id: calendar_id.into(),
+            provider_event_id: Some(provider_id.into()),
+            title: title.into(),
+            description: None,
+            start_at: "2026-11-06T12:00:00Z".parse().unwrap(),
+            end_at: "2026-11-06T13:00:00Z".parse().unwrap(),
+            location: None,
+            is_all_day: false,
+            recurrence_rule: None,
+            attendees: vec![],
+            meet_link: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resyncing_an_event_in_a_non_default_calendar_updates_it() {
+        let service = service().await;
+        let first = service
+            .upsert_event("acc", &event("primary", "g-1", "Before"))
+            .await
+            .unwrap();
+        let second = service
+            .upsert_event("acc", &event("primary", "g-1", "After"))
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT calendar_id, title FROM calendar_events")
+                .fetch_all(&service.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![("primary".to_string(), "After".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn the_same_provider_id_in_two_calendars_stays_two_events() {
+        let service = service().await;
+        let synced = service
+            .upsert_event("acc", &event("primary", "shared", "Synced"))
+            .await
+            .unwrap();
+        let local = service
+            .upsert_event("acc", &event("default", "shared", "Invitation"))
+            .await
+            .unwrap();
+        assert_ne!(synced, local);
+        let again = service
+            .upsert_event("acc", &event("primary", "shared", "Synced v2"))
+            .await
+            .unwrap();
+        assert_eq!(again, synced);
+        assert_eq!(
+            service.find_event_by_uid("acc", "shared").await.unwrap(),
+            Some(local)
+        );
     }
 }
