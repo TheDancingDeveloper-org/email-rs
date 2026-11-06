@@ -62,11 +62,15 @@ impl LoginForm {
     pub fn submit(&self) -> Result<Credentials, String> {
         let username = self.username.trim();
         if username.is_empty() || self.password.is_empty() {
-            return Err("Username and password are required.".into());
+            return Err(crate::Catalogue::default().get(
+                crate::MessageId::CredentialsRequired,
+                crate::MessageArgs::new(),
+            ));
         }
         if self.mode == AuthMode::FirstRun && self.password.len() < MIN_PASSWORD_LEN {
-            return Err(format!(
-                "The password must have at least {MIN_PASSWORD_LEN} characters."
+            return Err(crate::Catalogue::default().get(
+                crate::MessageId::PasswordMinLength,
+                crate::MessageArgs::new().count(MIN_PASSWORD_LEN),
             ));
         }
         Ok(Credentials {

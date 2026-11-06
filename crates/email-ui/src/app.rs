@@ -3,6 +3,7 @@
 
 use crate::auth::{AuthMode, Credentials, LoginForm};
 use crate::backend::{AuthApi, AuthError, SignedIn};
+use crate::catalogue::{Catalogue, MessageArgs, MessageId};
 use crate::mail::{self, MailApi, Mailbox};
 use crate::session::TokenStore;
 use email_types::{FullMessage, Message};
@@ -343,24 +344,27 @@ impl EmailApp {
 
     fn sign_in_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let messages = Catalogue::default();
         let first_run = self.form.mode == AuthMode::FirstRun;
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.15);
             ui.set_max_width(320.0);
-            ui.heading(if first_run {
-                "Set up email-rs"
+            let title = if first_run {
+                messages.get(MessageId::FirstRunTitle, MessageArgs::new())
             } else {
-                "Sign in to email-rs"
-            });
+                messages.get(MessageId::SignInTitle, MessageArgs::new())
+            };
+            ui.heading(title);
             if first_run {
-                ui.label("Create the first account. This works only on the server's own machine.");
+                ui.label(messages.get(MessageId::FirstRunDescription, MessageArgs::new()));
             }
             ui.add_space(16.0);
             let mut enter = false;
-            Field::new("Username").required(true).show(ui, |ui| {
+            let username = messages.get(MessageId::UsernameLabel, MessageArgs::new());
+            Field::new(&username).required(true).show(ui, |ui| {
                 let response = ui.add(
                     Input::new(&mut self.form.username)
-                        .label("Username")
+                        .label(&username)
                         .desired_width(320.0)
                         .id_salt("username"),
                 );
@@ -370,13 +374,14 @@ impl EmailApp {
                 Some(message) => ValidationState::Error(message.clone()),
                 None => ValidationState::None,
             };
-            Field::new("Password")
+            let password = messages.get(MessageId::PasswordLabel, MessageArgs::new());
+            Field::new(&password)
                 .required(true)
                 .validation(validation)
                 .show(ui, |ui| {
                     let response = ui.add(
                         Input::new(&mut self.form.password)
-                            .label("Password")
+                            .label(&password)
                             .password()
                             .desired_width(320.0)
                             .id_salt("password"),
@@ -385,9 +390,9 @@ impl EmailApp {
                 });
             ui.add_space(12.0);
             let label = match (self.busy, first_run) {
-                (true, _) => "Signing in…",
-                (false, true) => "Create account",
-                (false, false) => "Sign in",
+                (true, _) => messages.get(MessageId::SigningIn, MessageArgs::new()),
+                (false, true) => messages.get(MessageId::CreateAccount, MessageArgs::new()),
+                (false, false) => messages.get(MessageId::SignIn, MessageArgs::new()),
             };
             let clicked = ui
                 .add_enabled(
@@ -402,9 +407,9 @@ impl EmailApp {
             }
             ui.add_space(8.0);
             let toggle = if first_run {
-                "I already have an account"
+                messages.get(MessageId::HaveAccount, MessageArgs::new())
             } else {
-                "First run? Set up the first account"
+                messages.get(MessageId::FirstRunPrompt, MessageArgs::new())
             };
             if ui
                 .add_enabled(
@@ -628,7 +633,7 @@ fn sentence(message: &str) -> String {
             }
             out
         }
-        None => "Sign-in failed.".into(),
+        None => Catalogue::default().get(MessageId::SignInFailed, MessageArgs::new()),
     }
 }
 
