@@ -685,13 +685,36 @@ impl MailProvider for GenericImapProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::special_use_for_name;
+    use super::*;
 
     #[test]
     fn recognizes_generic_and_microsoft_sent_folder_names() {
         assert_eq!(special_use_for_name("Sent", &[]), Some("sent".into()));
         assert_eq!(special_use_for_name("Sent Items", &[]), Some("sent".into()));
         assert_eq!(special_use_for_name("Sent Mail", &[]), Some("sent".into()));
+    }
+    #[test]
+    fn microsoft_mailbox_names_are_mapped_to_special_use() {
+        assert_eq!(special_use_for_name("Inbox", &[]), Some("inbox".into()));
+        assert_eq!(
+            special_use_for_name("Deleted Items", &[]),
+            Some("trash".into())
+        );
+        assert_eq!(special_use_for_name("Junk Email", &[]), Some("spam".into()));
+    }
+
+    #[test]
+    fn special_use_attributes_take_precedence_over_display_name() {
+        let attrs = [NameAttribute::Extension(std::borrow::Cow::Borrowed(
+            "\\Sent",
+        ))];
+        assert_eq!(special_use_for_name("Archive", &attrs), Some("sent".into()));
+    }
+
+    #[test]
+    fn nested_mailbox_display_name_matches_outlook_folder_label() {
+        assert_eq!(display_name("Inbox/Projects"), "Projects");
+        assert_eq!(display_name("Sent Items"), "Sent Items");
     }
 }
 
