@@ -28,9 +28,9 @@ pub(crate) use email_types::{
 pub(crate) use fluent_app::{FluentApp, TitleBar, WindowTitle};
 pub(crate) use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
 pub(crate) use fluent_layout::{
-    drag_source, drop_target, CommandPalette, ContextMenu, DockPanel, DockPosition, DocumentViewer,
-    DropPolicy, ModalHost, PaletteEntry, Pane, PaneConstraints, PaneGroup, RichDocument,
-    RichDocumentBlock, Workspace,
+    drag_source, drop_target, CommandPalette, ContextMenu, Dialog, DialogAction, DockPanel,
+    DockPosition, DocumentViewer, DropPolicy, ModalHost, ModalSize, ModalStack, PaletteEntry, Pane,
+    PaneConstraints, PaneGroup, RichDocument, RichDocumentBlock, Workspace,
 };
 pub(crate) use fluent_primitives::{
     Button, ButtonAppearance, ButtonSize, Checkbox, CheckboxState, DateTimePicker, DateTimeValue,

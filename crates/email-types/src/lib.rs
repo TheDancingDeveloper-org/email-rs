@@ -207,6 +207,9 @@ pub struct Message {
 pub struct MessageBody {
     pub html_body: Option<String>,
     pub text_body: Option<String>,
+    /// Original RFC headers retained for source/export views.
+    #[serde(default)]
+    pub raw_headers: Option<String>,
     /// The current message as Markdown for models and search: the real text
     /// part (or the HTML converted), without quoted history, signature,
     /// images or tracking links. Computed once when the body is cached.

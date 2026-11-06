@@ -1178,6 +1178,7 @@ pub async fn get_message(
         "body": body.map(|b| serde_json::json!({
             "htmlBody": b.html_body.as_deref().map(crate::sanitize::sanitize_html),
             "textBody": b.text_body,
+            "rawHeaders": b.raw_headers,
             "cleanBody": b.clean_body,
             "quotedHistory": b.quoted_history,
             "signatureStripped": b.signature_stripped,
