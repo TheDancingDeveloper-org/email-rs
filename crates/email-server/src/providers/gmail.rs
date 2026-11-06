@@ -585,6 +585,26 @@ impl MailProvider for GmailProvider {
         Ok(body)
     }
 
+    async fn fetch_raw_message(&self, folder: &str, uid: u32) -> Result<Vec<u8>> {
+        let mut session = self.connect().await?;
+        session
+            .select(folder)
+            .await
+            .map_err(|e| AppError::Imap(format!("SELECT failed: {e}")))?;
+        let stream = session
+            .uid_fetch(uid.to_string(), "RFC822")
+            .await
+            .map_err(|e| AppError::Imap(format!("UID FETCH source failed: {e}")))?;
+        let fetches = super::drain_imap_stream(stream, "UID FETCH source").await?;
+        let raw = fetches
+            .first()
+            .and_then(|fetch| fetch.body())
+            .ok_or_else(|| AppError::Imap("message had no RFC822 body".into()))?
+            .to_vec();
+        let _ = session.logout().await;
+        Ok(raw)
+    }
+
     async fn fetch_attachment(&self, folder: &str, uid: u32, part_id: &str) -> Result<Vec<u8>> {
         if !super::valid_imap_part_id(part_id) {
             return Err(AppError::Imap("invalid MIME part identifier".into()));
