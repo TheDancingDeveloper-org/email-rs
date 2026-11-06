@@ -10,10 +10,13 @@ interface OAuthCallbackHistory {
 export function handleOAuthCallback(
   location: OAuthCallbackLocation,
   history: OAuthCallbackHistory,
-): boolean {
+): string | null {
   const params = new URLSearchParams(location.search);
-  if (params.get('oauth') !== 'success') return false;
+  const oauthStatus = params.get('oauth');
+  if (oauthStatus !== 'success' && oauthStatus !== 'error') return null;
 
   history.replaceState(null, '', location.pathname);
-  return true;
+  return oauthStatus === 'error'
+    ? params.get('msg') || 'OAuth sign-in failed'
+    : null;
 }
