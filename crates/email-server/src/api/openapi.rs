@@ -10,12 +10,13 @@ use utoipa::{Modify, OpenApi, PartialSchema, ToSchema};
 use email_types::{
     Account, AccountSettings, AddLinkBody, AddLinkResponse, AuthCredentials, AuthIdentity,
     AuthSession, AuthenticationResultStatus, AuthorizeResponse, BulkRequest, BulkResponse,
-    CalendarEvent, CancelOutboxResponse, Contact, CreateAccount, CreateIdentity, CreateLabelBody,
-    CreateRuleBody, CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder, FullMessage,
-    Identity, Label, Message, MessageAttachment, MessageAuthenticationResults, MoveMessageRequest,
-    MoveMessageResponse, OutboxItem, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
-    SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount,
-    UpdateIdentity, UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
+    CalendarEvent, CancelOutboxResponse, Contact, CreateAccount, CreateFolder, CreateIdentity,
+    CreateLabelBody, CreateRuleBody, CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder,
+    FullMessage, Identity, Label, Message, MessageAttachment, MessageAuthenticationResults,
+    MoveMessageRequest, MoveMessageResponse, OutboxItem, PatchFolder, PatchMessageRequest,
+    RenameFolder, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
+    StatusResponse, SuggestResponse, UpdateAccount, UpdateIdentity, UpdateLabelBody,
+    UpdateRuleBody, UpdateWebhook, Webhook,
 };
 
 use super::discovery::{DiscoveryRequest, DiscoveryResponse};
@@ -256,6 +257,77 @@ fn doc_update_identity() {}
     responses((status = 200, body = [Folder]))
 )]
 fn doc_list_folders() {}
+
+#[utoipa::path(
+    post,
+    path = "/accounts/{id}/folders",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path)),
+    request_body = CreateFolder,
+    responses(
+        (status = 201, body = Folder),
+        (status = 400, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+        (status = 501, body = ErrorResponse)
+    )
+)]
+fn doc_create_folder() {}
+
+#[utoipa::path(
+    delete,
+    path = "/folders/{id}",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path)),
+    responses(
+        (status = 200, body = StatusResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 501, body = ErrorResponse)
+    )
+)]
+fn doc_delete_folder() {}
+
+#[utoipa::path(
+    post,
+    path = "/folders/{id}/rename",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path)),
+    request_body = RenameFolder,
+    responses(
+        (status = 200, body = Folder),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+        (status = 501, body = ErrorResponse)
+    )
+)]
+fn doc_rename_folder() {}
+
+#[utoipa::path(
+    post,
+    path = "/folders/{id}/subscribe",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path)),
+    responses(
+        (status = 200, body = Folder),
+        (status = 404, body = ErrorResponse),
+        (status = 501, body = ErrorResponse)
+    )
+)]
+fn doc_subscribe_folder() {}
+
+#[utoipa::path(
+    post,
+    path = "/folders/{id}/unsubscribe",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path)),
+    responses(
+        (status = 200, body = Folder),
+        (status = 404, body = ErrorResponse),
+        (status = 501, body = ErrorResponse)
+    )
+)]
+fn doc_unsubscribe_folder() {}
 
 #[utoipa::path(
     patch,
@@ -627,6 +699,11 @@ fn doc_events() {}
         doc_account_settings,
         doc_list_folders,
         doc_patch_folder,
+        doc_create_folder,
+        doc_delete_folder,
+        doc_rename_folder,
+        doc_subscribe_folder,
+        doc_unsubscribe_folder,
         doc_mark_folder_read,
         doc_list_messages,
         doc_get_message,
@@ -718,6 +795,8 @@ fn doc_events() {}
         UpdateIdentity,
         Folder,
         PatchFolder,
+        CreateFolder,
+        RenameFolder,
         Message,
         FullMessage,
         MessageAttachment,

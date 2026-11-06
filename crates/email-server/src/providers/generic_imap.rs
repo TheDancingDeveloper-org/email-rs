@@ -666,6 +666,53 @@ impl MailProvider for GenericImapProvider {
         Ok(())
     }
 
+    async fn create_folder(&self, path: &str) -> Result<()> {
+        let mut session = self.connect().await?;
+        let result = session
+            .create(path)
+            .await
+            .map_err(|e| AppError::Imap(format!("CREATE failed: {e}")));
+        let _ = session.logout().await;
+        result
+    }
+
+    async fn rename_folder(&self, from: &str, to: &str) -> Result<()> {
+        let mut session = self.connect().await?;
+        let result = session
+            .rename(from, to)
+            .await
+            .map_err(|e| AppError::Imap(format!("RENAME failed: {e}")));
+        let _ = session.logout().await;
+        result
+    }
+
+    async fn delete_folder(&self, path: &str) -> Result<()> {
+        let mut session = self.connect().await?;
+        let result = session
+            .delete(path)
+            .await
+            .map_err(|e| AppError::Imap(format!("DELETE failed: {e}")));
+        let _ = session.logout().await;
+        result
+    }
+
+    async fn set_folder_subscribed(&self, path: &str, subscribed: bool) -> Result<()> {
+        let mut session = self.connect().await?;
+        let result = if subscribed {
+            session
+                .subscribe(path)
+                .await
+                .map_err(|e| AppError::Imap(format!("SUBSCRIBE failed: {e}")))
+        } else {
+            session
+                .unsubscribe(path)
+                .await
+                .map_err(|e| AppError::Imap(format!("UNSUBSCRIBE failed: {e}")))
+        };
+        let _ = session.logout().await;
+        result
+    }
+
     async fn append_draft(
         &self,
         folder: &str,

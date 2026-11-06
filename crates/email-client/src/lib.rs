@@ -3,11 +3,11 @@ use email_types::{
     Account, AccountSettings, ActionInput, AddLinkBody, AddLinkResponse, AuthClientKind,
     AuthCredentials, AuthIdentity, AuthSession, AuthorizeResponse, BulkRequest, BulkResponse,
     CalendarEvent, CancelOutboxResponse, ConditionField, ConditionGroup, Contact, CreateAccount,
-    CreateIdentity, CreateLabelBody, CreateWebhook, DraftRequest, DraftResponse, EventLink, Folder,
-    FullMessage, Identity, Label, MatchMode, Message, MessageAttachment, MoveMessageRequest,
-    MoveMessageResponse, OutboxItem, PatchFolder, PatchMessageRequest, RuleDto, SearchResponse,
-    SendRequest, SendResponse, SnoozeRequest, StatusResponse, SuggestResponse, SyncEvent,
-    UpdateAccount, UpdateLabelBody, UpdateWebhook,
+    CreateFolder, CreateIdentity, CreateLabelBody, CreateWebhook, DraftRequest, DraftResponse,
+    EventLink, Folder, FullMessage, Identity, Label, MatchMode, Message, MessageAttachment,
+    MoveMessageRequest, MoveMessageResponse, OutboxItem, PatchFolder, PatchMessageRequest,
+    RenameFolder, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
+    StatusResponse, SuggestResponse, SyncEvent, UpdateAccount, UpdateLabelBody, UpdateWebhook,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -362,6 +362,35 @@ impl EmailClient {
         body: &PatchFolder,
     ) -> Result<serde_json::Value> {
         self.json(Method::PATCH, &format!("folders/{folder_id}"), body)
+            .await
+    }
+
+    pub async fn create_folder(&self, account_id: &str, body: &CreateFolder) -> Result<Folder> {
+        self.json(
+            Method::POST,
+            &format!("accounts/{account_id}/folders"),
+            body,
+        )
+        .await
+    }
+
+    pub async fn rename_folder(&self, folder_id: &str, body: &RenameFolder) -> Result<Folder> {
+        self.json(Method::POST, &format!("folders/{folder_id}/rename"), body)
+            .await
+    }
+
+    pub async fn delete_folder(&self, folder_id: &str) -> Result<serde_json::Value> {
+        self.request(Method::DELETE, &format!("folders/{folder_id}"))
+            .await
+    }
+
+    pub async fn subscribe_folder(&self, folder_id: &str) -> Result<Folder> {
+        self.request(Method::POST, &format!("folders/{folder_id}/subscribe"))
+            .await
+    }
+
+    pub async fn unsubscribe_folder(&self, folder_id: &str) -> Result<Folder> {
+        self.request(Method::POST, &format!("folders/{folder_id}/unsubscribe"))
             .await
     }
 
