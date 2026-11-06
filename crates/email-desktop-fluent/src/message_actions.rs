@@ -723,6 +723,49 @@ pub(crate) fn cancel_pending_undo(state_entity: &Entity<NativeAppState>, app_cx:
     });
 }
 
+/// Esc while a delayed mutation is pending cancels it instead of its usual
+/// meaning (clearing the selection). Returns whether anything was cancelled.
+pub(crate) fn cancel_pending_undo_on_escape(
+    state_entity: &Entity<NativeAppState>,
+    app_cx: &mut App,
+) -> bool {
+    if state_entity.read(app_cx).pending_undo.is_none() {
+        return false;
+    }
+    cancel_pending_undo(state_entity, app_cx);
+    true
+}
+
+/// Keyboard undo (`z`): cancels the pending delayed mutation, else reverses
+/// the last completed move, else cancels a just-sent message. Returns whether
+/// anything was undone.
+pub(crate) fn undo_latest_action(state_entity: &Entity<NativeAppState>, app_cx: &mut App) -> bool {
+    if cancel_pending_undo_on_escape(state_entity, app_cx) {
+        return true;
+    }
+    let (can_undo_move, can_cancel_send) = {
+        let state = state_entity.read(app_cx);
+        (
+            state
+                .move_notice
+                .as_ref()
+                .is_some_and(|notice| notice.summary.can_undo()),
+            state
+                .pending_send
+                .as_ref()
+                .is_some_and(|send| !send.cancelling),
+        )
+    };
+    if can_undo_move {
+        start_undo_completed_move(state_entity, app_cx);
+    } else if can_cancel_send {
+        start_cancel_send(state_entity, app_cx);
+    } else {
+        return false;
+    }
+    true
+}
+
 pub(crate) fn take_expired_undo(
     state_entity: &Entity<NativeAppState>,
     app_cx: &mut App,
@@ -1506,5 +1549,102 @@ pub(crate) fn message_select_all_state(state: &NativeAppState) -> CheckboxState 
         CheckboxState::Checked
     } else {
         CheckboxState::Indeterminate
+    }
+}
+
+#[cfg(test)]
+mod undo_key_tests {
+    use super::*;
+
+    fn pending() -> PendingUndo {
+        PendingUndo {
+            mutation: NativeMessageMutation::Archive {
+                message_id: "m1".into(),
+            },
+            expires_at: Instant::now() + Duration::from_secs(5),
+        }
+    }
+
+    fn state_with_pending() -> NativeAppState {
+        NativeAppState {
+            pending_undo: Some(pending()),
+            ..Default::default()
+        }
+    }
+
+    #[gpui::test]
+    fn escape_cancels_the_pending_mutation(cx: &mut gpui::TestAppContext) {
+        fluent_test_utils::init_fluent_test(cx);
+        let entity = cx.new(|_| state_with_pending());
+        assert!(cx.update(|app| cancel_pending_undo_on_escape(&entity, app)));
+        entity.update(cx, |state, _| assert!(state.pending_undo.is_none()));
+    }
+
+    #[gpui::test]
+    fn escape_without_a_pending_mutation_is_not_consumed(cx: &mut gpui::TestAppContext) {
+        fluent_test_utils::init_fluent_test(cx);
+        let entity = cx.new(|_| NativeAppState::default());
+        assert!(!cx.update(|app| cancel_pending_undo_on_escape(&entity, app)));
+    }
+
+    #[gpui::test]
+    fn z_cancels_the_pending_mutation(cx: &mut gpui::TestAppContext) {
+        fluent_test_utils::init_fluent_test(cx);
+        let entity = cx.new(|_| state_with_pending());
+        assert!(cx.update(|app| undo_latest_action(&entity, app)));
+        entity.update(cx, |state, _| assert!(state.pending_undo.is_none()));
+    }
+
+    #[gpui::test]
+    fn z_with_nothing_to_undo_is_not_consumed(cx: &mut gpui::TestAppContext) {
+        fluent_test_utils::init_fluent_test(cx);
+        let entity = cx.new(|_| NativeAppState::default());
+        assert!(!cx.update(|app| undo_latest_action(&entity, app)));
+    }
+
+    #[gpui::test]
+    fn message_list_keys_undo_even_with_no_rows(cx: &mut gpui::TestAppContext) {
+        fluent_test_utils::init_fluent_test(cx);
+        let entity = cx.new(|_| state_with_pending());
+        assert!(cx.update(|app| handle_message_list_key(&entity, &[], None, "z", false, app)));
+        entity.update(cx, |state, _| assert!(state.pending_undo.is_none()));
+
+        entity.update(cx, |state, _| state.pending_undo = Some(pending()));
+        entity.update(cx, |state, _| state.selected_message_ids.push("m1".into()));
+        assert!(cx.update(|app| handle_message_list_key(
+            &entity,
+            &["m1".to_string()],
+            Some("m1"),
+            "escape",
+            false,
+            app
+        )));
+        entity.update(cx, |state, _| {
+            assert!(state.pending_undo.is_none());
+            assert!(
+                !state.selected_message_ids.is_empty(),
+                "first Esc cancels the action, not the selection"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn reading_pane_escape_and_z_cancel_before_clearing(cx: &mut gpui::TestAppContext) {
+        fluent_test_utils::init_fluent_test(cx);
+        let entity = cx.new(|_| state_with_pending());
+        assert!(cx.update(|app| handle_reading_pane_key(&entity, "escape", false, false, app)));
+        entity.update(cx, |state, _| assert!(state.pending_undo.is_none()));
+        entity.update(cx, |state, _| state.pending_undo = Some(pending()));
+        assert!(cx.update(|app| handle_reading_pane_key(&entity, "z", false, false, app)));
+        entity.update(cx, |state, _| assert!(state.pending_undo.is_none()));
+    }
+
+    #[test]
+    fn z_maps_to_undo_in_the_reading_pane() {
+        assert_eq!(
+            reading_pane_key_action("z", false, false),
+            Some(ReadingPaneKeyAction::Undo)
+        );
+        assert_eq!(reading_pane_key_action("z", false, true), None);
     }
 }
