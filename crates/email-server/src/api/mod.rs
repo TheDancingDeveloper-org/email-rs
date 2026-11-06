@@ -44,7 +44,12 @@ pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("DELETE", "/accounts/{id}/identities/{identity_id}"),
     ("PATCH", "/accounts/{id}/identities/{identity_id}"),
     ("GET", "/accounts/{id}/folders"),
+    ("POST", "/accounts/{id}/folders"),
     ("PATCH", "/folders/{id}"),
+    ("DELETE", "/folders/{id}"),
+    ("POST", "/folders/{id}/rename"),
+    ("POST", "/folders/{id}/subscribe"),
+    ("POST", "/folders/{id}/unsubscribe"),
     ("POST", "/folders/{id}/mark-read"),
     ("GET", "/folders/{id}/messages"),
     ("POST", "/messages/bulk"),
@@ -178,8 +183,20 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/accounts/{id}/identities/{identity_id}",
             axum::routing::delete(identities::delete_identity).patch(identities::update_identity),
         )
-        .route("/accounts/{id}/folders", get(folders::list_folders))
-        .route("/folders/{id}", patch(folders::patch_folder))
+        .route(
+            "/accounts/{id}/folders",
+            get(folders::list_folders).post(folders::create_folder),
+        )
+        .route(
+            "/folders/{id}",
+            patch(folders::patch_folder).delete(folders::delete_folder),
+        )
+        .route("/folders/{id}/rename", post(folders::rename_folder))
+        .route("/folders/{id}/subscribe", post(folders::subscribe_folder))
+        .route(
+            "/folders/{id}/unsubscribe",
+            post(folders::unsubscribe_folder),
+        )
         .route("/folders/{id}/mark-read", post(folders::mark_folder_read))
         .route("/folders/{id}/messages", get(messages::list_messages))
         .route("/messages/bulk", post(messages::bulk_messages))

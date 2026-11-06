@@ -445,6 +445,7 @@ mod tests {
             total_count: 0,
             synced_at: None,
             is_excluded: false,
+            is_subscribed: true,
         }
     }
 

@@ -22,6 +22,7 @@ class Folder:
         name (str):
         total_count (int):
         unread_count (int):
+        is_subscribed (bool | Unset):
         special_use (None | str | Unset):
         synced_at (None | str | Unset):
     """
@@ -33,6 +34,7 @@ class Folder:
     name: str
     total_count: int
     unread_count: int
+    is_subscribed: bool | Unset = UNSET
     special_use: None | str | Unset = UNSET
     synced_at: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -51,6 +53,8 @@ class Folder:
         total_count = self.total_count
 
         unread_count = self.unread_count
+
+        is_subscribed = self.is_subscribed
 
         special_use: None | str | Unset
         if isinstance(self.special_use, Unset):
@@ -77,6 +81,8 @@ class Folder:
                 "unreadCount": unread_count,
             }
         )
+        if is_subscribed is not UNSET:
+            field_dict["isSubscribed"] = is_subscribed
         if special_use is not UNSET:
             field_dict["specialUse"] = special_use
         if synced_at is not UNSET:
@@ -100,6 +106,8 @@ class Folder:
         total_count = d.pop("totalCount")
 
         unread_count = d.pop("unreadCount")
+
+        is_subscribed = d.pop("isSubscribed", UNSET)
 
         def _parse_special_use(data: object) -> None | str | Unset:
             if data is None:
@@ -127,6 +135,7 @@ class Folder:
             name=name,
             total_count=total_count,
             unread_count=unread_count,
+            is_subscribed=is_subscribed,
             special_use=special_use,
             synced_at=synced_at,
         )

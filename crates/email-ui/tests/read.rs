@@ -53,6 +53,7 @@ fn folder(id: &str, name: &str, unread: i64) -> Folder {
         total_count: 2,
         synced_at: None,
         is_excluded: false,
+        is_subscribed: true,
     }
 }
 
@@ -99,6 +100,7 @@ impl MailApi for FakeMail {
                 folder("archive", "Archive", 0),
                 Folder {
                     is_excluded: true,
+                    is_subscribed: true,
                     ..folder("spam", "Junk", 0)
                 },
             ],

@@ -115,6 +115,12 @@ pub enum IdleEvent {
     Timeout,
 }
 
+fn folder_management_unsupported() -> crate::error::AppError {
+    crate::error::AppError::Unsupported(
+        "folder create, rename, delete and subscribe are supported for IMAP accounts only".into(),
+    )
+}
+
 // ── Provider traits ──────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -236,6 +242,22 @@ pub trait MailProvider: Send + Sync {
     /// Permanently remove a draft. This deliberately bypasses normal trash behavior.
     async fn delete_draft(&self, folder: &str, uid: u32) -> Result<()> {
         self.delete_message(folder, uid).await
+    }
+    /// Create a mailbox on the server (IMAP `CREATE`).
+    async fn create_folder(&self, _path: &str) -> Result<()> {
+        Err(folder_management_unsupported())
+    }
+    /// Rename a mailbox, and its children, on the server (IMAP `RENAME`).
+    async fn rename_folder(&self, _from: &str, _to: &str) -> Result<()> {
+        Err(folder_management_unsupported())
+    }
+    /// Delete a mailbox on the server (IMAP `DELETE`).
+    async fn delete_folder(&self, _path: &str) -> Result<()> {
+        Err(folder_management_unsupported())
+    }
+    /// Subscribe to or unsubscribe from a mailbox (IMAP `SUBSCRIBE`/`UNSUBSCRIBE`).
+    async fn set_folder_subscribed(&self, _path: &str, _subscribed: bool) -> Result<()> {
+        Err(folder_management_unsupported())
     }
 }
 
