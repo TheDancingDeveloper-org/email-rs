@@ -9,8 +9,18 @@ describe('handleOAuthCallback', () => {
     expect(handleOAuthCallback(
       { pathname: '/inbox', search: '?oauth=success' },
       { replaceState },
-    )).toBe(true);
+    )).toBeNull();
     expect(replaceState).toHaveBeenCalledWith(null, '', '/inbox');
+  });
+
+  it('returns a decoded OAuth error and clears it from the address bar', () => {
+    const replaceState = vi.fn();
+
+    expect(handleOAuthCallback(
+      { pathname: '/', search: '?oauth=error&msg=access_denied%3Cscript%3E' },
+      { replaceState },
+    )).toBe('access_denied<script>');
+    expect(replaceState).toHaveBeenCalledWith(null, '', '/');
   });
 
   it('leaves unrelated query strings unchanged', () => {
@@ -19,7 +29,7 @@ describe('handleOAuthCallback', () => {
     expect(handleOAuthCallback(
       { pathname: '/inbox', search: '?view=unread' },
       { replaceState },
-    )).toBe(false);
+    )).toBeNull();
     expect(replaceState).not.toHaveBeenCalled();
   });
 });

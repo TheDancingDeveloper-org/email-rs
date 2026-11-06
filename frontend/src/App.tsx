@@ -124,6 +124,7 @@ export function App() {
   const [accountsLoaded, setAccountsLoaded] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [oauthError, setOauthError] = useState<string | null>(null);
 
   useEffect(() => onApiError((e) => setApiError(e.message)), []);
   useEffect(() => {
@@ -174,24 +175,24 @@ export function App() {
   };
 
   useEffect(() => {
-    handleOAuthCallback(window.location, window.history);
+    setOauthError(handleOAuthCallback(window.location, window.history));
     fetchAccounts();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (!accountsLoaded) return null;
   if (authRequired) return <AuthGate onAuthenticated={fetchAccounts} />;
-  if (accounts.length === 0) return <AccountSetup onAccountAdded={fetchAccounts} />;
+  if (accounts.length === 0) return <AccountSetup onAccountAdded={fetchAccounts} oauthError={oauthError} />;
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-      {apiError && (
+      {(apiError || oauthError) && (
         <div
           role="alert"
-          onClick={() => setApiError(null)}
+          onClick={() => { setApiError(null); setOauthError(null); }}
           style={{ position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, padding: '8px 14px', borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--divider)', color: 'var(--text)', fontSize: 13, cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,.25)' }}
         >
-          {apiError}
+          {apiError || oauthError}
         </div>
       )}
         <div style={{ width: sidebar.width, flexShrink: 0, overflow: 'hidden', height: '100%' }}>

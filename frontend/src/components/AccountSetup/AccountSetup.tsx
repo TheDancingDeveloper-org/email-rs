@@ -291,14 +291,15 @@ function ManualForm({ onSuccess, styles: s }: ManualFormProps) {
 
 interface AccountSetupProps {
   onAccountAdded: () => void;
+  oauthError?: string | null;
 }
 
-export function AccountSetup({ onAccountAdded }: AccountSetupProps) {
+export function AccountSetup({ onAccountAdded, oauthError: initialOauthError }: AccountSetupProps) {
   const [gmailLoading, setGmailLoading] = useState(false);
   const [msLoading, setMsLoading] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [showMsAppPassword, setShowMsAppPassword] = useState(false);
-  const [oauthError, setOauthError] = useState<string | null>(null);
+  const [oauthError, setOauthError] = useState<string | null>(initialOauthError ?? null);
 
   const startOAuth = async (path: string, done: (loading: boolean) => void) => {
     done(true);
