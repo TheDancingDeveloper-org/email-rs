@@ -175,6 +175,9 @@ mod tests {
             email_types::CreateIdentity {
                 name: "Sales".into(),
                 email: "sales@example.com".into(),
+                signature: None,
+                signature_html: None,
+                signature_placement: "below".into(),
             },
         )
         .await

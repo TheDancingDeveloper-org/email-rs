@@ -473,12 +473,32 @@ fn migrations() -> Vec<Migration> {
             name: "account_sync_health",
             apply: in_transaction!(run_account_sync_health_migration),
         },
+        Migration {
+            version: 29,
+            name: "identity_signatures",
+            apply: in_transaction!(run_identity_signatures_migration),
+        },
     ]
 }
 
 async fn run_account_sync_health_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS account_sync_health (account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, last_success_at TEXT, last_error_at TEXT, last_error TEXT)")
         .execute(&mut *conn).await?;
+    Ok(())
+}
+
+async fn run_identity_signatures_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query("ALTER TABLE identities ADD COLUMN signature TEXT")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("ALTER TABLE identities ADD COLUMN signature_html TEXT")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE identities ADD COLUMN signature_placement TEXT NOT NULL DEFAULT 'below'",
+    )
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
