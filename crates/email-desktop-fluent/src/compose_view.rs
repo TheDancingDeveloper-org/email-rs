@@ -71,6 +71,37 @@ pub(crate) fn compose_placeholder(
         .size_full()
         .flex()
         .flex_col()
+        .when(compose.discard_pending, |view| {
+            view.child(
+                div()
+                    .p(px(16.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child("Discard this message? Your unsent changes will be lost.")
+                    .child(
+                        Button::new("compose-keep-editing")
+                            .label("Keep editing")
+                            .on_click({
+                                let state_entity = state_entity.clone();
+                                move |_, _, app_cx| {
+                                    resolve_compose_discard(&state_entity, false, app_cx);
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("compose-confirm-discard")
+                            .label("Discard message")
+                            .disabled(compose.sending)
+                            .on_click({
+                                let state_entity = state_entity.clone();
+                                move |_, _, app_cx| {
+                                    resolve_compose_discard(&state_entity, true, app_cx);
+                                }
+                            }),
+                    ),
+            )
+        })
         .border_l_1()
         .border_color(colors.stroke_neutral_subtle)
         .bg(colors.surface)

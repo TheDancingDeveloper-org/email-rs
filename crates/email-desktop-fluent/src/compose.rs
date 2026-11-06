@@ -742,8 +742,27 @@ pub(crate) fn start_compose_send(
 
 pub(crate) fn discard_compose(state_entity: &Entity<NativeAppState>, app_cx: &mut App) {
     state_entity.update(app_cx, |state, cx| {
-        reset_compose_state(state, None);
-        state.last_error = None;
+        if state.compose.open && !state.compose.sending {
+            state.compose.discard_pending = true;
+        }
+        cx.notify();
+    });
+}
+
+pub(crate) fn resolve_compose_discard(
+    state_entity: &Entity<NativeAppState>,
+    discard: bool,
+    app_cx: &mut App,
+) {
+    state_entity.update(app_cx, |state, cx| {
+        if state.compose.discard_pending && !state.compose.sending {
+            if discard {
+                reset_compose_state(state, None);
+                state.last_error = None;
+            } else {
+                state.compose.discard_pending = false;
+            }
+        }
         cx.notify();
     });
 }
