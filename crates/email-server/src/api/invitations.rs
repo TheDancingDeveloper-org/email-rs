@@ -80,7 +80,21 @@ pub async fn rsvp_invitation(
             "message has no sender identity".into(),
         ));
     }
-    let body = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nPRODID:-//email-rs//Invitation RSVP//EN\r\nBEGIN:VEVENT\r\nUID:{}\r\nSEQUENCE:{}\r\nATTENDEE;PARTSTAT={}:mailto:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", invitation.uid, invitation.sequence.unwrap_or(0), status, from);
+    if invitation.method != "REQUEST" {
+        return Err(AppError::Validation(
+            "only REQUEST invitations can be answered".into(),
+        ));
+    }
+    if !invitation
+        .attendees
+        .iter()
+        .any(|attendee| attendee.email.eq_ignore_ascii_case(&from))
+    {
+        return Err(AppError::Validation(
+            "account address is not an attendee of this invitation".into(),
+        ));
+    }
+    let body = build_reply(&invitation, &status, &from)?;
     let request = SendRequest {
         account_id,
         to: vec![organizer],
@@ -109,6 +123,59 @@ pub async fn rsvp_invitation(
     ))
 }
 
+fn has_control(value: &str) -> bool {
+    value.chars().any(char::is_control)
+}
+
+/// Fold a content line at 75 octets (RFC 5545 3.1) on char boundaries.
+fn fold_line(line: &str) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in line.chars() {
+        let len = ch.len_utf8();
+        if width + len > 75 {
+            out.push_str("\r\n ");
+            width = 1;
+        }
+        out.push(ch);
+        width += len;
+    }
+    out
+}
+
+fn build_reply(invitation: &Invitation, status: &str, from: &str) -> Result<String> {
+    // The UID is kept in its escaped wire form (never unescaped), so it is
+    // inserted verbatim; anything that could break out of the line is refused.
+    if invitation.uid.is_empty() || has_control(&invitation.uid) {
+        return Err(AppError::Validation(
+            "invitation UID contains control characters".into(),
+        ));
+    }
+    if has_control(from) || from.contains([':', ';', ',', '"', '<', '>', ' ']) {
+        return Err(AppError::Validation(
+            "account address is not valid for a calendar reply".into(),
+        ));
+    }
+    let lines = [
+        "BEGIN:VCALENDAR".to_string(),
+        "VERSION:2.0".into(),
+        "METHOD:REPLY".into(),
+        "PRODID:-//email-rs//Invitation RSVP//EN".into(),
+        "BEGIN:VEVENT".into(),
+        format!("UID:{}", invitation.uid),
+        format!("SEQUENCE:{}", invitation.sequence.unwrap_or(0)),
+        format!("ATTENDEE;PARTSTAT={status}:mailto:{from}"),
+        "END:VEVENT".into(),
+        "END:VCALENDAR".into(),
+    ];
+    let mut body = String::new();
+    for line in lines {
+        body.push_str(&fold_line(&line));
+        body.push_str("\r\n");
+    }
+    Ok(body)
+}
+
 async fn load_or_parse(state: &AppState, message_id: &str) -> Result<Invitation> {
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM messages WHERE id = ?")
         .bind(message_id)
@@ -131,8 +198,8 @@ async fn load_or_parse(state: &AppState, message_id: &str) -> Result<Invitation>
                 .any(|line| line.eq_ignore_ascii_case("BEGIN:VCALENDAR"))
     });
     if calendar.is_none() {
-        calendar = sqlx::query_scalar("SELECT CAST(content AS TEXT) FROM attachments WHERE message_id = ? AND lower(content_type) LIKE 'text/calendar%' ORDER BY size_bytes LIMIT 1")
-            .bind(message_id).fetch_optional(&state.pool).await?;
+        calendar = sqlx::query_scalar("SELECT CAST(content AS TEXT) FROM attachments WHERE message_id = ? AND lower(content_type) LIKE 'text/calendar%' AND length(content) <= ? ORDER BY size_bytes LIMIT 1")
+            .bind(message_id).bind(MAX_ICAL_BYTES as i64).fetch_optional(&state.pool).await?;
     }
     let source =
         calendar.ok_or_else(|| AppError::NotFound("message has no calendar part".into()))?;
@@ -207,7 +274,9 @@ fn parse_ical(input: &str) -> Result<ParsedInvitation> {
     if !["REQUEST", "CANCEL", "REPLY"].contains(&method.as_str()) {
         return Err(AppError::Validation("unsupported iTIP method".into()));
     }
-    let uid = value("UID")
+    let uid = lines
+        .iter()
+        .find_map(|line| property_raw(line, "UID").map(|(_, value)| value))
         .filter(|v| !v.is_empty())
         .ok_or_else(|| AppError::Validation("calendar event is missing UID".into()))?;
     let start = value("DTSTART")
@@ -264,6 +333,20 @@ fn parse_ical(input: &str) -> Result<ParsedInvitation> {
 }
 
 fn property(line: &str, wanted: &str) -> Option<(Vec<(String, String)>, String)> {
+    property_raw(line, wanted).map(|(params, value)| {
+        (
+            params,
+            value
+                .replace("\\n", "\n")
+                .replace("\\,", ",")
+                .replace("\\;", ";")
+                .replace("\\\\", "\\"),
+        )
+    })
+}
+
+/// Like `property` but leaves the value in its escaped wire form.
+fn property_raw(line: &str, wanted: &str) -> Option<(Vec<(String, String)>, String)> {
     let (head, value) = line.split_once(':')?;
     let mut pieces = head.split(';');
     if pieces.next()?.eq_ignore_ascii_case(wanted) {
@@ -273,14 +356,7 @@ fn property(line: &str, wanted: &str) -> Option<(Vec<(String, String)>, String)>
                     .map(|(k, v)| (k.to_ascii_uppercase(), v.trim_matches('"').to_string()))
             })
             .collect();
-        Some((
-            params,
-            value
-                .replace("\\n", "\n")
-                .replace("\\,", ",")
-                .replace("\\;", ";")
-                .replace("\\\\", "\\"),
-        ))
+        Some((params, value.to_string()))
     } else {
         None
     }
@@ -319,6 +395,45 @@ mod tests {
         assert_eq!(parsed.uid, "abc");
         assert_eq!(parsed.organizer.as_deref(), Some("host@example.com"));
         assert_eq!(parsed.attendees[0].name.as_deref(), Some("Me"));
+    }
+    fn invitation_with_uid(uid: &str) -> Invitation {
+        Invitation {
+            message_id: "m".into(),
+            method: "REQUEST".into(),
+            uid: uid.into(),
+            sequence: None,
+            summary: None,
+            description: None,
+            location: None,
+            start_at: String::new(),
+            end_at: String::new(),
+            organizer: None,
+            attendees: vec![],
+        }
+    }
+    #[test]
+    fn escaped_newline_in_uid_cannot_inject_reply_lines() {
+        let parsed = parse_ical("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:x\\nATTENDEE;PARTSTAT=ACCEPTED:mailto:boss@corp\r\nDTSTART:20261106T120000Z\r\nDTEND:20261106T130000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n").unwrap();
+        let invitation = invitation_with_uid(&parsed.uid);
+        let body = build_reply(&invitation, "ACCEPTED", "me@example.com").unwrap();
+        let attendees = body.lines().filter(|l| l.starts_with("ATTENDEE")).count();
+        assert_eq!(attendees, 1, "{body}");
+        assert!(
+            !body
+                .lines()
+                .any(|l| l.contains("boss@corp") && !l.starts_with("UID:")),
+            "{body}"
+        );
+    }
+    #[test]
+    fn reply_rejects_control_characters_and_folds_long_lines() {
+        for uid in ["a\r\nATTENDEE:mailto:x@y", "a\nb", "a\rb", "a\0b", ""] {
+            assert!(build_reply(&invitation_with_uid(uid), "ACCEPTED", "me@example.com").is_err());
+        }
+        assert!(build_reply(&invitation_with_uid("u"), "ACCEPTED", "a\r\nb@x").is_err());
+        let long = "u".repeat(200);
+        let body = build_reply(&invitation_with_uid(&long), "ACCEPTED", "me@example.com").unwrap();
+        assert!(body.split("\r\n").all(|l| l.len() <= 75));
     }
     #[test]
     fn rejects_unbounded_and_malformed_input() {
