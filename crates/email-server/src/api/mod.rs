@@ -16,6 +16,7 @@ pub mod compose;
 pub mod discovery;
 pub mod events;
 pub mod folders;
+pub mod health;
 pub mod identities;
 pub mod integration_tokens;
 pub mod invitations;
@@ -31,6 +32,7 @@ pub mod threads;
 pub mod webhooks;
 
 pub const PRIVILEGED_ROUTE_INVENTORY: &[(&str, &str)] = &[
+    ("GET", "/health/details"),
     ("GET", "/accounts"),
     ("POST", "/accounts"),
     ("POST", "/accounts/discover"),
@@ -152,6 +154,7 @@ async fn capabilities() -> Json<serde_json::Value> {
 
 pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
+        .route("/health/details", get(health::details))
         .route(
             "/accounts",
             get(accounts::list_accounts).post(accounts::create_account),
