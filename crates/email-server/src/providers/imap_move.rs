@@ -19,6 +19,22 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use super::MovedMessage;
 use crate::error::{AppError, Result};
 
+pub(crate) async fn copy_uid<T>(
+    session: &mut Session<T>,
+    src_folder: &str,
+    uid: u32,
+    dest_folder: &str,
+) -> Result<MovedMessage>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let src = quote_mailbox(src_folder)?;
+    let dest = quote_mailbox(dest_folder)?;
+    run_tagged(session, "SELECT", &format!("SELECT {src}")).await?;
+    let copied = run_tagged(session, "UID COPY", &format!("UID COPY {uid} {dest}")).await?;
+    Ok(moved_from(copied, uid))
+}
+
 /// Move `uid` from `src_folder` to `dest_folder` on an authenticated session.
 pub(crate) async fn move_uid<T>(
     session: &mut Session<T>,
@@ -306,6 +322,32 @@ mod tests {
 
     fn commands(log: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
         log.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn copy_never_marks_deleted_or_expunges() {
+        let (mut session, log) = session_with("", CopyReply::Ok).await;
+        let copied = copy_uid(&mut session, "INBOX", 7, "Projects")
+            .await
+            .unwrap();
+        assert_eq!(
+            commands(&log),
+            ["SELECT \"INBOX\"", "UID COPY 7 \"Projects\""]
+        );
+        assert_eq!(copied.uid, Some(99));
+        assert_eq!(copied.uid_validity, Some(42));
+    }
+
+    #[tokio::test]
+    async fn failed_copy_never_changes_source_flags() {
+        let (mut session, log) = session_with("UIDPLUS MOVE", CopyReply::No).await;
+        assert!(copy_uid(&mut session, "INBOX", 7, "Projects")
+            .await
+            .is_err());
+        assert_eq!(
+            commands(&log),
+            ["SELECT \"INBOX\"", "UID COPY 7 \"Projects\""]
+        );
     }
 
     #[tokio::test]

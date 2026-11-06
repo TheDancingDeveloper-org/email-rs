@@ -192,6 +192,16 @@ pub trait MailProvider: Send + Sync {
         uid: u32,
         dest_folder: &str,
     ) -> Result<MovedMessage>;
+    async fn copy_message(
+        &self,
+        _src_folder: &str,
+        _uid: u32,
+        _dest_folder: &str,
+    ) -> Result<MovedMessage> {
+        Err(crate::error::AppError::Provider(
+            "copy is not supported by this provider".into(),
+        ))
+    }
     /// Toggle the \Flagged flag.
     async fn set_flagged(&self, folder: &str, uid: u32, flagged: bool) -> Result<()>;
     /// Append a provider-synchronized RFC/MIME draft to the given mailbox.
