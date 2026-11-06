@@ -53,6 +53,28 @@ impl MockMessage {
         }
     }
 
+    /// Deterministic message for `uid`, used by the lazy perf mailbox: the same
+    /// UID always yields the same headers, date and body, so runs are
+    /// comparable and nothing needs to be committed as data.
+    pub fn generated(uid: u32) -> Self {
+        let base = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut message = Self::new(uid, &format!("perf message {uid}"));
+        message.from_name = format!("Sender {}", uid % 97);
+        message.from_email = format!("sender{}@example.test", uid % 97);
+        message.date = base + chrono::Duration::minutes(i64::from(uid));
+        message.seen = uid.is_multiple_of(3);
+        message.flagged = uid.is_multiple_of(50);
+        message.in_reply_to =
+            (uid.is_multiple_of(5) && uid > 5).then(|| format!("m{}@mock.example.test", uid - 5));
+        message.body = format!(
+            "Deterministic body of perf message {uid}.\r\nLorem ipsum dolor sit amet, line {}.",
+            uid % 1000
+        );
+        message
+    }
+
     fn raw(&self) -> String {
         let mut raw = format!(
             "Date: {}\r\nFrom: {} <{}>\r\nTo: {}\r\nSubject: {}\r\nMessage-ID: <{}>\r\n",
@@ -91,6 +113,21 @@ pub struct MockMailbox {
     pub name: String,
     pub uid_validity: u32,
     pub messages: Vec<MockMessage>,
+    /// Inclusive UID range of messages generated on demand by
+    /// [`MockMessage::generated`] rather than stored. They come after
+    /// `messages`, so a 100k-message mailbox costs no memory until fetched.
+    pub lazy: Option<(u32, u32)>,
+}
+
+impl MockMailbox {
+    fn exists(&self) -> usize {
+        self.messages.len() + self.lazy.map_or(0, |(a, b)| (b - a + 1) as usize)
+    }
+
+    fn max_uid(&self) -> u32 {
+        let stored = self.messages.iter().map(|m| m.uid).max().unwrap_or(0);
+        stored.max(self.lazy.map_or(0, |(_, b)| b))
+    }
 }
 
 #[derive(Default)]
@@ -134,6 +171,7 @@ impl MockImapServer {
                 name: "INBOX".into(),
                 uid_validity: 1,
                 messages: Vec::new(),
+                lazy: None,
             }],
             commands: Vec::new(),
         }));
@@ -177,6 +215,7 @@ impl MockImapServer {
             name: name.into(),
             uid_validity,
             messages: Vec::new(),
+            lazy: None,
         });
     }
 
@@ -197,6 +236,21 @@ impl MockImapServer {
         });
     }
 
+    /// Append `count` lazily generated, deterministic messages with
+    /// consecutive UIDs after the highest existing one. Nothing is stored per
+    /// message, so this scales to the 100k-message perf fixture (see
+    /// `imap::perf_tests`). Lazy messages cannot be individually removed.
+    pub fn populate_lazy(&self, mailbox: &str, count: u32) {
+        self.with_mailbox(mailbox, |mb| {
+            let next = mb.max_uid() + 1;
+            mb.lazy = match mb.lazy {
+                Some((a, b)) if b + 1 == next => Some((a, b + count)),
+                Some(_) => panic!("lazy range must stay contiguous"),
+                None => Some((next, next + count - 1)),
+            };
+        });
+    }
+
     pub fn remove_message(&self, mailbox: &str, uid: u32) {
         self.with_mailbox(mailbox, |mb| mb.messages.retain(|m| m.uid != uid));
     }
@@ -207,6 +261,7 @@ impl MockImapServer {
         self.with_mailbox(mailbox, |mb| {
             mb.uid_validity = uid_validity;
             mb.messages = messages;
+            mb.lazy = None;
         });
     }
 
@@ -297,11 +352,11 @@ where
                 let state = state.lock().unwrap();
                 match state.mailboxes.iter().find(|mb| mb.name == name) {
                     Some(mb) => {
-                        let next = mb.messages.iter().map(|m| m.uid).max().unwrap_or(0) + 1;
+                        let next = mb.max_uid() + 1;
                         out.extend_from_slice(
                             format!(
                                 "* {} EXISTS\r\n* 0 RECENT\r\n* FLAGS (\\Seen \\Flagged \\Draft)\r\n* OK [UIDVALIDITY {}] ok\r\n* OK [UIDNEXT {}] ok\r\n",
-                                mb.messages.len(), mb.uid_validity, next
+                                mb.exists(), mb.uid_validity, next
                             )
                             .as_bytes(),
                         );
@@ -343,10 +398,17 @@ where
                         let mut fetch = rest.splitn(2, ' ');
                         let set = fetch.next().unwrap_or("");
                         let items = fetch.next().unwrap_or("").to_ascii_uppercase();
-                        let wanted = parse_set(set);
+                        let wanted: std::collections::BTreeSet<u32> =
+                            parse_set(set).into_iter().collect();
                         for (index, message) in mb.messages.iter().enumerate() {
                             if wanted.contains(&message.uid) {
                                 fetch_response(&mut out, index + 1, message, &items);
+                            }
+                        }
+                        if let Some((first, last)) = mb.lazy {
+                            for &uid in wanted.range(first..=last) {
+                                let seq = mb.messages.len() + (uid - first) as usize + 1;
+                                fetch_response(&mut out, seq, &MockMessage::generated(uid), &items);
                             }
                         }
                         ok(&mut out, tag, "UID FETCH completed");
@@ -411,10 +473,20 @@ fn search(mb: &MockMailbox, criteria: &str) -> Vec<u32> {
             let needle = unquote(text).to_ascii_lowercase();
             Box::new(move |m| m.raw().to_ascii_lowercase().contains(&needle))
         } else {
-            Box::new(|_| true)
+            // Match-all: list lazy UIDs without generating their messages.
+            let mut uids: Vec<u32> = mb.messages.iter().map(|m| m.uid).collect();
+            uids.extend(mb.lazy.into_iter().flat_map(|(a, b)| a..=b));
+            return uids;
         };
+    let lazy = mb
+        .lazy
+        .into_iter()
+        .flat_map(|(a, b)| a..=b)
+        .map(MockMessage::generated);
     mb.messages
         .iter()
+        .cloned()
+        .chain(lazy)
         .filter(|m| matches(m))
         .map(|m| m.uid)
         .collect()

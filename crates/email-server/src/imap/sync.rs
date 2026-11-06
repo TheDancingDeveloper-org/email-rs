@@ -1147,6 +1147,9 @@ async fn prefetch_uncached_bodies(
 }
 
 #[cfg(test)]
+mod perf_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::{Arc, RwLock};
 
