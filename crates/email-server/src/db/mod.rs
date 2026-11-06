@@ -463,7 +463,21 @@ fn migrations() -> Vec<Migration> {
             name: "identities",
             apply: in_transaction!(run_identities_migration),
         },
+        Migration {
+            version: 27,
+            name: "calendar_invitations",
+            apply: in_transaction!(run_calendar_invitations_migration),
+        },
     ]
+}
+
+async fn run_calendar_invitations_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query(r#"CREATE TABLE IF NOT EXISTS calendar_invitations (
+        id TEXT PRIMARY KEY, message_id TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+        method TEXT NOT NULL, uid TEXT NOT NULL, sequence INTEGER, summary TEXT, description TEXT,
+        location TEXT, start_at TEXT NOT NULL, end_at TEXT NOT NULL, organizer TEXT, attendees_json TEXT NOT NULL
+    )"#).execute(&mut *conn).await?;
+    Ok(())
 }
 
 /// Apply every migration this database has not recorded, oldest first.

@@ -22,6 +22,7 @@ use super::discovery::{DiscoveryRequest, DiscoveryResponse};
 use super::integration_tokens::{
     CreateIntegrationToken, CreatedIntegrationToken, IntegrationToken,
 };
+use super::invitations::{Invitation, InvitationAttendee, RsvpRequest};
 use super::messages::CursorMessagesResponse;
 use super::webhooks::{IntegrationEvent, WebhookDelivery};
 
@@ -49,6 +50,12 @@ pub struct CapabilitiesResponse {
 
 #[utoipa::path(get, path = "/health", responses((status = 200, body = String)))]
 fn doc_health() {}
+
+#[utoipa::path(get, path = "/messages/{id}/invitation", security(("bearerAuth" = ["mail.body.read"])), params(("id" = String, Path)), responses((status = 200, body = Invitation), (status = 404, body = ErrorResponse)))]
+fn doc_get_invitation() {}
+
+#[utoipa::path(post, path = "/messages/{id}/invitation/rsvp", security(("bearerAuth" = ["mail.send"])), params(("id" = String, Path)), request_body = RsvpRequest, responses((status = 200, body = serde_json::Value), (status = 400, body = ErrorResponse)))]
+fn doc_rsvp_invitation() {}
 
 #[utoipa::path(get, path = "/openapi.json", responses((status = 200, description = "OpenAPI 3.1 contract")))]
 fn doc_openapi() {}
@@ -555,6 +562,8 @@ fn doc_events() {}
     servers((url = "/api/v1")),
     paths(
         doc_health,
+        doc_get_invitation,
+        doc_rsvp_invitation,
         doc_openapi,
         doc_ready,
         doc_version,
@@ -638,6 +647,9 @@ fn doc_events() {}
     ),
     components(schemas(
         ErrorResponse,
+        Invitation,
+        InvitationAttendee,
+        RsvpRequest,
         VersionResponse,
         CapabilitiesResponse,
         StatusResponse,

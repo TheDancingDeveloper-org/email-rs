@@ -598,6 +598,12 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
     if *method == Method::POST && path == "/accounts/discover" {
         return Some("mail.accounts.connect");
     }
+    if path.ends_with("/invitation") {
+        return (*method == Method::GET).then_some("mail.body.read");
+    }
+    if path.ends_with("/invitation/rsvp") {
+        return (*method == Method::POST).then_some("mail.send");
+    }
     if path.starts_with("/accounts") {
         return (*method == Method::GET).then_some("mail.accounts.read");
     }
