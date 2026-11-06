@@ -74,7 +74,6 @@ struct PendingDelta {
     next_uid: i64,
     upserts: HashMap<String, i64>,
     removed: HashSet<String>,
-    full: bool,
 }
 
 /// What one pass over a folder's delta feed produced.
@@ -246,6 +245,14 @@ impl GraphDelta {
     /// Apply one delta pass for a folder and return the messages to upsert.
     /// An expired deltaLink (410) is dropped and the folder is fully re-synced.
     pub async fn sync_folder(&self, folder_id: &str) -> Result<Vec<Message>> {
+        let result = self.sync_folder_inner(folder_id).await;
+        if result.is_err() {
+            self.discard_pending(folder_id);
+        }
+        result
+    }
+
+    async fn sync_folder_inner(&self, folder_id: &str) -> Result<Vec<Message>> {
         let initial_url = format!(
             "{}/me/mailFolders/{}/messages/delta?$select={}",
             self.base_url,
@@ -322,7 +329,6 @@ impl GraphDelta {
                 next_uid,
                 upserts: mapped,
                 removed,
-                full,
             },
         );
         Ok(messages)
@@ -332,7 +338,9 @@ impl GraphDelta {
         let Some(pending) = self.pending.lock().unwrap().remove(folder_id) else {
             return Ok(());
         };
-        let mut tx = crate::db::begin_write(&self.pool).await?;
+        let mut tx = crate::db::begin_write(&self.pool)
+            .await
+            .map_err(|error| AppError::Transient(error.to_string()))?;
         sqlx::query(
             "INSERT OR IGNORE INTO graph_delta_links (account_id, folder_id) VALUES (?, ?)",
         )
@@ -341,14 +349,44 @@ impl GraphDelta {
         .execute(&mut *tx)
         .await?;
         for id in pending.removed {
-            sqlx::query("DELETE FROM graph_message_map WHERE account_id = ? AND folder_id = ? AND graph_id = ?").bind(&self.account_id).bind(folder_id).bind(id).execute(&mut *tx).await?;
+            sqlx::query(
+                "DELETE FROM graph_message_map
+                 WHERE account_id = ? AND folder_id = ? AND graph_id = ?",
+            )
+            .bind(&self.account_id)
+            .bind(folder_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         }
         for (id, uid) in pending.upserts {
-            sqlx::query("INSERT OR REPLACE INTO graph_message_map (account_id, folder_id, graph_id, uid) VALUES (?, ?, ?, ?)").bind(&self.account_id).bind(folder_id).bind(id).bind(uid).execute(&mut *tx).await?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO graph_message_map
+                 (account_id, folder_id, graph_id, uid) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&self.account_id)
+            .bind(folder_id)
+            .bind(id)
+            .bind(uid)
+            .execute(&mut *tx)
+            .await?;
         }
-        sqlx::query("UPDATE graph_delta_links SET delta_link = ?, next_uid = ? WHERE account_id = ? AND folder_id = ?").bind(pending.delta_link).bind(pending.next_uid).bind(&self.account_id).bind(folder_id).execute(&mut *tx).await?;
+        sqlx::query(
+            "UPDATE graph_delta_links SET delta_link = ?, next_uid = ?
+             WHERE account_id = ? AND folder_id = ?",
+        )
+        .bind(pending.delta_link)
+        .bind(pending.next_uid)
+        .bind(&self.account_id)
+        .bind(folder_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    pub fn discard_pending(&self, folder_id: &str) {
+        self.pending.lock().unwrap().remove(folder_id);
     }
 
     /// Every UID currently mapped in the folder (the post-delta snapshot).
@@ -525,7 +563,7 @@ mod tests {
     }
 
     struct Harness {
-        graph: GraphDelta,
+        graph: Arc<GraphDelta>,
         mock: Mock,
         base: String,
         pool: SqlitePool,
@@ -555,7 +593,7 @@ mod tests {
             Arc::new(StaticStore(token)),
         ));
         Harness {
-            graph: GraphDelta::new(&base, tokens, pool.clone(), "a".into()),
+            graph: Arc::new(GraphDelta::new(&base, tokens, pool.clone(), "a".into())),
             mock,
             base,
             pool,
@@ -596,6 +634,7 @@ mod tests {
         ]);
         let messages = h.graph.sync_folder("inbox").await.unwrap();
         assert_eq!(messages.len(), 2);
+        h.graph.commit_pending("inbox").await.unwrap();
         assert_eq!(h.graph.list_uids("inbox").await.unwrap().len(), 2);
         assert_eq!(
             h.graph.stored_link("inbox").await.unwrap().as_deref(),
@@ -631,11 +670,13 @@ mod tests {
         ]);
         let first = h.graph.sync_folder("inbox").await.unwrap();
         let (uid1, uid2) = (uid_of(&first, "one"), uid_of(&first, "two"));
+        h.graph.commit_pending("inbox").await.unwrap();
         let second = h.graph.sync_folder("inbox").await.unwrap();
         assert_eq!(second.len(), 2);
         let updated = second.iter().find(|m| m.uid == uid1).unwrap();
         assert_eq!(updated.subject.as_deref(), Some("one edited"));
         assert!(updated.is_read);
+        h.graph.commit_pending("inbox").await.unwrap();
         let uids = h.graph.list_uids("inbox").await.unwrap();
         assert!(!uids.contains(&uid2));
         assert!(uids.contains(&uid1) && uids.len() == 2);
@@ -674,9 +715,11 @@ mod tests {
         ]);
         let first = h.graph.sync_folder("inbox").await.unwrap();
         let (uid1, uid2) = (uid_of(&first, "one"), uid_of(&first, "two"));
+        h.graph.commit_pending("inbox").await.unwrap();
         let resync = h.graph.sync_folder("inbox").await.unwrap();
         assert_eq!(resync.len(), 1);
         assert_eq!(resync[0].uid, uid2, "surviving message keeps its uid");
+        h.graph.commit_pending("inbox").await.unwrap();
         let uids = h.graph.list_uids("inbox").await.unwrap();
         assert!(
             !uids.contains(&uid1),
@@ -715,6 +758,7 @@ mod tests {
         let started = Instant::now();
         let messages = h.graph.sync_folder("inbox").await.unwrap();
         assert_eq!(messages.len(), 1);
+        h.graph.commit_pending("inbox").await.unwrap();
         assert!(started.elapsed() >= Duration::from_millis(900));
         assert_eq!(h.mock.seen.lock().unwrap().len(), 2);
     }
@@ -747,11 +791,96 @@ mod tests {
             (500, None, json!({})),
         ]);
         h.graph.sync_folder("inbox").await.unwrap();
+        h.graph.commit_pending("inbox").await.unwrap();
         assert!(h.graph.sync_folder("inbox").await.is_err());
+        assert_eq!(h.graph.list_uids("inbox").await.unwrap(), vec![1]);
         assert_eq!(
             h.graph.stored_link("inbox").await.unwrap().as_deref(),
             Some(format!("{base}/delta?token=d1").as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn engine_write_failure_replays_old_cursor_and_discards_pending_uids() {
+        use crate::providers::gmail::GmailProvider;
+        let h = harness(vec![]).await;
+        let base = &h.base;
+        let initial = json!({"value": [msg("m1", "one", false)],
+            "@odata.deltaLink": format!("{base}/delta?token=d1")});
+        let update = json!({"value": [msg("m1", "edited", true), msg("m2", "two", false)],
+            "@odata.deltaLink": format!("{base}/delta?token=d2")});
+        h.mock.script.lock().unwrap().extend([
+            (200, None, initial),
+            (200, None, update.clone()),
+            (200, None, update),
+        ]);
+        sqlx::query("INSERT INTO folders (id, account_id, name, full_path, uid_validity) VALUES ('f','a','Inbox','inbox',1)")
+            .execute(&h.pool).await.unwrap();
+        let provider = Arc::new(
+            GmailProvider::new_outlook("a".into(), "a@example.test".into(), h.graph.tokens.clone())
+                .with_graph_delta(h.graph.clone()),
+        );
+        crate::imap::sync::sync_graph_test_folder(provider.clone(), h.pool.clone())
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fail_message_write BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'injected message write failure'); END")
+            .execute(&h.pool).await.unwrap();
+        let error = crate::imap::sync::sync_graph_test_folder(provider.clone(), h.pool.clone())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected message write failure"));
+        assert!(h.graph.pending.lock().unwrap().is_empty());
+        assert_eq!(h.graph.list_uids("inbox").await.unwrap(), vec![1]);
+        assert_eq!(
+            h.graph.stored_link("inbox").await.unwrap(),
+            Some(format!("{base}/delta?token=d1"))
+        );
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT uid, subject FROM messages ORDER BY uid")
+                .fetch_all(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(1, "one".into())]);
+        sqlx::query("DROP TRIGGER fail_message_write")
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        crate::imap::sync::sync_graph_test_folder(provider, h.pool.clone())
+            .await
+            .unwrap();
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT uid, subject FROM messages ORDER BY uid")
+                .fetch_all(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(1, "edited".into()), (2, "two".into())]);
+        assert_eq!(
+            h.graph.stored_link("inbox").await.unwrap(),
+            Some(format!("{base}/delta?token=d2"))
+        );
+        let seen = h.mock.seen.lock().unwrap();
+        assert_eq!(seen[1].0, "/delta?token=d1");
+        assert_eq!(seen[2].0, seen[1].0);
+    }
+
+    #[tokio::test]
+    async fn failed_fetch_discards_an_uncommitted_batch() {
+        let h = harness(vec![]).await;
+        h.mock.script.lock().unwrap().extend([
+            (
+                200,
+                None,
+                json!({"value": [msg("m1", "one", false)],
+                "@odata.deltaLink": format!("{}/delta", h.base)}),
+            ),
+            (500, None, json!({})),
+        ]);
+        h.graph.sync_folder("inbox").await.unwrap();
+        assert_eq!(h.graph.list_uids("inbox").await.unwrap(), vec![1]);
+        assert!(h.graph.sync_folder("inbox").await.is_err());
+        assert!(h.graph.list_uids("inbox").await.unwrap().is_empty());
+        h.graph.commit_pending("inbox").await.unwrap();
+        assert!(h.graph.stored_link("inbox").await.unwrap().is_none());
     }
 
     #[tokio::test]

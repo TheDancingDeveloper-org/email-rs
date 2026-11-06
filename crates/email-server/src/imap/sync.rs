@@ -628,8 +628,39 @@ mod schedule_tests {
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn sync_graph_test_folder(
+    provider: Arc<dyn MailProvider>,
+    pool: SqlitePool,
+) -> crate::error::Result<()> {
+    let folder = sqlx::query_as("SELECT id, name, full_path, synced_at, is_excluded, uid_validity FROM folders WHERE id='f'").fetch_one(&pool).await?;
+    sync_folder(provider, pool, "a", folder, None).await
+}
+
 /// Fetch and store all messages for a single folder. Runs in parallel with other folders.
 async fn sync_folder(
+    provider: Arc<dyn MailProvider>,
+    pool: SqlitePool,
+    account_id: &str,
+    db_folder: FolderRecord,
+    sync_days_limit: Option<i64>,
+) -> crate::error::Result<()> {
+    let folder_path = db_folder.full_path.clone();
+    let result = sync_folder_inner(
+        provider.clone(),
+        pool,
+        account_id,
+        db_folder,
+        sync_days_limit,
+    )
+    .await;
+    if result.is_err() {
+        provider.discard_pending_sync(&folder_path).await?;
+    }
+    result
+}
+
+async fn sync_folder_inner(
     provider: Arc<dyn MailProvider>,
     pool: SqlitePool,
     account_id: &str,

@@ -580,6 +580,13 @@ impl MailProvider for GmailProvider {
         }
     }
 
+    async fn discard_pending_sync(&self, folder: &str) -> Result<()> {
+        if let Some(graph) = &self.graph {
+            graph.discard_pending(folder);
+        }
+        Ok(())
+    }
+
     async fn fetch_messages_by_uid(&self, folder: &str, uids: &[u32]) -> Result<Vec<Message>> {
         if let Some(graph) = &self.graph {
             return graph.fetch_by_uids(folder, uids).await;
