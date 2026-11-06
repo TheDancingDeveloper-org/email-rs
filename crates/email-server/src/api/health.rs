@@ -19,6 +19,7 @@ pub struct AccountHealth {
     pub needs_reauth: bool,
     /// Outgoing messages pending or currently sending, including scheduled sends.
     pub queue_depth: i64,
+    pub offline_queue_depth: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -33,7 +34,8 @@ pub async fn details(State(state): State<Arc<AppState>>) -> Result<Json<HealthDe
     // sanitized error response, rather than reporting an empty healthy estate.
     let accounts = sqlx::query_as::<_, AccountHealth>(
         "SELECT a.id AS account_id, h.last_success_at, h.last_error_at, h.last_error, a.needs_reauth,
-         (SELECT COUNT(*) FROM outbox o WHERE o.account_id = a.id AND o.status IN ('pending', 'sending')) AS queue_depth
+         (SELECT COUNT(*) FROM outbox o WHERE o.account_id = a.id AND o.status IN ('pending', 'sending')) AS queue_depth,
+         (SELECT COUNT(*) FROM imap_action_queue q WHERE q.account_id = a.id) AS offline_queue_depth
          FROM accounts a LEFT JOIN account_sync_health h ON h.account_id = a.id ORDER BY a.id",
     ).fetch_all(&state.pool).await?;
     Ok(Json(HealthDetails {
