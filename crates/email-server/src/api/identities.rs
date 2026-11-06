@@ -56,6 +56,17 @@ pub async fn update_identity(
     Path((account_id, identity_id)): Path<(String, String)>,
     Json(body): Json<UpdateIdentity>,
 ) -> Result<Json<Identity>> {
+    Ok(Json(
+        update(&state.pool, account_id, identity_id, body).await?,
+    ))
+}
+
+pub(crate) async fn update(
+    pool: &SqlitePool,
+    account_id: String,
+    identity_id: String,
+    body: UpdateIdentity,
+) -> Result<Identity> {
     if identity_id == DEFAULT_IDENTITY_ID {
         return Err(AppError::Validation(
             "the default identity cannot be updated here".into(),
@@ -64,22 +75,25 @@ pub async fn update_identity(
     let current = sqlx::query_as::<_, Identity>(
         "SELECT id, account_id, name, email, 0 AS is_default, signature, signature_html, signature_placement FROM identities WHERE id = ? AND account_id = ?",
     )
-    .bind(&identity_id).bind(&account_id).fetch_optional(&state.pool).await?
+    .bind(&identity_id).bind(&account_id).fetch_optional(pool).await?
     .ok_or_else(|| AppError::NotFound(format!("identity {identity_id} not found")))?;
-    let name = body.name.unwrap_or(current.name);
-    let email = body.email.unwrap_or(current.email);
+    let (name, email) = validate_name_and_email(
+        pool,
+        &account_id,
+        Some(&identity_id),
+        body.name.as_deref().unwrap_or(&current.name),
+        body.email.as_deref().unwrap_or(&current.email),
+    )
+    .await?;
     let signature = body.signature.unwrap_or(current.signature);
     let signature_html = body.signature_html.unwrap_or(current.signature_html);
     let placement = body
         .signature_placement
         .unwrap_or(current.signature_placement);
     validate_signature_placement(&placement)?;
-    email
-        .parse::<Address>()
-        .map_err(|_| AppError::Validation("identity email is not a valid address".into()))?;
     sqlx::query("UPDATE identities SET name = ?, email = ?, signature = ?, signature_html = ?, signature_placement = ? WHERE id = ? AND account_id = ?")
-        .bind(&name).bind(&email).bind(&signature).bind(&signature_html).bind(&placement).bind(&identity_id).bind(&account_id).execute(&state.pool).await?;
-    Ok(Json(Identity {
+        .bind(&name).bind(&email).bind(&signature).bind(&signature_html).bind(&placement).bind(&identity_id).bind(&account_id).execute(pool).await?;
+    Ok(Identity {
         id: identity_id,
         account_id,
         name,
@@ -88,7 +102,7 @@ pub async fn update_identity(
         signature,
         signature_html,
         signature_placement: placement,
-    }))
+    })
 }
 
 /// The account's own identity first, then its aliases in the order added.
@@ -121,30 +135,9 @@ pub(crate) async fn create(
     account_id: &str,
     body: CreateIdentity,
 ) -> Result<Identity> {
-    let primary = default_identity(pool, account_id).await?;
-    let name = body.name.trim().to_string();
-    if name.chars().count() > MAX_NAME_CHARS || name.chars().any(char::is_control) {
-        return Err(AppError::Validation("identity name is not valid".into()));
-    }
-    let email = body.email.trim().to_string();
     validate_signature_placement(&body.signature_placement)?;
-    email
-        .parse::<Address>()
-        .map_err(|_| AppError::Validation("identity email is not a valid address".into()))?;
-    let taken = primary.email.eq_ignore_ascii_case(&email)
-        || sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM identities WHERE account_id = ? AND lower(email) = lower(?)",
-        )
-        .bind(account_id)
-        .bind(&email)
-        .fetch_one(pool)
-        .await?
-            > 0;
-    if taken {
-        return Err(AppError::Conflict(
-            "this account already has an identity with that address".into(),
-        ));
-    }
+    let (name, email) =
+        validate_name_and_email(pool, account_id, None, &body.name, &body.email).await?;
     let id = Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO identities (id, account_id, name, email, signature, signature_html, signature_placement) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .bind(&id).bind(account_id).bind(&name).bind(&email)
@@ -188,6 +181,44 @@ pub(crate) async fn resolve_from(
         .map_err(|_| AppError::Validation("identity email is not a valid address".into()))?;
     let name = identity.name.trim();
     Ok(Mailbox::new((!name.is_empty()).then(|| name.to_string()), address).to_string())
+}
+
+/// Trimmed, header-safe name and address for an identity on `account_id`.
+/// The address must parse and must not already belong to the account or to
+/// another of its identities; `own_id` is the identity being updated, whose
+/// own row does not count as a clash.
+async fn validate_name_and_email(
+    pool: &SqlitePool,
+    account_id: &str,
+    own_id: Option<&str>,
+    name: &str,
+    email: &str,
+) -> Result<(String, String)> {
+    let primary = default_identity(pool, account_id).await?;
+    let name = name.trim().to_string();
+    if name.chars().count() > MAX_NAME_CHARS || name.chars().any(char::is_control) {
+        return Err(AppError::Validation("identity name is not valid".into()));
+    }
+    let email = email.trim().to_string();
+    email
+        .parse::<Address>()
+        .map_err(|_| AppError::Validation("identity email is not a valid address".into()))?;
+    let taken = primary.email.eq_ignore_ascii_case(&email)
+        || sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM identities WHERE account_id = ? AND lower(email) = lower(?) AND id IS NOT ?",
+        )
+        .bind(account_id)
+        .bind(&email)
+        .bind(own_id)
+        .fetch_one(pool)
+        .await?
+            > 0;
+    if taken {
+        return Err(AppError::Conflict(
+            "this account already has an identity with that address".into(),
+        ));
+    }
+    Ok((name, email))
 }
 
 fn validate_signature_placement(value: &str) -> Result<()> {
@@ -328,5 +359,86 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    fn patch(json: serde_json::Value) -> UpdateIdentity {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[tokio::test]
+    async fn update_rejects_header_injection_and_duplicate_addresses() {
+        let pool = pool_with_account().await;
+        let alias = create(&pool, "a1", new_identity("A", "alias@example.com"))
+            .await
+            .unwrap();
+        create(&pool, "a1", new_identity("B", "b@example.com"))
+            .await
+            .unwrap();
+        for body in [
+            serde_json::json!({"name": "Evil\r\nBcc: x@evil.test"}),
+            serde_json::json!({"name": "x".repeat(MAX_NAME_CHARS + 1)}),
+            serde_json::json!({"email": "not-an-address"}),
+        ] {
+            assert!(matches!(
+                update(&pool, "a1".into(), alias.id.clone(), patch(body)).await,
+                Err(AppError::Validation(_))
+            ));
+        }
+        for email in ["B@example.com", "me@example.com"] {
+            assert!(matches!(
+                update(
+                    &pool,
+                    "a1".into(),
+                    alias.id.clone(),
+                    patch(serde_json::json!({ "email": email }))
+                )
+                .await,
+                Err(AppError::Conflict(_))
+            ));
+        }
+        // Its own address is not a clash.
+        update(
+            &pool,
+            "a1".into(),
+            alias.id.clone(),
+            patch(serde_json::json!({"email": "ALIAS@example.com"})),
+        )
+        .await
+        .unwrap();
+        let stored: String = sqlx::query_scalar("SELECT name FROM identities WHERE id = ?")
+            .bind(&alias.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "A");
+    }
+
+    #[tokio::test]
+    async fn update_changes_fields_and_clears_a_signature_with_null() {
+        let pool = pool_with_account().await;
+        let mut body = new_identity("Sales", "sales@example.com");
+        body.signature = Some("Regards".into());
+        body.signature_html = Some("<p>Regards</p>".into());
+        let alias = create(&pool, "a1", body).await.unwrap();
+
+        let updated = update(
+            &pool,
+            "a1".into(),
+            alias.id.clone(),
+            patch(serde_json::json!({
+                "name": "  Sales Team  ",
+                "signature": null,
+                "signaturePlacement": "above"
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.name, "Sales Team");
+        assert_eq!(updated.email, "sales@example.com");
+        assert_eq!(updated.signature, None);
+        assert_eq!(updated.signature_html.as_deref(), Some("<p>Regards</p>"));
+        assert_eq!(updated.signature_placement, "above");
+        let listed = list(&pool, "a1").await.unwrap();
+        assert_eq!(listed[1], updated);
     }
 }

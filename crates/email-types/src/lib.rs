@@ -177,9 +177,17 @@ fn is_below(value: &str) -> bool {
 pub struct UpdateIdentity {
     pub name: Option<String>,
     pub email: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "double_option"
+    )]
     pub signature: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "double_option"
+    )]
     pub signature_html: Option<Option<String>>,
     pub signature_placement: Option<String>,
 }
