@@ -132,11 +132,17 @@ pub async fn provider_for_account(
             tokens,
         )))
     } else {
-        Ok(Arc::new(GmailProvider::new_outlook(
-            account.id,
-            account.email,
-            tokens,
-        )))
+        let mut provider =
+            GmailProvider::new_outlook(account.id.clone(), account.email, tokens.clone());
+        if super::graph_delta::graph_sync_enabled() {
+            provider = provider.with_graph_delta(Arc::new(super::graph_delta::GraphDelta::new(
+                super::graph_delta::DEFAULT_BASE_URL,
+                tokens,
+                pool.clone(),
+                account.id,
+            )));
+        }
+        Ok(Arc::new(provider))
     }
 }
 
