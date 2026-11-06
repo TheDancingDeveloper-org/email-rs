@@ -1465,7 +1465,8 @@ pub(crate) fn reading_placeholder(
         })
         // (d) Blocked-images banner — shown when the message contains external
         // images that have been stripped pending user consent.
-        .when(document_has_blocked_images(state), |pane| {
+        .when(blocked_image_count(state) > 0, |pane| {
+            let blocked_label = blocked_images_label(blocked_image_count(state));
             let show_state = state_entity.clone();
             let allow_state = state_entity.clone();
             pane.child(
@@ -1484,7 +1485,7 @@ pub(crate) fn reading_placeholder(
                             .flex_1()
                             .text_size(px(typography.caption.size))
                             .text_color(colors.on_subtle)
-                            .child("External images are blocked."),
+                            .child(blocked_label),
                     )
                     .child(
                         Button::new("reading-show-images")
@@ -1943,24 +1944,34 @@ pub(crate) fn confirm_external_link(state_entity: &Entity<NativeAppState>, app_c
     }
 }
 
-/// Returns true if the full message body contains external (http/https) images
-/// that are currently blocked.
-pub(crate) fn document_has_blocked_images(state: &NativeAppState) -> bool {
+/// Counts the external (http/https) images in the full message body that are
+/// currently blocked.
+pub(crate) fn blocked_image_count(state: &NativeAppState) -> usize {
     if state.show_external_images {
-        return false;
+        return 0;
     }
-    if let Some(message) = state.selected_full_message.as_ref() {
-        if let Some(body) = message.body.as_ref() {
-            if let Some(html) = body.html_body.as_ref() {
-                let doc = RichDocument::from_html_fragment_lossy(html);
-                return doc.blocks.iter().any(|block| {
+    state
+        .selected_full_message
+        .as_ref()
+        .and_then(|message| message.body.as_ref())
+        .and_then(|body| body.html_body.as_ref())
+        .map_or(0, |html| {
+            RichDocument::from_html_fragment_lossy(html)
+                .blocks
+                .iter()
+                .filter(|block| {
                     matches!(block, RichDocumentBlock::Image { src, .. }
                         if src.starts_with("http://") || src.starts_with("https://"))
-                });
-            }
-        }
+                })
+                .count()
+        })
+}
+
+pub(crate) fn blocked_images_label(count: usize) -> String {
+    match count {
+        1 => "1 external image is blocked.".to_string(),
+        n => format!("{n} external images are blocked."),
     }
-    false
 }
 
 /// Removes external image blocks from the document in place so they are not
