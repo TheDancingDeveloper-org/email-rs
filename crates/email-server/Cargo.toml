@@ -68,5 +68,6 @@ winres = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
