@@ -277,6 +277,18 @@ fn doc_get_message() {}
 
 #[utoipa::path(
     get,
+    path = "/messages/{id}/source",
+    security(("bearerAuth" = ["mail.body.read"])),
+    params(("id" = String, Path, description = "Mailbox occurrence ID")),
+    responses(
+        (status = 200, content_type = "application/octet-stream", body = Vec<u8>),
+        (status = 404, body = ErrorResponse)
+    )
+)]
+fn doc_download_source() {}
+
+#[utoipa::path(
+    get,
     path = "/threads/{id}",
     security(("bearerAuth" = ["mail.metadata.read"])),
     params(("id" = String, Path)),
@@ -588,6 +600,7 @@ fn doc_events() {}
         doc_mark_folder_read,
         doc_list_messages,
         doc_get_message,
+        doc_download_source,
         doc_get_thread,
         doc_patch_message,
         doc_delete_message,
