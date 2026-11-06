@@ -1313,11 +1313,9 @@ pub(crate) fn reading_placeholder(
                                 .size(ButtonSize::Compact)
                                 .on_click(move |_, _, app_cx| {
                                     if let Some(message) =
-                                        state_entity.read(app_cx).selected_full_message.as_ref()
+                                        state_entity.read(app_cx).selected_full_message.clone()
                                     {
-                                        if let Err(error) = open_source(message) {
-                                            tracing::warn!(%error, "unable to open message source");
-                                        }
+                                        show_source_dialog(&message, app_cx);
                                     }
                                 })
                         })

@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+rfd = "0.15"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/thedancingdeveloper/fluent-gpui.git", rev = "1b61b73a20377ae7adbb411727fd9e8e13a353be", features = ["test-support"] }
