@@ -2406,6 +2406,7 @@ fn account_setup_draft() -> AccountSetupFormDraft {
         smtp_port: "587".to_string(),
         smtp_password: "smtp-secret".to_string(),
         same_password: true,
+        imap_use_ssl: None,
     }
 }
 
@@ -2424,6 +2425,20 @@ fn manual_account_request_trims_fields_and_reuses_imap_password() {
     assert_eq!(request.smtp_port, Some(587));
     assert_eq!(request.smtp_password.as_deref(), Some("imap-secret"));
     assert_eq!(request.use_ssl, None);
+}
+
+#[test]
+fn discovery_only_accepts_implicit_tls() {
+    assert_eq!(discovered_imap_security("TLS"), Some(true));
+    assert_eq!(discovered_imap_security("STARTTLS"), None);
+    assert_eq!(discovered_imap_security("plain"), None);
+
+    let mut draft = account_setup_draft();
+    draft.imap_use_ssl = discovered_imap_security("TLS");
+    assert_eq!(
+        build_manual_account_request(draft).unwrap().use_ssl,
+        Some(true)
+    );
 }
 
 #[test]
