@@ -285,6 +285,10 @@ impl MailProvider for TestMailProvider {
         Err(AppError::NotFound("message body is not cached".to_string()))
     }
 
+    async fn fetch_raw_message(&self, _folder: &str, _uid: u32) -> Result<Vec<u8>> {
+        Ok(b"From: sender@example.com\r\nSubject: Test\r\n\r\nraw body\r\n".to_vec())
+    }
+
     async fn fetch_bodies_batch(
         &self,
         _folder: &str,
