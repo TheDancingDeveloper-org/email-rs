@@ -20,6 +20,7 @@ class MessageBody:
             images or tracking links. Computed once when the body is cached.
         html_body (None | str | Unset):
         quoted_history (None | str | Unset): The quoted history split off `cleanBody`, if the message had any.
+        raw_headers (None | str | Unset): Original RFC headers retained for source/export views.
         signature_stripped (bool | Unset): Whether a signature was removed from `cleanBody`.
         text_body (None | str | Unset):
     """
@@ -27,6 +28,7 @@ class MessageBody:
     clean_body: None | str | Unset = UNSET
     html_body: None | str | Unset = UNSET
     quoted_history: None | str | Unset = UNSET
+    raw_headers: None | str | Unset = UNSET
     signature_stripped: bool | Unset = UNSET
     text_body: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -50,6 +52,12 @@ class MessageBody:
         else:
             quoted_history = self.quoted_history
 
+        raw_headers: None | str | Unset
+        if isinstance(self.raw_headers, Unset):
+            raw_headers = UNSET
+        else:
+            raw_headers = self.raw_headers
+
         signature_stripped = self.signature_stripped
 
         text_body: None | str | Unset
@@ -67,6 +75,8 @@ class MessageBody:
             field_dict["htmlBody"] = html_body
         if quoted_history is not UNSET:
             field_dict["quotedHistory"] = quoted_history
+        if raw_headers is not UNSET:
+            field_dict["rawHeaders"] = raw_headers
         if signature_stripped is not UNSET:
             field_dict["signatureStripped"] = signature_stripped
         if text_body is not UNSET:
@@ -105,6 +115,15 @@ class MessageBody:
 
         quoted_history = _parse_quoted_history(d.pop("quotedHistory", UNSET))
 
+        def _parse_raw_headers(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        raw_headers = _parse_raw_headers(d.pop("rawHeaders", UNSET))
+
         signature_stripped = d.pop("signatureStripped", UNSET)
 
         def _parse_text_body(data: object) -> None | str | Unset:
@@ -120,6 +139,7 @@ class MessageBody:
             clean_body=clean_body,
             html_body=html_body,
             quoted_history=quoted_history,
+            raw_headers=raw_headers,
             signature_stripped=signature_stripped,
             text_body=text_body,
         )

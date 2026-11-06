@@ -1,6 +1,7 @@
 """Contains all the data models used in inputs/outputs"""
 
 from .account import Account
+from .account_candidate import AccountCandidate
 from .account_settings import AccountSettings
 from .action_input import ActionInput
 from .add_link_body import AddLinkBody
@@ -31,6 +32,8 @@ from .create_rule_body import CreateRuleBody
 from .create_webhook import CreateWebhook
 from .created_integration_token import CreatedIntegrationToken
 from .cursor_messages_response import CursorMessagesResponse
+from .discovery_request import DiscoveryRequest
+from .discovery_response import DiscoveryResponse
 from .draft_request import DraftRequest
 from .draft_response import DraftResponse
 from .error_response import ErrorResponse
@@ -41,7 +44,10 @@ from .identity import Identity
 from .index_admin_response import IndexAdminResponse
 from .integration_event import IntegrationEvent
 from .integration_token import IntegrationToken
+from .invitation import Invitation
+from .invitation_attendee import InvitationAttendee
 from .label import Label
+from .mail_endpoint import MailEndpoint
 from .message import Message
 from .message_attachment import MessageAttachment
 from .message_authentication_results import MessageAuthenticationResults
@@ -53,6 +59,7 @@ from .outbox_item import OutboxItem
 from .outgoing_attachment import OutgoingAttachment
 from .patch_folder import PatchFolder
 from .patch_message_request import PatchMessageRequest
+from .rsvp_request import RsvpRequest
 from .rule_action_dto import RuleActionDto
 from .rule_condition_dto import RuleConditionDto
 from .rule_dto import RuleDto
@@ -72,6 +79,7 @@ from .webhook_delivery import WebhookDelivery
 
 __all__ = (
     "Account",
+    "AccountCandidate",
     "AccountSettings",
     "ActionInput",
     "AddLinkBody",
@@ -102,6 +110,8 @@ __all__ = (
     "CreateRuleBody",
     "CreateWebhook",
     "CursorMessagesResponse",
+    "DiscoveryRequest",
+    "DiscoveryResponse",
     "DraftRequest",
     "DraftResponse",
     "ErrorResponse",
@@ -112,7 +122,10 @@ __all__ = (
     "IndexAdminResponse",
     "IntegrationEvent",
     "IntegrationToken",
+    "Invitation",
+    "InvitationAttendee",
     "Label",
+    "MailEndpoint",
     "Message",
     "MessageAttachment",
     "MessageAuthenticationResults",
@@ -124,6 +137,7 @@ __all__ = (
     "OutgoingAttachment",
     "PatchFolder",
     "PatchMessageRequest",
+    "RsvpRequest",
     "RuleActionDto",
     "RuleConditionDto",
     "RuleDto",
