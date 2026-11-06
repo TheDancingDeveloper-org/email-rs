@@ -119,6 +119,7 @@ impl Default for NativePreferences {
 #[derive(Clone, Debug, Default)]
 #[allow(dead_code)]
 pub(crate) struct ComposeState {
+    pub(crate) discard_pending: bool,
     pub(crate) open: bool,
     pub(crate) mode: Option<String>,
     pub(crate) account_id: Option<String>,
