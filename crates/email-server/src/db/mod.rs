@@ -498,7 +498,42 @@ fn migrations() -> Vec<Migration> {
             name: "imap_action_queue_uid_validity",
             apply: in_transaction!(run_imap_action_queue_uid_validity_migration),
         },
+        Migration {
+            version: 34,
+            name: "graph_delta_sync",
+            apply: in_transaction!(run_graph_delta_sync_migration),
+        },
     ]
+}
+
+/// Microsoft Graph delta sync state: one deltaLink per folder (NULL after a
+/// 410 until the full resync finishes), a never-reused UID counter, and the
+/// mapping from opaque Graph message ids to the UIDs the sync engine uses.
+async fn run_graph_delta_sync_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TABLE graph_delta_links (
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            folder_id TEXT NOT NULL,
+            delta_link TEXT,
+            next_uid INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (account_id, folder_id)
+        )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE graph_message_map (
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            folder_id TEXT NOT NULL,
+            graph_id TEXT NOT NULL,
+            uid INTEGER NOT NULL,
+            PRIMARY KEY (account_id, folder_id, graph_id),
+            UNIQUE (account_id, folder_id, uid)
+        )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// The UIDVALIDITY the action's UID belonged to when it was queued. NULL for
