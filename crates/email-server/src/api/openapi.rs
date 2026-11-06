@@ -18,6 +18,7 @@ use email_types::{
     UpdateLabelBody, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 
+use super::discovery::{DiscoveryRequest, DiscoveryResponse};
 use super::integration_tokens::{
     CreateIntegrationToken, CreatedIntegrationToken, IntegrationToken,
 };
@@ -141,6 +142,20 @@ fn doc_list_accounts() {}
     responses((status = 200, body = Account), (status = 401, body = ErrorResponse))
 )]
 fn doc_create_account() {}
+
+#[utoipa::path(
+    post,
+    path = "/accounts/discover",
+    security(("bearerAuth" = ["mail.accounts.connect"])),
+    request_body = DiscoveryRequest,
+    responses(
+        (status = 200, body = DiscoveryResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse)
+    )
+)]
+fn doc_discover_account() {}
 
 #[utoipa::path(
     patch,
@@ -551,6 +566,7 @@ fn doc_events() {}
         doc_revoke_integration_token,
         doc_list_accounts,
         doc_create_account,
+        doc_discover_account,
         doc_update_account,
         doc_delete_account,
         doc_account_settings,
@@ -632,6 +648,8 @@ fn doc_events() {}
         CreateIntegrationToken,
         CreatedIntegrationToken,
         Account,
+        DiscoveryRequest,
+        DiscoveryResponse,
         CreateAccount,
         UpdateAccount,
         AccountSettings,
