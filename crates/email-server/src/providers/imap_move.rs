@@ -171,6 +171,17 @@ fn copy_uid_from(code: Option<&ResponseCode<'_>>) -> Option<CopyUid> {
     }
 }
 
+/// A transport failure is transient; anything else is the server's answer.
+pub(crate) fn imap_command_error(what: &str, error: async_imap::error::Error) -> AppError {
+    use async_imap::error::Error;
+    match error {
+        Error::Io(_) | Error::ConnectionLost => {
+            AppError::Transient(format!("{what} failed: {error}"))
+        }
+        other => AppError::Imap(format!("{what} failed: {other}")),
+    }
+}
+
 /// Send one tagged command and read until its completion, returning any
 /// `COPYUID` seen. A `NO` or `BAD` completion is an error.
 async fn run_tagged<T>(
@@ -184,14 +195,14 @@ where
     let tag: RequestId = session
         .run_command(command)
         .await
-        .map_err(|e| AppError::Imap(format!("{what} failed: {e}")))?;
+        .map_err(|e| imap_command_error(what, e))?;
     let mut copy_uid = None;
     loop {
         let response = session
             .read_response()
             .await
-            .ok_or_else(|| AppError::Imap(format!("connection lost during {what}")))?
-            .map_err(|e| AppError::Imap(format!("{what} failed: {e}")))?;
+            .ok_or_else(|| AppError::Transient(format!("connection lost during {what}")))?
+            .map_err(|e| AppError::Transient(format!("{what} failed: {e}")))?;
         match response.parsed() {
             Response::Data {
                 status: Status::Ok,

@@ -493,7 +493,23 @@ fn migrations() -> Vec<Migration> {
             name: "imap_action_queue",
             apply: in_transaction!(run_imap_action_queue_migration),
         },
+        Migration {
+            version: 33,
+            name: "imap_action_queue_uid_validity",
+            apply: in_transaction!(run_imap_action_queue_uid_validity_migration),
+        },
     ]
+}
+
+/// The UIDVALIDITY the action's UID belonged to when it was queued. NULL for
+/// rows queued before this migration: those replay without the check.
+async fn run_imap_action_queue_uid_validity_migration(
+    conn: &mut SqliteConnection,
+) -> anyhow::Result<()> {
+    sqlx::query("ALTER TABLE imap_action_queue ADD COLUMN uid_validity INTEGER")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 async fn run_imap_action_queue_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
@@ -1740,6 +1756,47 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     use super::*;
+
+    #[tokio::test]
+    async fn imap_action_queue_uid_validity_migration_keeps_existing_rows() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        run_migrations(&pool).await.unwrap();
+
+        // Put the database back at version 32: a queue without uid_validity.
+        sqlx::query("ALTER TABLE imap_action_queue DROP COLUMN uid_validity")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM schema_migrations WHERE version = 33")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO accounts (id, name, email, provider_type, auth_type) VALUES ('a', 'A', 'a@example.test', 'imap', 'password')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO imap_action_queue (account_id, action, attempts) VALUES ('a', '{\"kind\":\"delete\",\"folder\":\"INBOX\",\"uid\":4}', 2)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_migrations(&pool).await.unwrap();
+
+        let (attempts, uid_validity): (i64, Option<i64>) =
+            sqlx::query_as("SELECT attempts, uid_validity FROM imap_action_queue")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((attempts, uid_validity), (2, None));
+        sqlx::query("INSERT INTO imap_action_queue (account_id, action, uid_validity) VALUES ('a', '{}', 9)")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn logical_identity_is_stable_across_occurrences_and_not_rfc_only() {

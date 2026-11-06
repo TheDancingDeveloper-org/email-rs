@@ -17,6 +17,7 @@ class AccountHealth:
     Attributes:
         account_id (str):
         needs_reauth (bool):
+        offline_queue_depth (int):
         queue_depth (int): Outgoing messages pending or currently sending, including scheduled sends.
         last_error (None | str | Unset): Safe error category, cleared on recovery. Never raw provider diagnostics.
         last_error_at (None | str | Unset):
@@ -25,6 +26,7 @@ class AccountHealth:
 
     account_id: str
     needs_reauth: bool
+    offline_queue_depth: int
     queue_depth: int
     last_error: None | str | Unset = UNSET
     last_error_at: None | str | Unset = UNSET
@@ -35,6 +37,8 @@ class AccountHealth:
         account_id = self.account_id
 
         needs_reauth = self.needs_reauth
+
+        offline_queue_depth = self.offline_queue_depth
 
         queue_depth = self.queue_depth
 
@@ -62,6 +66,7 @@ class AccountHealth:
             {
                 "accountId": account_id,
                 "needsReauth": needs_reauth,
+                "offlineQueueDepth": offline_queue_depth,
                 "queueDepth": queue_depth,
             }
         )
@@ -80,6 +85,8 @@ class AccountHealth:
         account_id = d.pop("accountId")
 
         needs_reauth = d.pop("needsReauth")
+
+        offline_queue_depth = d.pop("offlineQueueDepth")
 
         queue_depth = d.pop("queueDepth")
 
@@ -113,6 +120,7 @@ class AccountHealth:
         account_health = cls(
             account_id=account_id,
             needs_reauth=needs_reauth,
+            offline_queue_depth=offline_queue_depth,
             queue_depth=queue_depth,
             last_error=last_error,
             last_error_at=last_error_at,
