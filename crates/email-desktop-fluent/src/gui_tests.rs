@@ -28,6 +28,56 @@ use super::*;
 use email_types::{Account, Folder, FullMessage, Message};
 use fluent_test_utils::{open_fluent_test_window, TestAppContext};
 
+#[gpui::test]
+fn discard_requires_confirmation_and_cancel_preserves_content(cx: &mut TestAppContext) {
+    let state = cx.new(|_| NativeAppState {
+        compose: ComposeState {
+            open: true,
+            body: "Unsent work".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    cx.update(|app| discard_compose(&state, app));
+    state.update(cx, |state, _| {
+        assert!(state.compose.open);
+        assert!(state.compose.discard_pending);
+        assert_eq!(state.compose.body, "Unsent work");
+    });
+    cx.update(|app| resolve_compose_discard(&state, false, app));
+    state.update(cx, |state, _| {
+        assert!(state.compose.open);
+        assert!(!state.compose.discard_pending);
+        assert_eq!(state.compose.body, "Unsent work");
+    });
+    cx.update(|app| discard_compose(&state, app));
+    cx.update(|app| resolve_compose_discard(&state, true, app));
+    state.update(cx, |state, _| {
+        assert!(!state.compose.open);
+        assert!(state.compose.body.is_empty());
+    });
+}
+
+#[gpui::test]
+fn discard_does_not_reset_an_in_flight_send(cx: &mut TestAppContext) {
+    let state = cx.new(|_| NativeAppState {
+        compose: ComposeState {
+            open: true,
+            sending: true,
+            body: "Sending".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    cx.update(|app| discard_compose(&state, app));
+    cx.update(|app| resolve_compose_discard(&state, true, app));
+    state.update(cx, |state, _| {
+        assert!(state.compose.open);
+        assert!(!state.compose.discard_pending);
+        assert_eq!(state.compose.body, "Sending");
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Shared test data builders
 // ---------------------------------------------------------------------------
