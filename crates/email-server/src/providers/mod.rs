@@ -151,6 +151,9 @@ pub trait MailProvider: Send + Sync {
     async fn commit_pending_sync(&self, _folder: &str) -> Result<()> {
         Ok(())
     }
+    async fn discard_pending_sync(&self, _folder: &str) -> Result<()> {
+        Ok(())
+    }
     /// Fetch metadata for an explicit set of UIDs. Providers may override this
     /// with one UID FETCH; the default remains correct for contract/test providers.
     async fn fetch_messages_by_uid(&self, folder: &str, uids: &[u32]) -> Result<Vec<Message>> {
