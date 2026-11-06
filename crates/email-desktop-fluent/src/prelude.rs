@@ -11,6 +11,8 @@ pub(crate) use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 pub(crate) use std::thread;
 pub(crate) use std::time::{Duration, Instant};
 
+pub(crate) use base64::Engine as _;
+
 pub(crate) use anyhow::{anyhow, Context as _, Result};
 pub(crate) use chrono::{
     Datelike as _, Duration as ChronoDuration, Local, NaiveDate, TimeZone as _, Timelike as _, Utc,
@@ -21,9 +23,10 @@ pub(crate) use email_types::{
     Account, AccountSettings, ActionInput, AuthenticationResultStatus, BulkAction, BulkRequest,
     CalendarEvent, CalendarSearchResult, CalendarSuggestion, Condition, ConditionField,
     ConditionGroup, ConditionInput, ConditionOperator, Contact, CreateAccount, CreateWebhook,
-    EventLink, Folder, FullMessage, Identity, Label, MatchMode, Message, MessageAttachment,
-    MessageBody, MessageSuggestion, PatchFolder, PatchMessageRequest, RuleDto, SendRequest,
-    SendResponse, SnoozeRequest, SyncEvent, UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
+    DraftRequest, DraftResponse, EventLink, Folder, FullMessage, Identity, Label, MatchMode,
+    Message, MessageAttachment, MessageBody, MessageSuggestion, OutgoingAttachment, PatchFolder,
+    PatchMessageRequest, RuleDto, SendRequest, SendResponse, SnoozeRequest, SyncEvent,
+    UpdateAccount, UpdateRuleBody, UpdateWebhook, Webhook,
 };
 pub(crate) use fluent_app::{FluentApp, TitleBar, WindowTitle};
 pub(crate) use fluent_core::{AsyncResource, ResourceRequest, Theme, ThemeProvider as _};
