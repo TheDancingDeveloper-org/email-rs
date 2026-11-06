@@ -1044,7 +1044,7 @@ pub(crate) fn token_input_values(input: &Entity<TokenInput>, app_cx: &App) -> Ve
 
 pub(crate) fn reset_compose_state(state: &mut NativeAppState, notice: Option<String>) {
     let revision = state.compose.revision.saturating_add(1);
-    let session_generation = state.compose.session_generation;
+    let session_generation = state.compose.session_generation.saturating_add(1);
     state.compose = ComposeState {
         revision,
         session_generation,

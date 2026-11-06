@@ -533,6 +533,7 @@ pub(crate) fn apply_account_delete_reload(
     let compose = if state.compose.account_id.as_deref() == Some(deleted_account_id) {
         ComposeState {
             revision: state.compose.revision.saturating_add(1),
+            session_generation: state.compose.session_generation.saturating_add(1),
             ..ComposeState::default()
         }
     } else {
