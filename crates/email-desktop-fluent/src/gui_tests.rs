@@ -40,6 +40,8 @@ fn test_account(id: &str) -> Account {
         provider_type: "generic_imap".to_string(),
         auth_type: "basic".to_string(),
         created_at: "2026-05-28T00:00:00Z".to_string(),
+        needs_reauth: false,
+        reauth_reason: None,
     }
 }
 

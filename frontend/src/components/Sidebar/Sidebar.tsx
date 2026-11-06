@@ -3,6 +3,7 @@ import { api, reportApiError } from '../../api/client';
 import styles from './Sidebar.module.css';
 import { useAppStore } from '../../store';
 import { useApi, useSyncEvents } from '../../hooks/useApi';
+import { reauthorizePath } from '../../utils/reauth';
 import { AddAccountModal } from '../AccountSetup/AddAccountModal';
 import { AdvancedSearchModal } from '../AdvancedSearch/AdvancedSearchModal';
 import { useContextMenu } from '../ContextMenu/ContextMenu';
@@ -394,7 +395,25 @@ export function Sidebar({ onAccountAdded }: SidebarProps) {
     }
   };
 
-  const { data: accounts } = useApi<Account[]>('/api/v1/accounts');
+  const { data: accounts, refetch: refetchAccounts } = useApi<Account[]>('/api/v1/accounts');
+  const reauthAccounts = (accounts ?? []).filter((account) => account.needsReauth);
+  const [reauthError, setReauthError] = useState<string | null>(null);
+
+  const reconnect = async (account: Account) => {
+    const path = reauthorizePath(account);
+    if (!path) return;
+    setReauthError(null);
+    try {
+      const data = await api.get<{ url?: string; error?: string }>(path, { silent: true });
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        setReauthError(data.error ?? 'OAuth not available');
+      }
+    } catch (e) {
+      setReauthError(e instanceof Error ? e.message : 'Network error');
+    }
+  };
   const { accountFolders, allFolderData, refetchAll } = useAllAccountFolders(accounts);
 
   // Fetch labels for the first account (labels are per-account; use first account for the sidebar).
@@ -408,7 +427,7 @@ export function Sidebar({ onAccountAdded }: SidebarProps) {
     refetchAll();
   }, [refetchAll]);
 
-  const syncProgress = useSyncEvents(handleSync);
+  const syncProgress = useSyncEvents(handleSync, refetchAccounts);
 
   // Merge all fetched folders into the store so MessageList can look up names.
   // Depend on the individual data-slot references so this only fires when a
@@ -443,6 +462,20 @@ export function Sidebar({ onAccountAdded }: SidebarProps) {
         <ComposeIcon />
         Compose
       </button>
+
+      {reauthAccounts.map((account) => (
+        <div key={account.id} className={styles.reauthStrip} role="alert">
+          <span className={styles.reauthText}>
+            {account.email} needs to be reconnected. Sync is paused.
+          </span>
+          {reauthorizePath(account) && (
+            <button className={styles.reauthBtn} type="button" onClick={() => void reconnect(account)}>
+              Reconnect
+            </button>
+          )}
+        </div>
+      ))}
+      {reauthError && <div className={styles.reauthStrip} role="alert">{reauthError}</div>}
 
       {syncProgress && (
         <div className={styles.syncStrip}>

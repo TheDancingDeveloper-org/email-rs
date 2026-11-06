@@ -114,7 +114,11 @@ pub(crate) fn unread_status_text(unread: i64) -> String {
 pub(crate) fn sync_update_requests_refresh(update: &NativeSyncUpdate) -> bool {
     matches!(
         update,
-        NativeSyncUpdate::Event(SyncEvent::SyncComplete { .. })
+        NativeSyncUpdate::Event(
+            SyncEvent::SyncComplete { .. }
+                | SyncEvent::AccountNeedsReauth { .. }
+                | SyncEvent::AccountReauthed { .. }
+        )
     )
 }
 
@@ -170,6 +174,23 @@ pub(crate) fn apply_sync_update(status: &mut NativeSyncStatus, update: NativeSyn
             status.done = status.total.max(status.done);
             status.last_error = None;
             status.last_message = Some("Sync complete".to_string());
+            status.completed_at = Some(Instant::now());
+        }
+        NativeSyncUpdate::Event(SyncEvent::AccountNeedsReauth { account_id, .. }) => {
+            status.connected = true;
+            status.syncing = false;
+            status.account_id = Some(account_id);
+            status.folder = None;
+            status.last_error = Some(
+                "Account access was revoked. Reconnect the account to resume sync.".to_string(),
+            );
+            status.completed_at = None;
+        }
+        NativeSyncUpdate::Event(SyncEvent::AccountReauthed { account_id }) => {
+            status.connected = true;
+            status.account_id = Some(account_id);
+            status.last_error = None;
+            status.last_message = Some("Account reconnected".to_string());
             status.completed_at = Some(Instant::now());
         }
         NativeSyncUpdate::Error(message) => {

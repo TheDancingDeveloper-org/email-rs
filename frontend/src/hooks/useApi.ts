@@ -1,5 +1,6 @@
 import { api } from '../api/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { isAccountStatusEvent } from '../utils/reauth';
 
 export interface SyncProgress {
   syncing: boolean;
@@ -8,7 +9,10 @@ export interface SyncProgress {
   folder: string;
 }
 
-export function useSyncEvents(onSyncComplete: () => void): SyncProgress | null {
+export function useSyncEvents(
+  onSyncComplete: () => void,
+  onAccountStatus?: () => void,
+): SyncProgress | null {
   const [progress, setProgress] = useState<SyncProgress | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -33,6 +37,9 @@ export function useSyncEvents(onSyncComplete: () => void): SyncProgress | null {
           setProgress(p => p ? { ...p, syncing: false } : null);
           onSyncComplete();
           timerRef.current = setTimeout(() => setProgress(null), 3000);
+        } else if (isAccountStatusEvent(data.type)) {
+          setProgress(null);
+          onAccountStatus?.();
         }
       } catch {
         onSyncComplete();
@@ -43,7 +50,7 @@ export function useSyncEvents(onSyncComplete: () => void): SyncProgress | null {
       es.close();
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [onSyncComplete]);
+  }, [onSyncComplete, onAccountStatus]);
 
   return progress;
 }

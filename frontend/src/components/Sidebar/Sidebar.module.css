@@ -529,3 +529,32 @@
   background: var(--folder-hover);
   color: var(--text);
 }
+
+.reauthStrip {
+  margin: 0 12px 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--danger, #c0392b);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.reauthText {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.reauthBtn {
+  flex-shrink: 0;
+  font: inherit;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
