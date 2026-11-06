@@ -460,6 +460,7 @@ pub(crate) fn apply_loaded_message_collection(
     state.search_event_results = loaded.calendar_events;
     retain_existing_message_selection(state);
     retain_existing_thread_expansions(state);
+    retain_existing_stack_expansions(state);
     state.selected_message = loaded
         .selected_message
         .or_else(|| state.messages.first().map(|message| message.id.clone()));
