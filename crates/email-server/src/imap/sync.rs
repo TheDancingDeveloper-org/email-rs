@@ -931,6 +931,8 @@ async fn sync_folder(
 
     tx.commit().await?;
 
+    provider.commit_pending_sync(&db_folder.full_path).await?;
+
     // Load the rules and their conditions/actions once per folder sync, then
     // reuse that snapshot for every newly inserted message.
     if !new_msgs_for_rules.is_empty() {
