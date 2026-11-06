@@ -221,6 +221,7 @@ const KNOWN_EVENTS: &[&str] = &[
     "message.created",
     "message.updated",
     "message.moved",
+    "message.copied",
     "message.deleted",
     "sync.completed",
     "new_message",

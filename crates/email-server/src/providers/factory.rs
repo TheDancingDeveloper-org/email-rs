@@ -314,6 +314,10 @@ impl MailProvider for TestMailProvider {
         })
     }
 
+    async fn copy_message(&self, src: &str, uid: u32, dest: &str) -> Result<super::MovedMessage> {
+        self.move_message(src, uid, dest).await
+    }
+
     async fn set_flagged(&self, _folder: &str, _uid: u32, _flagged: bool) -> Result<()> {
         self.mutation()
     }

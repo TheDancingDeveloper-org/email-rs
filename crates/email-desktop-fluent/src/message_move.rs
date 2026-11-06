@@ -102,6 +102,22 @@ pub(crate) fn start_folder_drop(
     folder_id: &str,
     app_cx: &mut App,
 ) -> bool {
+    start_folder_drop_operation(
+        state_entity,
+        payload,
+        folder_id,
+        fluent_layout::DragOperation::Move,
+        app_cx,
+    )
+}
+
+pub(crate) fn start_folder_drop_operation(
+    state_entity: &Entity<NativeAppState>,
+    payload: &MessageDragPayload,
+    folder_id: &str,
+    operation: fluent_layout::DragOperation,
+    app_cx: &mut App,
+) -> bool {
     let mut source_folders = BTreeMap::new();
     let accepted = state_entity.update(app_cx, |state, cx| {
         let locations = message_location_index(state);
@@ -130,10 +146,17 @@ pub(crate) fn start_folder_drop(
     }
     start_message_mutation_and_refresh(
         state_entity,
-        NativeMessageMutation::MoveToFolder {
-            message_ids: payload.message_ids.clone(),
-            folder_id: folder_id.to_string(),
-            source_folders,
+        if operation == fluent_layout::DragOperation::Copy {
+            NativeMessageMutation::CopyToFolder {
+                message_ids: payload.message_ids.clone(),
+                folder_id: folder_id.to_string(),
+            }
+        } else {
+            NativeMessageMutation::MoveToFolder {
+                message_ids: payload.message_ids.clone(),
+                folder_id: folder_id.to_string(),
+                source_folders,
+            }
         },
         app_cx,
     );
@@ -466,6 +489,37 @@ mod tests {
             &folder("projects", "account"),
             &locations
         ));
+    }
+
+    #[gpui::test]
+    fn modifier_folder_drop_queues_copy_not_move(cx: &mut gpui::TestAppContext) {
+        fluent_test_utils::init_fluent_test(cx);
+        let entity = cx.new(|_| folder_state(&["m1", "m3"]));
+        let accepted = cx.update(|app| {
+            start_folder_drop_operation(
+                &entity,
+                &payload(&["m1", "m3"]),
+                "projects",
+                fluent_layout::DragOperation::from_modifiers(gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                }),
+                app,
+            )
+        });
+        assert!(accepted);
+        entity.update(cx, |state, _| {
+            assert!(state.selected_message_ids.is_empty());
+            assert_eq!(
+                state.pending_undo.as_ref().map(|p| p.mutation.clone()),
+                Some(NativeMessageMutation::CopyToFolder {
+                    message_ids: vec!["m1".to_string(), "m3".to_string()],
+                    folder_id: "projects".to_string(),
+                })
+            );
+        });
+        cx.update(|app| cancel_pending_undo(&entity, app));
+        entity.update(cx, |state, _| assert!(state.pending_undo.is_none()));
     }
 
     #[gpui::test]
