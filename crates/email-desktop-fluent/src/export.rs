@@ -3,6 +3,18 @@ use crate::prelude::*;
 use crate::*;
 
 pub(crate) fn message_source(message: &FullMessage) -> String {
+    if let Some(raw_headers) = message
+        .body
+        .as_ref()
+        .and_then(|body| body.raw_headers.as_deref())
+    {
+        let mut source = raw_headers.replace("\r\n", "\n").replace('\r', "\n");
+        source = source.trim_end_matches('\n').to_string();
+        source.push_str("\r\n\r\n");
+        source.push_str(&message_body_text(message).replace('\n', "\r\n"));
+        return source;
+    }
+
     let mut source = String::new();
     header(
         &mut source,
@@ -85,26 +97,17 @@ pub(crate) fn write_eml(message: &FullMessage, path: &Path) -> Result<()> {
         .with_context(|| format!("write {}", path.display()))
 }
 
-pub(crate) fn open_source(message: &FullMessage) -> Result<PathBuf> {
-    let path = unique_file("email-rs", "eml", &std::env::temp_dir())?;
+pub(crate) fn save_eml(message: &FullMessage) -> Result<Option<PathBuf>> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Save message")
+        .set_file_name(format!("{}.eml", safe_file_stem(&message.id)))
+        .add_filter("Email message", &["eml"])
+        .save_file()
+    else {
+        return Ok(None);
+    };
     write_eml(message, &path)?;
-    open_path_with_system(&path)?;
-    Ok(path)
-}
-
-pub(crate) fn save_eml(message: &FullMessage) -> Result<PathBuf> {
-    let directory = std::env::var_os("EMAIL_RS_DOWNLOADS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join("Downloads"))
-                .unwrap_or_else(std::env::temp_dir)
-        });
-    std::fs::create_dir_all(&directory)
-        .with_context(|| format!("create export directory {}", directory.display()))?;
-    let path = unique_file(&safe_file_stem(&message.id), "eml", &directory)?;
-    write_eml(message, &path)?;
-    Ok(path)
+    Ok(Some(path))
 }
 
 fn safe_file_stem(id: &str) -> String {
@@ -141,16 +144,38 @@ pub(crate) fn print_message(message: &FullMessage) -> Result<PathBuf> {
         "html",
         &std::env::temp_dir(),
     )?;
-    let html = message_body_text(message)
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
+    let html = message
+        .body
+        .as_ref()
+        .and_then(|body| body.html_body.as_deref())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            message_body_text(message)
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\n', "<br>")
+        });
     std::fs::write(
         &path,
-        format!("<!doctype html><meta charset=\"utf-8\"><pre>{html}</pre>"),
+        format!("<!doctype html><meta charset=\"utf-8\"><main>{html}</main>"),
     )?;
     open_path_with_system(&path)?;
     Ok(path)
+}
+
+pub(crate) fn show_source_dialog(message: &FullMessage, cx: &mut App) {
+    let body = div()
+        .id("message-source")
+        .font_family("monospace")
+        .text_size(px(12.0))
+        .max_h(px(560.0))
+        .overflow_y_scroll()
+        .child(message_source(message));
+    Dialog::new("Message source")
+        .body(body)
+        .action(DialogAction::new("Close", |_, _, cx| ModalStack::pop(cx)))
+        .show(ModalSize::Fraction(0.85, 0.8), cx);
 }
 
 #[cfg(test)]
