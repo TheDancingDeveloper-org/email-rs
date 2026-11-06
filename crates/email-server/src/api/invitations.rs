@@ -606,6 +606,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accept_does_not_update_synced_event_in_another_calendar() {
+        let (pool, invitation) = setup().await;
+        sqlx::query(
+            "INSERT INTO calendar_events (id, account_id, calendar_id, provider_event_id, title, start_at, end_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("synced")
+        .bind("acc")
+        .bind("google")
+        .bind(&invitation.uid)
+        .bind("Synced event")
+        .bind(&invitation.start_at)
+        .bind(&invitation.end_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let invitation_id =
+            apply_to_calendar(&pool, "acc", &invitation, "ACCEPTED", "me@example.com")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_ne!(invitation_id, "synced");
+        let (title, calendar_id): (String, String) =
+            sqlx::query_as("SELECT title, calendar_id FROM calendar_events WHERE id = 'synced'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(title, "Synced event");
+        assert_eq!(calendar_id, "google");
+    }
+
+    #[tokio::test]
+    async fn decline_does_not_delete_synced_event_in_another_calendar() {
+        let (pool, invitation) = setup().await;
+        sqlx::query(
+            "INSERT INTO calendar_events (id, account_id, calendar_id, provider_event_id, title, start_at, end_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("synced")
+        .bind("acc")
+        .bind("google")
+        .bind(&invitation.uid)
+        .bind("Synced event")
+        .bind(&invitation.start_at)
+        .bind(&invitation.end_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            apply_to_calendar(&pool, "acc", &invitation, "DECLINED", "me@example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM calendar_events WHERE id = 'synced'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
     async fn unsafe_uid_is_refused_before_touching_the_calendar() {
         let (pool, mut invitation) = setup().await;
         invitation.uid = "../../etc/passwd".into();
