@@ -12,6 +12,7 @@ pub mod maintenance;
 pub mod metrics;
 pub mod outbox;
 pub mod providers;
+pub mod queue;
 pub mod rules;
 pub mod sanitize;
 pub mod search_index;

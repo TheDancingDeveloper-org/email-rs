@@ -488,7 +488,31 @@ fn migrations() -> Vec<Migration> {
             name: "calendar_provider_scope",
             apply: in_transaction!(run_calendar_provider_scope_migration),
         },
+        Migration {
+            version: 32,
+            name: "imap_action_queue",
+            apply: in_transaction!(run_imap_action_queue_migration),
+        },
     ]
+}
+
+async fn run_imap_action_queue_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS imap_action_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            action TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS imap_action_queue_account_order ON imap_action_queue(account_id, id)")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 async fn run_account_sync_health_migration(conn: &mut SqliteConnection) -> anyhow::Result<()> {
