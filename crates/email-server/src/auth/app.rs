@@ -595,6 +595,9 @@ fn required_integration_scope(method: &Method, path: &str) -> Option<&'static st
         // also invalidates any sign-in it started.
         return Some("mail.accounts.connect");
     }
+    if *method == Method::POST && path == "/accounts/discover" {
+        return Some("mail.accounts.connect");
+    }
     if path.starts_with("/accounts") {
         return (*method == Method::GET).then_some("mail.accounts.read");
     }
@@ -1369,6 +1372,28 @@ mod tests {
         }
         let without = format!("Bearer {}", tokens[0]["token"].as_str().unwrap());
         let with = format!("Bearer {}", tokens[1]["token"].as_str().unwrap());
+
+        for (headers, expected) in [
+            (vec![], StatusCode::UNAUTHORIZED),
+            (
+                vec![("authorization", without.as_str())],
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                vec![("authorization", with.as_str())],
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (status, _, _) = send(
+                crate::api::router(Arc::clone(&state)),
+                Method::POST,
+                "/accounts/discover",
+                Some(serde_json::json!({"email": "invalid"})),
+                &headers,
+            )
+            .await;
+            assert_eq!(status, expected);
+        }
 
         let (status, _, denied) = send(
             crate::api::router(Arc::clone(&state)),
