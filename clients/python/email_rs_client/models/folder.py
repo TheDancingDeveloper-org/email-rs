@@ -22,6 +22,7 @@ class Folder:
         name (str):
         total_count (int):
         unread_count (int):
+        delimiter (None | str | Unset):
         is_subscribed (bool | Unset):
         special_use (None | str | Unset):
         synced_at (None | str | Unset):
@@ -34,6 +35,7 @@ class Folder:
     name: str
     total_count: int
     unread_count: int
+    delimiter: None | str | Unset = UNSET
     is_subscribed: bool | Unset = UNSET
     special_use: None | str | Unset = UNSET
     synced_at: None | str | Unset = UNSET
@@ -53,6 +55,12 @@ class Folder:
         total_count = self.total_count
 
         unread_count = self.unread_count
+
+        delimiter: None | str | Unset
+        if isinstance(self.delimiter, Unset):
+            delimiter = UNSET
+        else:
+            delimiter = self.delimiter
 
         is_subscribed = self.is_subscribed
 
@@ -81,6 +89,8 @@ class Folder:
                 "unreadCount": unread_count,
             }
         )
+        if delimiter is not UNSET:
+            field_dict["delimiter"] = delimiter
         if is_subscribed is not UNSET:
             field_dict["isSubscribed"] = is_subscribed
         if special_use is not UNSET:
@@ -106,6 +116,15 @@ class Folder:
         total_count = d.pop("totalCount")
 
         unread_count = d.pop("unreadCount")
+
+        def _parse_delimiter(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        delimiter = _parse_delimiter(d.pop("delimiter", UNSET))
 
         is_subscribed = d.pop("isSubscribed", UNSET)
 
@@ -135,6 +154,7 @@ class Folder:
             name=name,
             total_count=total_count,
             unread_count=unread_count,
+            delimiter=delimiter,
             is_subscribed=is_subscribed,
             special_use=special_use,
             synced_at=synced_at,
