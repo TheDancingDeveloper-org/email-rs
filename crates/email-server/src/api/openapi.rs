@@ -16,7 +16,7 @@ use email_types::{
     MessageAuthenticationResults, MoveMessageRequest, MoveMessageResponse, OutboxItem, PatchFolder,
     PatchMessageRequest, RenameFolder, RuleDto, SearchResponse, SendRequest, SendResponse,
     SnoozeRequest, StatusResponse, SuggestResponse, UpdateAccount, UpdateIdentity, UpdateLabelBody,
-    UpdateRuleBody, UpdateWebhook, Webhook,
+    UpdateRuleBody, UpdateWebhook, VacationSettings, VacationStatus, Webhook,
 };
 
 use super::discovery::{DiscoveryRequest, DiscoveryResponse};
@@ -460,6 +460,59 @@ fn doc_copy_message() {}
 
 #[utoipa::path(
     post,
+    path = "/messages/{id}/spam",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path)),
+    responses(
+        (status = 200, body = MoveMessageResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 501, body = ErrorResponse)
+    )
+)]
+fn doc_report_spam() {}
+
+#[utoipa::path(
+    post,
+    path = "/messages/{id}/not-spam",
+    security(("bearerAuth" = ["mail.modify"])),
+    params(("id" = String, Path)),
+    responses(
+        (status = 200, body = MoveMessageResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 501, body = ErrorResponse)
+    )
+)]
+fn doc_report_not_spam() {}
+
+#[utoipa::path(
+    get,
+    path = "/accounts/{id}/vacation",
+    security(("bearerAuth" = ["mail.accounts.read"])),
+    params(("id" = String, Path)),
+    responses((status = 200, body = VacationStatus), (status = 404, body = ErrorResponse))
+)]
+fn doc_get_vacation() {}
+
+#[utoipa::path(
+    put,
+    path = "/accounts/{id}/vacation",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path)),
+    request_body = VacationSettings,
+    responses(
+        (status = 200, body = VacationStatus),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 501, body = ErrorResponse),
+        (status = 502, body = ErrorResponse)
+    )
+)]
+fn doc_put_vacation() {}
+
+#[utoipa::path(
+    post,
     path = "/messages/bulk",
     security(("bearerAuth" = ["mail.modify"])),
     request_body = BulkRequest,
@@ -719,6 +772,10 @@ fn doc_events() {}
         doc_archive_message,
         doc_move_message,
         doc_copy_message,
+        doc_report_spam,
+        doc_report_not_spam,
+        doc_get_vacation,
+        doc_put_vacation,
         doc_bulk_messages,
         doc_list_attachments,
         doc_download_attachment,
@@ -813,6 +870,8 @@ fn doc_events() {}
         BulkRequest,
         BulkResponse,
         MoveMessageRequest,
+        VacationSettings,
+        VacationStatus,
         MoveMessageResponse,
         SendRequest,
         SendResponse,

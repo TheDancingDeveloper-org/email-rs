@@ -309,6 +309,7 @@ pub mod factory;
 pub mod generic_imap;
 pub mod gmail;
 pub mod gmail_history;
+pub mod gmail_settings;
 pub mod google_calendar;
 pub mod graph_delta;
 pub(crate) mod imap_move;

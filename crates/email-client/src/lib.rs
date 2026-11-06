@@ -8,6 +8,7 @@ use email_types::{
     MoveMessageRequest, MoveMessageResponse, OutboxItem, PatchFolder, PatchMessageRequest,
     RenameFolder, RuleDto, SearchResponse, SendRequest, SendResponse, SnoozeRequest,
     StatusResponse, SuggestResponse, SyncEvent, UpdateAccount, UpdateLabelBody, UpdateWebhook,
+    VacationSettings, VacationStatus,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -506,6 +507,38 @@ impl EmailClient {
             &MoveMessageRequest {
                 folder_id: folder_id.to_string(),
             },
+        )
+        .await
+    }
+
+    /// Report a message as spam: moves it to the account's Junk/Spam folder.
+    pub async fn report_spam(&self, message_id: &str) -> Result<MoveMessageResponse> {
+        self.request(Method::POST, &format!("messages/{message_id}/spam"))
+            .await
+    }
+
+    /// Move a message out of Junk/Spam back to the inbox.
+    pub async fn report_not_spam(&self, message_id: &str) -> Result<MoveMessageResponse> {
+        self.request(Method::POST, &format!("messages/{message_id}/not-spam"))
+            .await
+    }
+
+    pub async fn get_vacation(&self, account_id: &str) -> Result<VacationStatus> {
+        self.get(&format!("accounts/{account_id}/vacation"), &[])
+            .await
+    }
+
+    /// Apply the vacation reply server-side; the server answers 501 for
+    /// providers that cannot.
+    pub async fn set_vacation(
+        &self,
+        account_id: &str,
+        settings: &VacationSettings,
+    ) -> Result<VacationStatus> {
+        self.json(
+            Method::PUT,
+            &format!("accounts/{account_id}/vacation"),
+            settings,
         )
         .await
     }
@@ -1192,6 +1225,56 @@ mod tests {
             "{request}"
         );
         assert!(request.contains("{\"folderId\":\"f9\"}"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn spam_and_vacation_calls_use_their_routes() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for body in [
+                "{\"status\":\"moved\",\"messageId\":\"m2\"}",
+                "{\"status\":\"moved\"}",
+                "{\"supported\":true,\"settings\":{\"enabled\":true,\"subject\":\"s\",\"body\":\"b\"}}",
+                "{\"supported\":true,\"settings\":{\"enabled\":false,\"subject\":\"\",\"body\":\"\"}}",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        let client = EmailClient::new(&base).unwrap();
+        assert_eq!(
+            client
+                .report_spam("m1")
+                .await
+                .unwrap()
+                .message_id
+                .as_deref(),
+            Some("m2")
+        );
+        assert_eq!(client.report_not_spam("m2").await.unwrap().status, "moved");
+        assert!(client.get_vacation("a1").await.unwrap().settings.enabled);
+        let status = client
+            .set_vacation("a1", &VacationSettings::default())
+            .await
+            .unwrap();
+        assert!(!status.settings.enabled);
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("POST /api/v1/messages/m1/spam "));
+        assert!(requests[1].starts_with("POST /api/v1/messages/m2/not-spam "));
+        assert!(requests[2].starts_with("GET /api/v1/accounts/a1/vacation "));
+        assert!(requests[3].starts_with("PUT /api/v1/accounts/a1/vacation "));
+        assert!(requests[3].contains("\"enabled\":false"), "{}", requests[3]);
     }
 
     #[tokio::test]
