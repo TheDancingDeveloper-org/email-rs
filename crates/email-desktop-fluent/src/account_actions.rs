@@ -234,6 +234,82 @@ pub(crate) fn start_account_setup_create(
         .detach();
 }
 
+pub(crate) fn start_account_discovery(
+    state_entity: &Entity<NativeAppState>,
+    modal_entity: &Entity<AccountSetupModal>,
+    app_cx: &mut App,
+) {
+    let email = modal_entity
+        .read(app_cx)
+        .email_input
+        .read(app_cx)
+        .text()
+        .trim()
+        .to_string();
+    if email.is_empty() {
+        modal_entity.update(app_cx, |modal, cx| {
+            modal.set_status(Some(("Enter an email address first.".into(), false)), cx);
+        });
+        return;
+    }
+    modal_entity.update(app_cx, |modal, cx| {
+        modal.discovering = true;
+        modal.status = None;
+        cx.notify();
+    });
+    let base_url = state_entity.read(app_cx).api_base_url.clone();
+    let task = app_cx.background_executor().spawn(async move {
+        let client = EmailClient::new(&base_url)?;
+        client
+            .discover_account(&email)
+            .await
+            .map_err(anyhow::Error::from)
+    });
+    let modal_entity = modal_entity.clone();
+    app_cx
+        .spawn(move |async_cx: &mut gpui::AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = task.await;
+                modal_entity.update(&mut async_cx, |modal, cx| {
+                    modal.discovering = false;
+                    match result {
+                        Ok(response) => {
+                            if let Some(candidate) = response.candidates.first() {
+                                modal.imap_host_input.update(cx, |input, cx| {
+                                    input.set_value(&candidate.imap.host, cx)
+                                });
+                                modal.imap_port_input.update(cx, |input, cx| {
+                                    input.set_value(candidate.imap.port.to_string(), cx)
+                                });
+                                modal.smtp_host_input.update(cx, |input, cx| {
+                                    input.set_value(&candidate.smtp.host, cx)
+                                });
+                                modal.smtp_port_input.update(cx, |input, cx| {
+                                    input.set_value(candidate.smtp.port.to_string(), cx)
+                                });
+                                modal.status = Some((
+                                    format!("Found settings via {}.", candidate.source),
+                                    true,
+                                ));
+                            } else {
+                                modal.status = Some((
+                                    "No mail settings were found; enter them manually.".into(),
+                                    false,
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            modal.status = Some((format!("Discovery failed: {error}"), false))
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+}
+
 pub(crate) fn start_account_setup_refresh(
     state_entity: &Entity<NativeAppState>,
     modal_entity: &Entity<AccountSetupModal>,
