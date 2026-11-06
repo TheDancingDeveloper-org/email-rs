@@ -198,6 +198,34 @@ impl CalendarService {
         Ok(id)
     }
 
+    /// Look up a locally stored event by its iCalendar UID (stored as the
+    /// provider event id of invitation-created events).
+    pub async fn find_event_by_uid(&self, account_id: &str, uid: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM calendar_events WHERE account_id = ? AND provider_event_id = ?",
+        )
+        .bind(account_id)
+        .bind(uid)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Remove the event stored for an iCalendar UID. Returns whether one existed.
+    pub async fn delete_event_by_uid(&self, account_id: &str, uid: &str) -> Result<bool> {
+        let Some(id) = self.find_event_by_uid(account_id, uid).await? else {
+            return Ok(false);
+        };
+        sqlx::query("DELETE FROM message_calendar_links WHERE event_id = ?")
+            .bind(&id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM calendar_events WHERE id = ?")
+            .bind(&id)
+            .execute(&self.pool)
+            .await?;
+        Ok(true)
+    }
+
     // ── Link management ───────────────────────────────────────────────────────
 
     pub async fn list_event_links(&self, event_id: &str) -> Result<Vec<EventLink>> {
