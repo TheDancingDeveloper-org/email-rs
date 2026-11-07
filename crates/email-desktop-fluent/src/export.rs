@@ -119,7 +119,27 @@ pub(crate) fn default_eml_name(message: &FullMessage) -> String {
     } else {
         safe_file_stem(&message.id)
     };
-    format!("{stem}.eml")
+    format!("{}.eml", avoid_reserved_name(stem))
+}
+
+/// Longest subject-derived stem, in bytes; leaves room for `.eml` well inside
+/// the 255-byte filename limit.
+const MAX_STEM_BYTES: usize = 200;
+
+/// Prefix `_` to a stem Windows treats as a device name (`CON`, `NUL`,
+/// `COM1`..), compared case-insensitively and ignoring trailing dots/spaces.
+fn avoid_reserved_name(stem: String) -> String {
+    let base = stem.trim_end_matches(['.', ' ']).to_ascii_uppercase();
+    let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|p| {
+            base.strip_prefix(p)
+                .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+        });
+    if reserved {
+        format!("_{stem}")
+    } else {
+        stem
+    }
 }
 
 /// Keep letters and digits (Unicode included); collapse every other run of
@@ -137,9 +157,16 @@ fn subject_file_stem(subject: &str) -> String {
         } else {
             pending_sep = true;
         }
-        if stem.chars().count() >= 80 {
+        if stem.len() >= MAX_STEM_BYTES {
             break;
         }
+    }
+    if stem.len() > MAX_STEM_BYTES {
+        let mut end = MAX_STEM_BYTES;
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        stem.truncate(end);
     }
     stem
 }
@@ -390,9 +417,24 @@ mod tests {
             "Café_menü.eml"
         );
         let long = default_eml_name(&named(Some(&"a".repeat(300))));
-        assert_eq!(long.len(), 80 + ".eml".len());
+        assert_eq!(long.len(), 200 + ".eml".len());
         // No usable subject: fall back to the message id.
         assert_eq!(default_eml_name(&named(None)), "message.eml");
+        assert_eq!(default_eml_name(&named(Some("LPT9."))), "_LPT9.eml");
+        for reserved in ["CON", "nul", "Com1", "prn", "AUX", "lpt9"] {
+            assert_eq!(
+                default_eml_name(&named(Some(reserved))),
+                format!("_{reserved}.eml")
+            );
+        }
+        for ok in ["COM0", "COM10", "CONSOLE", "LPT"] {
+            assert_eq!(default_eml_name(&named(Some(ok))), format!("{ok}.eml"));
+        }
+        let wide = default_eml_name(&named(Some(&"𝐀".repeat(80))));
+        assert!(wide.len() <= 205, "{} bytes", wide.len());
+        assert!(wide.ends_with(".eml") && wide.starts_with('𝐀'));
+        let mixed = default_eml_name(&named(Some(&"aé".repeat(100))));
+        assert!(mixed.len() <= 205);
         assert_eq!(default_eml_name(&named(Some("  ?!  "))), "message.eml");
     }
 
