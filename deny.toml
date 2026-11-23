@@ -1,12 +1,8 @@
 [advisories]
 ignore = [
   { id = "RUSTSEC-2024-0370", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
-  { id = "RUSTSEC-2024-0384", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
   { id = "RUSTSEC-2024-0436", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
-  { id = "RUSTSEC-2025-0052", reason = "Existing unmaintained transitive dependency accepted on 2026-11-02 pending upstream replacement." },
   { id = "RUSTSEC-2025-0057", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
-  { id = "RUSTSEC-2025-0134", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
-  { id = "RUSTSEC-2026-0173", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
   { id = "RUSTSEC-2026-0192", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
   { id = "RUSTSEC-2026-0194", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
   { id = "RUSTSEC-2026-0195", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
@@ -23,7 +19,6 @@ ignore = [
   { id = "RUSTSEC-2026-0382", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
   { id = "RUSTSEC-2026-0385", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
   { id = "RUSTSEC-2026-0386", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
-  { id = "RUSTSEC-2026-0418", reason = "Existing advisory accepted on 2026-11-02 pending dependency graph upgrade." },
 ]
 
 [licenses]
